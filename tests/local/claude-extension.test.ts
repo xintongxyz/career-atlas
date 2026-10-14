@@ -74,6 +74,7 @@ describe("Claude Desktop extension (MCP over stdio)", () => {
       const list = await mcp.request("tools/list");
       expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual(["create_job_draft", "check_job_url"]);
       expect(list.result.tools[0].annotations).toMatchObject({ destructiveHint: false });
+      expect(list.result.tools[0].inputSchema.properties).toHaveProperty("translations");
 
       const before = await mcp.request("tools/call", { name: "check_job_url", arguments: { url: "https://jobs.example.com/contoso/77" } });
       expect(before.result.content[0].text).toMatch(/Already saved in Career Atlas: no/);
@@ -84,6 +85,8 @@ describe("Claude Desktop extension (MCP over stdio)", () => {
           source_url: "https://jobs.example.com/contoso/77",
           job_description: JD,
           notes: "Department not stated in the posting.",
+          original_language: "en",
+          translations: { "zh-CN": { title: "产品分析师", category: "数据分析" }, en: { title: "Product Analyst", category: "Analytics" } },
           fields: {
             company_name: { value: "Contoso Mobility", basis: "posting", evidence: "Product Analyst — Contoso Mobility" },
             title: { value: "Product Analyst", basis: "posting", evidence: "Product Analyst" },
@@ -100,6 +103,7 @@ describe("Claude Desktop extension (MCP over stdio)", () => {
       expect(text).toMatch(new RegExp(`http://127.0.0.1:${port}/drafts/[0-9a-f-]{36}`));
       expect(text).toMatch(/Accepted as stated in the posting: .*salary/);
       expect(text).toMatch(/Marked for the user's review .*company_website.*category/);
+      expect(text).toMatch(/Translations saved for review: (en, zh-CN|zh-CN, en)/);
 
       // A draft exists; no job was created.
       const drafts = (await (await rt.fetch(new Request(`http://127.0.0.1:${port}/api/drafts`, { headers: { host: `127.0.0.1:${port}` } }))).json()) as { items: { origin: string; title: string }[] };

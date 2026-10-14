@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { GitCompare, Plus, X } from "lucide-react";
 import * as React from "react";
 import { Link, useSearchParams } from "react-router";
+import { localizePosting, localizedTitle } from "@/lib/job-i18n";
 import { CompanyAvatar, PriorityBadge, SalaryText, StatusBadge, displayCompany, displayTitle } from "@/components/jobs/badges";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/input";
@@ -67,7 +68,8 @@ export default function ComparePage() {
   const setIds = (next: string[]) => setParams(next.length ? { ids: next.join(",") } : {}, { replace: true });
   const prefs = me?.preferences.comparison;
   const hasPrefs = !!prefs && (prefs.preferred_work_modes.length || prefs.preferred_cities.length || prefs.min_salary != null || prefs.preferred_categories.length || prefs.preferred_employment_types.length);
-  const jobs = q.data?.items ?? [];
+  // Bilingual content: compare in the UI language (AI translations where available, else originals).
+  const jobs = (q.data?.items ?? []).map((j) => ({ ...j, posting: localizePosting(j.posting, lang).posting }));
 
   type RowDef = { key: string; get: (j: JobDetail) => unknown; render: (j: JobDetail) => React.ReactNode; important?: boolean };
   const rows: RowDef[] = [
@@ -220,7 +222,7 @@ export default function ComparePage() {
 }
 
 function AddJobPicker({ exclude, onAdd }: { exclude: string[]; onAdd: (id: string) => void }) {
-  const { t } = useLocaleContext();
+  const { t, lang } = useLocaleContext();
   const list = useQuery({ queryKey: ["jobs", "compare-picker"], queryFn: () => api.get<Paginated<JobListItem>>(`/api/jobs${qs({ page_size: 200, sort: "last_activity_at" })}`) });
   return (
     <Popover>
@@ -235,7 +237,7 @@ function AddJobPicker({ exclude, onAdd }: { exclude: string[]; onAdd: (id: strin
           <option value="">{t("compare.addJob")}</option>
           {list.data?.items.filter((j) => !exclude.includes(j.id)).map((j) => (
             <option key={j.id} value={j.id}>
-              {displayCompany(j.company_name, t)} — {displayTitle(j.title, t)}
+              {displayCompany(j.company_name, t)} — {displayTitle(localizedTitle(j, lang), t)}
             </option>
           ))}
         </NativeSelect>

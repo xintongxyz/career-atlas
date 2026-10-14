@@ -14,6 +14,7 @@ import { findOrCreateCompany } from "./companies";
 import { findDuplicates, insertJob } from "./jobs";
 import { currentFieldValue, fieldsToColumns, sameValue } from "./mappers";
 import { eventInsert, loadSavedJob, runBatch } from "./pipeline";
+import { pruneTranslations } from "./translations";
 
 const { jobExtractionJobs, jobPostings, jobSourceSnapshots, extractedFieldEvidence, userFieldOverrides, savedJobs, companies, contacts } = schema;
 
@@ -300,6 +301,10 @@ export async function applyExtraction(db: Db, userId: string, id: string, body: 
 
   const cols = fieldsToColumns(fields);
   const anyReview = [...reviewLater].some((k) => k in fields);
+  // Translations of text that this extraction changes would be stale.
+  const changedByExtraction = Object.keys(fields).filter((k) => k !== "company_name" && k !== "company_website" && !sameValue(currentFieldValue(posting, k as ExtractableField, {} as never), (fields as Record<string, unknown>)[k]));
+  const pruned = pruneTranslations(posting.translations, changedByExtraction);
+  if (pruned !== undefined) (cols as Record<string, unknown>).translations = pruned;
   items.push(
     db
       .update(jobPostings)

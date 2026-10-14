@@ -424,6 +424,10 @@ export const aiImportSchema = z
     source_url: httpUrl.nullable().optional(),
     job_description: z.string().max(LIMITS.jdMaxChars).nullable().optional(),
     fields: z.record(z.string().max(60), aiImportField).default({}),
+    /** Language of the original posting, e.g. "en" or "zh-CN". */
+    original_language: z.string().max(20).nullable().optional(),
+    /** AI translations of descriptive fields: {"en": {...}, "zh-CN": {...}} (display only, never evidence). */
+    translations: z.record(z.string().max(20), z.record(z.string().max(60), z.unknown())).nullable().optional(),
     notes: z.string().max(4000).nullable().optional(),
     origin: z.enum(["claude_desktop", "paste"]).default("paste"),
   })
@@ -434,4 +438,6 @@ export const draftSaveSchema = z.object({
   fields: z.record(z.string(), z.unknown()),
   review_later: z.array(z.string()).max(100).optional(),
   confirm_duplicate: z.boolean().optional(),
+  /** Keep the AI translations (EN/中文) with the job. Default true. */
+  save_translations: z.boolean().optional(),
 });

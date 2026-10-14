@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "career-atlas",
   "display_name": "Career Atlas",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Send job postings Claude researched to your local Career Atlas job tracker as drafts you review and save.",
   "long_description": "Paste a job link or description into Claude and ask it to add the job to Career Atlas. Claude researches the posting and creates a draft in the Career Atlas app running on your computer, with every value labelled as quoted from the posting, found on the web, or inferred. Nothing is saved until you review the draft in Career Atlas and click Save. The extension can only create drafts and check whether a job link is already saved (yes/no); it cannot read, edit or delete your jobs, and it only talks to Career Atlas on this computer.",
   "author": { "name": "Career Atlas contributors" },

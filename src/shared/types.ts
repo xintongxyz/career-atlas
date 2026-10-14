@@ -1,6 +1,7 @@
 import type {
   ApplicationStatus,
   Confidence,
+  ContentLang,
   EventType,
   EvidenceSource,
   ExtractableField,
@@ -10,6 +11,7 @@ import type {
   ReminderKind,
   ReviewStatus,
   SavedStage,
+  TranslatableField,
 } from "./constants";
 import type { JobFields, Salary } from "./schemas";
 
@@ -47,8 +49,21 @@ export interface ResultField extends FieldCandidate {
   source_url?: string | null;
 }
 
+/**
+ * AI translations of descriptive job fields, stored on the job (display only, never evidence).
+ * The original values stay in the normal fields; `content_language` says which language they are in.
+ */
+export interface JobTranslations {
+  source: "ai";
+  generated_at: number;
+  values: Partial<Record<ContentLang, Partial<Record<TranslatableField, string | string[]>>>>;
+}
+
 export interface ExtractionResult {
   fields: Partial<Record<ExtractableField, ResultField>>;
+  /** AI drafts: language of the original posting and AI translations of descriptive fields. */
+  content_language?: string | null;
+  translations?: JobTranslations["values"] | null;
   description_text: string | null;
   source_title: string | null;
   warnings: string[];
@@ -95,6 +110,10 @@ export interface JobListItem {
   company_domain: string | null;
   company_logo_url: string | null;
   title: string;
+  /** Language of the original posting text (null when unknown). */
+  content_language: string | null;
+  /** AI-translated titles by UI language (display only). */
+  title_translations: Partial<Record<ContentLang, string>> | null;
   city: string | null;
   region: string | null;
   country: string | null;
@@ -185,6 +204,7 @@ export interface JobDetail {
     last_checked_at: number | null;
     created_at: number;
     updated_at: number;
+    translations: JobTranslations | null;
   };
   company: CompanyDTO;
   personal: {
@@ -401,4 +421,6 @@ export interface DraftCreatedDTO {
   accepted_fields: string[];
   needs_review_fields: string[];
   dropped: { field: string; reason: string }[];
+  /** Languages with AI translations, e.g. ["en", "zh-CN"]. */
+  translations: string[];
 }

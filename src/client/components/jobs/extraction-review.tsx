@@ -1,4 +1,4 @@
-import { EXTRACTABLE_FIELDS, type ExtractableField } from "@shared/constants";
+import { EXTRACTABLE_FIELDS, type ContentLang, type ExtractableField, type TranslatableField } from "@shared/constants";
 import type { DuplicateMatch, ExtractionDTO, ResultField } from "@shared/types";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ChevronDown, ChevronRight, PencilLine, Sparkles } from "lucide-react";
@@ -11,6 +11,7 @@ import { Badge, Checkbox } from "@/components/ui/misc";
 import { useToastError } from "@/hooks/useApiError";
 import { useInvalidateJobs } from "@/hooks/useJobMutations";
 import { api } from "@/lib/api";
+import { isOriginalLanguage } from "@/lib/job-i18n";
 import { cn } from "@/lib/utils";
 import { formatValue } from "./evidence";
 import { ValueDisplay, ValueEditor } from "./value-editor";
@@ -82,6 +83,9 @@ export function ExtractionReview({
   );
   const [later, setLater] = React.useState<Set<string>>(() => new Set(rows.filter((r) => r.candidate.needs_review).map((r) => r.field)));
   const [includeDescription, setIncludeDescription] = React.useState(!!result.description_text && !refresh);
+  // AI drafts: translations of descriptive fields into the other UI language(s), display only.
+  const translationLangs = (Object.keys(result.translations ?? {}) as ContentLang[]).filter((l) => !isOriginalLanguage(result.content_language, l));
+  const [saveTranslations, setSaveTranslations] = React.useState(true);
   const [editing, setEditing] = React.useState<string | null>(() => rows.find(isMissing)?.field ?? null);
 
   // Possible duplicate by company + title (only meaningful for new jobs).
@@ -99,7 +103,12 @@ export function ExtractionReview({
       const fields: Record<string, unknown> = {};
       for (const f of selected) fields[f] = values[f];
       if (includeDescription) fields.description_text = true;
-      return api.post<{ saved_job_id: string }>(endpoints?.apply ?? `/api/extractions/${extraction.id}/apply`, { fields, review_later: [...later].filter((f) => selected.has(f)), ...applyExtra });
+      return api.post<{ saved_job_id: string }>(endpoints?.apply ?? `/api/extractions/${extraction.id}/apply`, {
+        fields,
+        review_later: [...later].filter((f) => selected.has(f)),
+        ...(translationLangs.length ? { save_translations: saveTranslations } : {}),
+        ...applyExtra,
+      });
     },
     onSuccess: (res) => {
       toast.success(t("extraction.review.applied"));
@@ -223,6 +232,17 @@ export function ExtractionReview({
                           ))}
                         </div>
                       ) : null}
+                      {translationLangs.map((l) => {
+                        const tv = result.translations?.[l]?.[r.field as TranslatableField];
+                        if (!tv) return null;
+                        const stale = !same(values[r.field], c.value);
+                        return (
+                          <p key={l} className={cn("text-xs text-ink-3", stale && "line-through opacity-60")} lang={l} title={stale ? t("bilingual.staleTranslation") : undefined}>
+                            <span className="mr-1 rounded bg-violet-soft px-1 text-[10px] font-medium text-violet">{t("bilingual.aiTranslationIn", { language: t(`bilingual.languages.${l.split("-")[0]}`) })}</span>
+                            {Array.isArray(tv) ? tv.join(" · ") : tv}
+                          </p>
+                        );
+                      })}
                       {!compact && !isMissing(r) ? <EvidenceLine evidence={c.evidence} /> : null}
                     </div>
                     <Checkbox className="mt-0.5" aria-label={t("extraction.review.reviewLater")} title={t("extraction.review.reviewLater")} checked={later.has(r.field)} onCheckedChange={(v) => setLater((s) => toggle(s, r.field, !!v))} />
@@ -233,6 +253,12 @@ export function ExtractionReview({
           </ul>
         </div>
       )}
+      {translationLangs.length ? (
+        <label className="flex items-center gap-2 text-[13px] text-ink-2">
+          <Checkbox checked={saveTranslations} onCheckedChange={(v) => setSaveTranslations(!!v)} />
+          {t("bilingual.saveTranslations")} <span className="text-xs text-ink-4">({t("bilingual.saveTranslationsHelp")})</span>
+        </label>
+      ) : null}
       {result.description_text ? (
         <label className="flex items-center gap-2 text-[13px] text-ink-2">
           <Checkbox checked={includeDescription} onCheckedChange={(v) => setIncludeDescription(!!v)} />

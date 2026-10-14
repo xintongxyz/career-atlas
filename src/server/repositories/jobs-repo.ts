@@ -1,5 +1,6 @@
 import type { JobListQuery, Salary } from "@shared/schemas";
 import type { JobListItem, TagDTO } from "@shared/types";
+import { CONTENT_LANGS } from "@shared/constants";
 import { escapeLike } from "../lib/util";
 
 /** SQL for the unified pipeline status (see shared/constants PIPELINE_STATUSES). */
@@ -8,7 +9,7 @@ export const EFFECTIVE_STATUS_SQL = `CASE WHEN sj.archived_at IS NOT NULL THEN '
 const BASE_SELECT = `
   SELECT
     sj.id AS id, sj.job_posting_id, p.company_id, c.name AS company_name, c.domain AS company_domain,
-    c.logo_url AS company_logo_url, p.title, p.city, p.region, p.country, p.work_mode, p.employment_type,
+    c.logo_url AS company_logo_url, p.title, p.content_language, json_extract(p.translations, '$.values') AS translation_values, p.city, p.region, p.country, p.work_mode, p.employment_type,
     p.source_platform, p.salary_min, p.salary_max, p.salary_currency, p.salary_period, p.salary_source,
     p.salary_text, p.compensation_type, p.deadline_at, p.posting_status, p.extraction_status,
     sj.stage, a.id AS application_id, a.status AS application_status, sj.priority, sj.is_starred,
@@ -174,6 +175,19 @@ function orderBy(q: Partial<JobListQuery>): string {
 
 type Row = Record<string, unknown>;
 
+/** Only the translated titles travel with list rows (small payload). */
+function titleTranslations(raw: unknown): JobListItem["title_translations"] {
+  if (typeof raw !== "string") return null;
+  try {
+    const values = JSON.parse(raw) as Record<string, { title?: unknown }>;
+    const out: NonNullable<JobListItem["title_translations"]> = {};
+    for (const lang of CONTENT_LANGS) if (typeof values[lang]?.title === "string") out[lang] = values[lang].title as string;
+    return Object.keys(out).length ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 export function rowToListItem(r: Row, tags: TagDTO[]): JobListItem {
   const hasSalary = r.salary_min != null || r.salary_max != null || r.salary_text != null;
   return {
@@ -184,6 +198,8 @@ export function rowToListItem(r: Row, tags: TagDTO[]): JobListItem {
     company_domain: (r.company_domain as string) ?? null,
     company_logo_url: (r.company_logo_url as string) ?? null,
     title: r.title as string,
+    content_language: (r.content_language as string) ?? null,
+    title_translations: titleTranslations(r.translation_values),
     city: (r.city as string) ?? null,
     region: (r.region as string) ?? null,
     country: (r.country as string) ?? null,

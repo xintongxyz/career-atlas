@@ -7,6 +7,7 @@ import * as React from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router";
 import { toast } from "sonner";
+import { localizedTitle } from "@/lib/job-i18n";
 import { CompanyAvatar, PriorityBadge, SalaryText, StatusBadge, WorkModeBadge, displayCompany, displayTitle } from "@/components/jobs/badges";
 import { JobCard } from "@/components/jobs/job-card";
 import { StatusControl } from "@/components/jobs/status-control";
@@ -218,7 +219,7 @@ function ApplicationList() {
                   <CompanyAvatar name={j.company_name} size="sm" />
                   <div className="min-w-0">
                     <Link to={`/jobs/${j.id}`} className="block truncate font-medium hover:underline">
-                      {displayTitle(j.title, t)}
+                      {displayTitle(localizedTitle(j, lang), t)}
                     </Link>
                     <span className="flex items-center gap-1.5 text-xs text-ink-3">
                       {displayCompany(j.company_name, t)} <PriorityBadge priority={j.priority} compact />

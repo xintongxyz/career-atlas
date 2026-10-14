@@ -7,6 +7,7 @@ import * as React from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
+import { localizedTitle } from "@/lib/job-i18n";
 import { CompanyAvatar, ExtractionBadge, PriorityBadge, SalaryText, StarMark, StatusBadge, displayCompany, displayTitle } from "@/components/jobs/badges";
 import { Button } from "@/components/ui/button";
 import { Field, Input, NativeSelect } from "@/components/ui/input";
@@ -135,7 +136,7 @@ export default function PositionsPage() {
             <CompanyAvatar name={j.company_name} size="sm" />
             <div className="min-w-0">
               <Link to={`/jobs/${j.id}`} className="flex items-center gap-1 font-medium text-ink hover:underline">
-                <span className="truncate">{displayTitle(j.title, t)}</span>
+                <span className="truncate">{displayTitle(localizedTitle(j, lang), t)}</span>
                 <StarMark starred={j.is_starred} />
               </Link>
               <div className="flex items-center gap-1.5 text-xs text-ink-3">

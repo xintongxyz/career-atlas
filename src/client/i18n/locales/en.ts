@@ -1153,7 +1153,21 @@ const en = {
     recheck: "Check again",
     aiNotice: "AI extraction uses an online service and your Claude plan's usage allowance. It runs only when you tick “Also use Claude AI”, and only the job description is sent.",
     aiEnable: "Offer Claude AI when importing jobs",
-  },  drafts: {
+  },  bilingual: {
+    aiTranslation: "AI translation",
+    translatedHelp: "Translated by AI from the original posting. The original text and its evidence are unchanged; a translation is never evidence.",
+    showingTranslation: "Showing AI translation",
+    showingOriginal: "Showing original text",
+    originalLanguage: "Original: {{language}}",
+    showOriginal: "Show original",
+    showTranslation: "Show translation",
+    aiTranslationIn: "AI translation · {{language}}",
+    staleTranslation: "You edited this value, so its translation will not be saved.",
+    saveTranslations: "Save the AI translations with this job",
+    saveTranslationsHelp: "shown when you switch language; never used as evidence",
+    languages: { en: "English", zh: "Chinese", fr: "French", es: "Spanish", de: "German", ja: "Japanese", ko: "Korean", pt: "Portuguese" },
+  },
+  drafts: {
     title: "AI draft",
     subtitle: "Review what the AI found. Nothing is saved until you click Save.",
     inbox: "AI drafts",

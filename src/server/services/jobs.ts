@@ -9,6 +9,7 @@ import { canonicalizeUrl, detectPlatform } from "../extraction/platforms";
 import { ApiError, conflict, notFound } from "../lib/errors";
 import { newId, normalizeName, now } from "../lib/util";
 import { EFFECTIVE_STATUS_SQL } from "../repositories/jobs-repo";
+import { pruneTranslations } from "./translations";
 import { findOrCreateCompany } from "./companies";
 import { applicationToDTO, companyToDTO, currentFieldValue, fieldsToColumns, postingToFields, sameValue, tagToDTO } from "./mappers";
 import { changeStatus, effectiveStatus, eventInsert, loadSavedJob, runBatch } from "./pipeline";
@@ -260,6 +261,7 @@ export async function getJobDetail(db: Db, userId: string, savedJobId: string): 
       last_checked_at: posting.lastCheckedAt,
       created_at: posting.createdAt,
       updated_at: posting.updatedAt,
+      translations: (posting.translations as unknown as JobDetail["posting"]["translations"]) ?? null,
     },
     company: companyToDTO(company),
     personal: {
@@ -340,6 +342,9 @@ export async function updateJob(db: Db, userId: string, savedJobId: string, inpu
       const after = (job as Record<string, unknown>)[f];
       if (!sameValue(before, after)) changedFields.push(f);
     }
+    // A translation of text the user just changed would be stale: drop it (the original is shown).
+    const pruned = pruneTranslations(posting.translations, changedFields);
+    if (pruned !== undefined) (cols as Record<string, unknown>).translations = pruned;
     items.push(db.update(jobPostings).set({ ...cols, companyId, updatedAt: ts }).where(eq(jobPostings.id, posting.id)));
 
     // Overrides + evidence review state for edited extracted fields.

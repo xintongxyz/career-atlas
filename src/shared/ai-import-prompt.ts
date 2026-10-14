@@ -1,3 +1,4 @@
+import { TRANSLATABLE_FIELDS } from "./constants";
 import { AI_IMPORT_FORMAT } from "./schemas";
 
 /** Field names Career Atlas accepts from AI tools (a subset of the extractable fields, in a sensible order). */
@@ -45,13 +46,20 @@ Reply with ONE JSON object only, in exactly this format:
   "format": "${AI_IMPORT_FORMAT}",
   "source_url": "<the job posting URL, or null>",
   "job_description": "<the full original job description text, copied verbatim>",
+  "original_language": "<language of the posting, e.g. en or zh-CN>",
   "fields": {
     "<field name>": { "value": <value>, "basis": "posting" | "web" | "inferred", "evidence": "<verbatim quote>" | null, "source_url": "<page you used>" | null }
+  },
+  "translations": {
+    "en": { "<translatable field>": "<English text>" | ["<item>", "..."] },
+    "zh-CN": { "<translatable field>": "<简体中文>" | ["<item>", "..."] }
   },
   "notes": "<anything you could not determine, or null>"
 }
 
 Field names: ${AI_IMPORT_FIELDS.join("; ")}.
+
+Translations (same answer, both languages): for the descriptive fields you filled (${TRANSLATABLE_FIELDS.join(", ")}), give an English ("en") and a Simplified Chinese ("zh-CN") version. Lists stay lists with the same items. Keep company names, brand and product names, URLs, numbers, salary, currencies, dates and technical terms unchanged. Field values and evidence stay in the original language of the posting; translations are for display only.
 
 Rules:
 - basis "posting": the value is stated in the job posting; "evidence" MUST be an exact quote copied from it.

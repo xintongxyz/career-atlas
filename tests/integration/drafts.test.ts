@@ -43,7 +43,7 @@ describe("AI drafts (Claude Desktop extension / Import from AI)", () => {
     const created = await api<DraftCreatedDTO>("/api/drafts", { method: "POST", json: draftInput() });
     expect(created.status).toBe(201);
     // The response tells the AI only what it needs: no existing records, no personal data.
-    expect(Object.keys(created.body).sort()).toEqual(["accepted_fields", "dropped", "id", "needs_review_fields", "possible_duplicate", "review_path"]);
+    expect(Object.keys(created.body).sort()).toEqual(["accepted_fields", "dropped", "id", "needs_review_fields", "possible_duplicate", "review_path", "translations"]);
     expect(created.body.dropped).toContainEqual({ field: "visa_sponsorship", reason: "sensitive_not_verified" });
     expect(created.body.needs_review_fields).toEqual(expect.arrayContaining(["company_website", "category", "seniority"]));
     expect(created.body.accepted_fields).toEqual(expect.arrayContaining(["company_name", "title", "salary", "work_mode", "work_authorization"]));

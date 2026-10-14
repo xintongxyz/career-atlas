@@ -2,6 +2,7 @@ import type { JobListItem } from "@shared/types";
 import { BellRing, CalendarX2, MapPin } from "lucide-react";
 import * as React from "react";
 import { Link } from "react-router";
+import { localizedTitle } from "@/lib/job-i18n";
 import { Badge } from "@/components/ui/misc";
 import { useLocaleContext } from "@/hooks/useMe";
 import { formatRelative, formatShortDate, locationText } from "@/lib/format";
@@ -15,7 +16,7 @@ export const JobCard = React.forwardRef<HTMLDivElement, { job: JobListItem; drag
     const loc = locationText(job);
     const soon = job.deadline_at && job.deadline_at > Date.now() && job.deadline_at - Date.now() < 7 * 86_400_000;
     const followDue = job.follow_up_at && job.follow_up_at <= Date.now() + 86_400_000;
-    const title = displayTitle(job.title, t);
+    const title = displayTitle(localizedTitle(job, lang), t);
     return (
       <div ref={ref} className={cn("group rounded-lg border border-line bg-surface p-3 shadow-card transition-shadow", dragging && "rotate-1 shadow-pop ring-2 ring-accent/30", className)} {...props}>
         <div className="flex items-start gap-2.5">

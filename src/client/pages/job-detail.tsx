@@ -23,6 +23,7 @@ import { useInvalidateJobs, useStatusMutation } from "@/hooks/useJobMutations";
 import { useLocaleContext } from "@/hooks/useMe";
 import { api, ApiRequestError } from "@/lib/api";
 import { formatDate } from "@/lib/format";
+import { hasTranslation, localizePosting } from "@/lib/job-i18n";
 import { NotFound } from "./system";
 import { useAiOnRequest } from "@/components/jobs/ai-opt-in";
 
@@ -52,7 +53,11 @@ function JobDetailView({ job }: { job: JobDetail }) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const tab = (TABS as readonly string[]).includes(params.get("tab") ?? "") ? params.get("tab")! : "overview";
-  const ctx = useDetailCtx(job);
+  // Bilingual content: show the AI translation for the UI language (toggle back to the original).
+  const [showOriginal, setShowOriginal] = React.useState(false);
+  const local = React.useMemo(() => (showOriginal ? { posting: job.posting, translated: [] as string[] } : localizePosting(job.posting, lang)), [job.posting, lang, showOriginal]);
+  const shownJob = React.useMemo(() => ({ ...job, posting: local.posting }), [job, local.posting]);
+  const ctx = useDetailCtx(shownJob, local.translated);
   const invalidate = useInvalidateJobs();
   const onError = useToastError();
   const status = useStatusMutation();
@@ -110,7 +115,7 @@ function JobDetailView({ job }: { job: JobDetail }) {
         <div className="min-w-0 flex-1">
           <p className="text-[13px] text-ink-3">{displayCompany(job.company.name, t)}</p>
           <h1 className="mt-0.5 flex items-center gap-2 text-lg font-semibold leading-snug tracking-tight text-ink sm:text-xl">
-            {displayTitle(p.title, t)}
+            {displayTitle(local.posting.title, t)}
             <button type="button" onClick={() => star.mutate()} aria-pressed={job.personal.is_starred} aria-label={job.personal.is_starred ? t("actions.unstar") : t("actions.star")} className="rounded p-0.5 text-ink-4 hover:text-warn">
               <Star className={job.personal.is_starred ? "size-4 fill-warn text-warn" : "size-4"} />
             </button>
@@ -123,6 +128,15 @@ function JobDetailView({ job }: { job: JobDetail }) {
             {p.posting_status === "closed" ? <Badge tone="neutral">{t("postingStatus.closed")}</Badge> : null}
             {reviewCount ? <Badge tone="warn">{t("extraction.pendingReview", { count: reviewCount })}</Badge> : null}
           </div>
+          {hasTranslation(job.posting, lang) ? (
+            <p className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-ink-3">
+              <Badge tone="violet">{showOriginal ? t("bilingual.showingOriginal") : t("bilingual.showingTranslation")}</Badge>
+              <span>{t("bilingual.originalLanguage", { language: t(`bilingual.languages.${(p.content_language ?? "").split("-")[0]}`, { defaultValue: p.content_language ?? "?" }) })}</span>
+              <button type="button" className="text-accent underline-offset-2 hover:underline" onClick={() => setShowOriginal((v) => !v)}>
+                {showOriginal ? t("bilingual.showTranslation") : t("bilingual.showOriginal")}
+              </button>
+            </p>
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {p.original_url ? (
@@ -265,7 +279,7 @@ function JobDetailView({ job }: { job: JobDetail }) {
 
       <DeleteJobDialog
         jobId={job.id}
-        title={`${displayCompany(job.company.name, t)} — ${displayTitle(p.title, t)}`}
+        title={`${displayCompany(job.company.name, t)} — ${displayTitle(local.posting.title, t)}`}
         open={deleting}
         onOpenChange={setDeleting}
         onArchive={() => status.mutate({ id: job.id, status: "archived" })}

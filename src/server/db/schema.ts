@@ -95,6 +95,8 @@ export const jobPostings = sqliteTable(
     deadlineAt: integer("deadline_at"),
     postingStatus: text("posting_status").notNull().default("unknown"),
     contentLanguage: text("content_language"),
+    /** AI translations of descriptive fields (JobTranslations; display only). Added in 0003. */
+    translations: text("translations", { mode: "json" }).$type<Record<string, unknown>>(),
 
     // work arrangement
     workMode: text("work_mode").notNull().default("unspecified"),

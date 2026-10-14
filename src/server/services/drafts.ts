@@ -8,9 +8,9 @@
 //   basis "inferred" → AI judgment; low confidence, review needed
 //   sensitive fields (salary, visa, authorization, eligibility, work mode, deadline) are kept only
 //   when verified in the posting. Nothing is invented: missing fields stay missing.
-import { EXTRACTABLE_FIELDS, LIMITS, SENSITIVE_FIELDS, type ExtractableField } from "@shared/constants";
+import { CONTENT_LANGS, EXTRACTABLE_FIELDS, LIMITS, SENSITIVE_FIELDS, type ExtractableField, type TranslatableField } from "@shared/constants";
 import { jobFieldsSchema, salarySchema, type AiImportInput } from "@shared/schemas";
-import type { DraftCreatedDTO, DraftDTO, DraftSummaryDTO, ExtractionResult, ResultField } from "@shared/types";
+import type { DraftCreatedDTO, DraftDTO, DraftSummaryDTO, ExtractionResult, JobTranslations, ResultField } from "@shared/types";
 import { and, desc, eq } from "drizzle-orm";
 import { evidenceInSource, normalize, salaryNumbersInQuote } from "../ai/extract-job";
 import { schema, type Db } from "../db/client";
@@ -18,8 +18,10 @@ import { ApiError, badRequest, conflict, notFound } from "../lib/errors";
 import { newId, now, sha256Hex } from "../lib/util";
 import { applyExtraction, createExtractionRow, PLACEHOLDER_COMPANY } from "./extractions";
 import { findDuplicates, insertJob } from "./jobs";
+import { sameValue } from "./mappers";
+import { normalizeLang, sanitizeTranslations } from "./translations";
 
-const { jobDrafts, jobExtractionJobs, jobSourceSnapshots } = schema;
+const { jobDrafts, jobExtractionJobs, jobSourceSnapshots, jobPostings } = schema;
 
 const FIELD_ALIASES: Record<string, ExtractableField> = { deadline: "deadline_at", posted: "posted_at", website: "company_website", company: "company_name", location_city: "city" };
 const DATE_FIELDS = new Set<ExtractableField>(["deadline_at", "posted_at"]);
@@ -98,7 +100,11 @@ export function convertAiImport(input: AiImportInput): { result: ExtractionResul
           ? { value: norm.value, source: "ai", evidence: evidence ? `${evidence} — ${sourceUrl}` : sourceUrl, confidence: "medium", basis, source_url: sourceUrl, needs_review: true }
           : { value: norm.value, source: "ai", evidence: null, confidence: "low", basis: "inferred", needs_review: true };
   }
-  return { result: { fields, description_text: jd, source_title: null, warnings: [...new Set(warnings)], ai_used: true }, dropped };
+  const translations = sanitizeTranslations(input.translations);
+  return {
+    result: { fields, description_text: jd, source_title: null, warnings: [...new Set(warnings)], ai_used: true, content_language: normalizeLang(input.original_language), translations },
+    dropped,
+  };
 }
 
 const cv = (r: ExtractionResult, f: ExtractableField) => {
@@ -131,6 +137,7 @@ export async function createDraft(db: Db, userId: string, input: AiImportInput):
     accepted_fields: entries.filter(([, f]) => !f.needs_review).map(([k]) => k),
     needs_review_fields: entries.filter(([, f]) => f.needs_review).map(([k]) => k),
     dropped,
+    translations: Object.keys(result.translations ?? {}),
   };
 }
 
@@ -184,7 +191,7 @@ export async function getDraft(db: Db, userId: string, id: string): Promise<Draf
 }
 
 /** Turns a reviewed draft into a job: same validation and save path as every extraction. */
-export async function saveDraft(db: Db, userId: string, id: string, body: { fields: Record<string, unknown>; review_later?: string[]; confirm_duplicate?: boolean }) {
+export async function saveDraft(db: Db, userId: string, id: string, body: { fields: Record<string, unknown>; review_later?: string[]; confirm_duplicate?: boolean; save_translations?: boolean }) {
   const d = await loadDraft(db, userId, id);
   if (d.status !== "pending") throw conflict("draft_not_pending", "This draft was already saved or discarded");
   const result = d.result as unknown as ExtractionResult;
@@ -237,6 +244,26 @@ export async function saveDraft(db: Db, userId: string, id: string, body: { fiel
     .set({ status: "needs_review", adapter: "ai_import", result: d.result, snapshotId, finishedAt: ts, startedAt: ts, updatedAt: ts })
     .where(eq(jobExtractionJobs.id, extractionId));
   const applied = await applyExtraction(db, userId, extractionId, { fields: body.fields, review_later: body.review_later });
+
+  // Language of the original text + AI translations, only for fields saved exactly as the AI proposed
+  // them (an edited original would make its translation wrong).
+  const values: JobTranslations["values"] = {};
+  if (body.save_translations !== false && result.translations) {
+    for (const lang of CONTENT_LANGS) {
+      const keep: Partial<Record<TranslatableField, string | string[]>> = {};
+      for (const [f, v] of Object.entries(result.translations[lang] ?? {}) as [TranslatableField, string | string[]][]) {
+        if (f in body.fields && sameValue(body.fields[f], result.fields[f]?.value)) keep[f] = v;
+      }
+      if (Object.keys(keep).length) values[lang] = keep;
+    }
+  }
+  await db
+    .update(jobPostings)
+    .set({
+      contentLanguage: result.content_language ?? null,
+      translations: Object.keys(values).length ? ({ source: "ai", generated_at: now(), values } satisfies JobTranslations as unknown as Record<string, unknown>) : null,
+    })
+    .where(eq(jobPostings.id, postingId));
   await db.update(jobDrafts).set({ status: "saved", savedJobId, updatedAt: now() }).where(eq(jobDrafts.id, d.id));
   return { saved_job_id: applied.saved_job_id };
 }

@@ -338,3 +338,45 @@ export const LIMITS = {
   pageSizeMax: 200,
   compareMax: 4,
 } as const;
+
+// ---------- bilingual job content ----------
+
+/** UI languages that job content can be translated into. */
+export const CONTENT_LANGS = ["en", "zh-CN"] as const;
+export type ContentLang = (typeof CONTENT_LANGS)[number];
+
+/**
+ * Descriptive fields that may carry an AI translation (display only). Company names, URLs, numbers,
+ * salary, dates, enums, places and technical skills/tools are never translated.
+ */
+export const TRANSLATABLE_FIELDS = [
+  "title",
+  "department",
+  "category",
+  "summary",
+  "hybrid_frequency",
+  "travel_requirement",
+  "relocation_requirement",
+  "bonus",
+  "commission",
+  "equity",
+  "benefits",
+  "responsibilities",
+  "required_qualifications",
+  "preferred_qualifications",
+  "soft_skills",
+  "education_requirements",
+  "years_experience_text",
+  "language_requirements",
+  "certifications",
+  "other_requirements",
+  "work_authorization",
+  "visa_sponsorship_text",
+  "citizenship_restriction",
+  "residency_restriction",
+  "security_clearance",
+  "location_restriction",
+  "licences",
+  "other_hard_requirements",
+] as const satisfies readonly ExtractableField[];
+export type TranslatableField = (typeof TRANSLATABLE_FIELDS)[number];

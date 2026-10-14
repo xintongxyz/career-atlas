@@ -111,3 +111,65 @@ test("Import from AI: an AI answer becomes a reviewable draft, then a job only a
   await expect(page).toHaveURL(/\/jobs\//);
   await expect(page.getByRole("heading", { name: "UX Researcher" })).toBeVisible();
 });
+
+test("bilingual job: one record, EN/中文 switch shows the AI translation or the original", async ({ page, request }) => {
+  const jd = `Inventory Planner — Woodgrove Outfitters (fictional)
+Team: Supply Chain
+Location: Winnipeg, MB, Canada. On-site.
+Responsibilities:
+- Forecast weekly demand for 2,000 SKUs
+- Coordinate purchase orders with suppliers
+Requirements: 2+ years in inventory planning; Excel.`;
+  const created = await request.post("/api/drafts", {
+    headers: ORIGIN,
+    data: {
+      origin: "claude_desktop",
+      source_url: "https://jobs.example.com/woodgrove/inventory-planner-5",
+      job_description: jd,
+      original_language: "en",
+      fields: {
+        company_name: { value: "Woodgrove Outfitters", basis: "posting", evidence: "Inventory Planner — Woodgrove Outfitters" },
+        title: { value: "Inventory Planner", basis: "posting", evidence: "Inventory Planner" },
+        department: { value: "Supply Chain", basis: "posting", evidence: "Team: Supply Chain" },
+        responsibilities: { value: ["Forecast weekly demand for 2,000 SKUs", "Coordinate purchase orders with suppliers"], basis: "posting", evidence: "Forecast weekly demand for 2,000 SKUs" },
+      },
+      translations: {
+        "zh-CN": { title: "库存计划员", department: "供应链部", responsibilities: ["预测2,000个SKU的每周需求", "与供应商协调采购订单"] },
+        en: { title: "Inventory Planner", department: "Supply Chain", responsibilities: ["Forecast weekly demand for 2,000 SKUs", "Coordinate purchase orders with suppliers"] },
+      },
+    },
+  });
+  const { id } = (await created.json()) as { id: string };
+
+  // Review once: the translation is shown next to the original; save keeps both on ONE job.
+  await page.goto(`/drafts/${id}`);
+  await page.getByRole("radio", { name: "EN" }).first().click();
+  await expect(page.getByText("库存计划员")).toBeVisible();
+  await expect(page.getByText("Save the AI translations with this job")).toBeVisible();
+  await page.getByRole("button", { name: "Save selected fields" }).click();
+  await expect(page).toHaveURL(/\/jobs\//);
+  await expect(page.getByRole("heading", { level: 1, name: /Inventory Planner/ })).toBeVisible();
+  await expect(page.getByText("Showing AI translation")).toHaveCount(0); // English UI = original language
+
+  await page.getByRole("radio", { name: "中文" }).first().click();
+  await expect(page.getByRole("heading", { level: 1, name: /库存计划员/ })).toBeVisible();
+  await expect(page.getByText("显示AI翻译")).toBeVisible();
+  await expect(page.getByText("原文：英文")).toBeVisible();
+  await expect(page.getByText("预测2,000个SKU的每周需求")).toBeVisible();
+  // Show the original without switching the UI language.
+  await page.getByRole("button", { name: "查看原文" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: /Inventory Planner/ })).toBeVisible();
+  await expect(page.getByText("Forecast weekly demand for 2,000 SKUs")).toBeVisible();
+
+  // Lists in Chinese use the translated title; still a single job.
+  await page.goto("/positions?q=Woodgrove");
+  await expect(page.getByRole("link", { name: "库存计划员" })).toBeVisible();
+  const list = (await (await request.get("/api/jobs?q=Woodgrove")).json()) as { total: number };
+  expect(list.total).toBe(1);
+  await page.goto("/applications");
+  await expect(page.getByText("库存计划员").first()).toBeVisible();
+
+  await page.getByRole("radio", { name: "EN" }).first().click();
+  await page.goto("/positions?q=Woodgrove");
+  await expect(page.getByRole("link", { name: "Inventory Planner" })).toBeVisible();
+});

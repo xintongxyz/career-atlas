@@ -11,9 +11,16 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { EvidencePopover } from "./evidence";
 
-export type DetailCtx = { job: JobDetail; evidence: Map<string, EvidenceDTO>; overrides: Map<string, OverrideDTO>; confirm: (f: string) => void };
+export type DetailCtx = {
+  job: JobDetail;
+  evidence: Map<string, EvidenceDTO>;
+  overrides: Map<string, OverrideDTO>;
+  confirm: (f: string) => void;
+  /** Fields currently shown as an AI translation (display only; evidence stays original). */
+  translated: Set<string>;
+};
 
-export function useDetailCtx(job: JobDetail): DetailCtx {
+export function useDetailCtx(job: JobDetail, translated: string[] = []): DetailCtx {
   const invalidate = useInvalidateJobs();
   const { t } = useTranslation();
   const onError = useToastError();
@@ -26,9 +33,9 @@ export function useDetailCtx(job: JobDetail): DetailCtx {
     onError,
   });
   return React.useMemo(
-    () => ({ job, evidence: new Map(job.evidence.map((e) => [e.field, e])), overrides: new Map(job.overrides.map((o) => [o.field, o])), confirm: (f: string) => confirm.mutate(f) }),
+    () => ({ job, evidence: new Map(job.evidence.map((e) => [e.field, e])), overrides: new Map(job.overrides.map((o) => [o.field, o])), confirm: (f: string) => confirm.mutate(f), translated: new Set(translated) }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [job],
+    [job, translated.join(",")],
   );
 }
 
@@ -42,7 +49,10 @@ export function FieldRow({ ctx, field, label, children, emphasis, empty }: { ctx
     <div className={cn("grid grid-cols-[minmax(6.5rem,34%)_1fr] gap-3 py-1.5 text-[13px]", emphasis && "rounded-md bg-warn-soft/50 px-2 -mx-2")}>
       <dt className="text-ink-3">{label}</dt>
       <dd className="flex min-w-0 items-start gap-1">
-        <div className="min-w-0 flex-1 break-words text-ink">{isEmpty ? <span className="text-ink-4">{t("common.notSpecified")}</span> : children}</div>
+        <div className="min-w-0 flex-1 break-words text-ink">
+          {isEmpty ? <span className="text-ink-4">{t("common.notSpecified")}</span> : children}
+          {!isEmpty && field && ctx.translated.has(field) ? <TranslatedMark /> : null}
+        </div>
         {field ? <EvidencePopover evidence={ev} override={ov} onConfirm={() => ctx.confirm(field)} /> : null}
       </dd>
     </div>
@@ -55,6 +65,7 @@ export function ListBlock({ ctx, field, title, items }: { ctx: DetailCtx; field:
     <section className="space-y-1.5">
       <div className="flex items-center gap-1">
         <h3 className="text-[13px] font-semibold text-ink">{title}</h3>
+        {ctx.translated.has(field) ? <TranslatedMark /> : null}
         <EvidencePopover evidence={ctx.evidence.get(field)} override={ctx.overrides.get(field)} onConfirm={() => ctx.confirm(field)} />
       </div>
       <ul className="list-disc space-y-1 pl-5 text-[13px] leading-relaxed text-ink-2 marker:text-ink-4">
@@ -63,6 +74,16 @@ export function ListBlock({ ctx, field, title, items }: { ctx: DetailCtx; field:
         ))}
       </ul>
     </section>
+  );
+}
+
+/** Small marker: this text is an AI translation, not the original posting. */
+export function TranslatedMark() {
+  const { t } = useTranslation();
+  return (
+    <span title={t("bilingual.translatedHelp")} className="ml-1.5 inline-flex rounded bg-violet-soft px-1 align-middle text-[10px] font-medium text-violet">
+      {t("bilingual.aiTranslation")}
+    </span>
   );
 }
 
