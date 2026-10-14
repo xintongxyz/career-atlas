@@ -15,6 +15,13 @@
       "when": 1791954289602,
       "tag": "0001_local_ai_requested",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791991073067,
+      "tag": "0002_ai_job_drafts",
+      "breakpoints": true
     }
   ]
 }

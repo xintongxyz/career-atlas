@@ -28,6 +28,7 @@ _All data shown is fictional demo data (`npm run db:seed:demo`)._
 - **Honest extraction.** Sources are tried in this order: public ATS APIs (Greenhouse, Lever, Ashby, SmartRecruiters, Workday), then schema.org `JobPosting` JSON-LD, then page text. After that come rule-based extraction and optional AI.
   - Every value records its source, evidence, confidence and review status.
   - Unknown stays unknown. AI salary or visa claims without a matching quote in the posting are discarded.
+- **AI drafts from Claude Desktop or any AI.** A small Claude Desktop extension lets Claude research a job and send it to your local Career Atlas as a draft; or paste any AI's answer into *Import from AI*. Every value is labelled *verified in posting*, *from the web* or *AI inference*, and nothing is saved until you review it. No API key or extra billing.
 - **Human in the loop.** You review extractions before saving. Manual edits are kept as overrides alongside the original extracted value.
   - "Refresh from source" shows a diff, and you choose which changes to apply.
 - **Saved ≠ Applied.** Job posting, saved job and application are separate records. Pipeline: Saved → Preparing → Applied → … → Offer, Accepted, Rejected or Withdrawn.

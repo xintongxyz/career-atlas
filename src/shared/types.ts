@@ -39,6 +39,12 @@ export interface ResultField extends FieldCandidate {
   alternatives?: FieldCandidate[];
   /** True when the field should be reviewed before trusting it. */
   needs_review?: boolean;
+  /**
+   * AI drafts only: where the value came from. "posting" = quote verified in the job description,
+   * "web" = researched on another page (source_url), "inferred" = AI judgment, not stated anywhere.
+   */
+  basis?: "posting" | "web" | "inferred";
+  source_url?: string | null;
 }
 
 export interface ExtractionResult {
@@ -368,4 +374,31 @@ export interface AnalyticsDTO {
     "category" | "resume" | "work_mode" | "city" | "source" | "month",
     { key: string; applied: number; responses: number; interviews: number; offers: number }[]
   >;
+}
+
+export interface DraftSummaryDTO {
+  id: string;
+  origin: "claude_desktop" | "paste";
+  company_name: string | null;
+  title: string | null;
+  source_url: string | null;
+  created_at: number;
+}
+
+export interface DraftDTO extends DraftSummaryDTO {
+  status: "pending" | "saved" | "discarded";
+  notes: string | null;
+  saved_job_id: string | null;
+  /** Shaped like an extraction so the standard review screen can show it. */
+  extraction: ExtractionDTO;
+  url_duplicates: DuplicateMatch[];
+}
+
+export interface DraftCreatedDTO {
+  id: string;
+  review_path: string;
+  possible_duplicate: boolean;
+  accepted_fields: string[];
+  needs_review_fields: string[];
+  dropped: { field: string; reason: string }[];
 }

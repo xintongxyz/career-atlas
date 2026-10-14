@@ -37,7 +37,7 @@ export function makeDispatcher(env: AppEnv, deps?: PipelineDeps): Dispatcher {
   };
 }
 
-async function createExtractionRow(
+export async function createExtractionRow(
   db: Db,
   userId: string,
   postingId: string,

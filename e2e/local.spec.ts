@@ -85,3 +85,29 @@ test("offline core: the app loads nothing from the internet", async ({ page }) =
   await expect(dialog.getByRole("heading", { name: "Review extracted details" })).toBeVisible({ timeout: 15_000 });
   expect(external).toEqual([]);
 });
+
+test("Import from AI: an AI answer becomes a reviewable draft, then a job only after Save", async ({ page, request }) => {
+  const answer = `Sure! Here is the job in Career Atlas format:
+\`\`\`json
+{"format":"career-atlas-ai-import/v1","source_url":"https://jobs.example.com/fabrikam/ux-researcher-9","job_description":"UX Researcher — Fabrikam Labs (fictional). Location: Calgary, AB, Canada. Remote within Canada. Salary: CAD $85,000 – $100,000 per year. You will plan and run usability studies.","fields":{"company_name":{"value":"Fabrikam Labs","basis":"posting","evidence":"UX Researcher — Fabrikam Labs"},"title":{"value":"UX Researcher","basis":"posting","evidence":"UX Researcher"},"category":{"value":"Design & Research","basis":"inferred"},"salary":{"value":{"min":85000,"max":100000,"currency":"CAD","period":"annually"},"basis":"posting","evidence":"Salary: CAD $85,000 – $100,000 per year."}},"notes":null}
+\`\`\``;
+  await page.goto("/");
+  await page.getByRole("button", { name: "Add job" }).first().click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("radio", { name: "Import from AI" }).click();
+  await expect(dialog.getByRole("button", { name: "Copy prompt for your AI" })).toBeVisible();
+  await dialog.getByLabel("AI answer").fill(answer);
+  await dialog.getByRole("button", { name: "Create draft for review" }).click();
+  await expect(page).toHaveURL(/\/drafts\//);
+  await expect(page.getByText("Verified in posting").first()).toBeVisible();
+  await expect(page.getByText("AI inference").first()).toBeVisible();
+  // Not a job yet; listed in the dashboard inbox.
+  expect(((await (await request.get("/api/jobs?q=Fabrikam")).json()) as { total: number }).total).toBe(0);
+  const draftUrl = page.url();
+  await page.goto("/");
+  await expect(page.getByText(/AI draft waiting for your review/)).toBeVisible();
+  await page.goto(draftUrl);
+  await page.getByRole("button", { name: "Save selected fields" }).click();
+  await expect(page).toHaveURL(/\/jobs\//);
+  await expect(page.getByRole("heading", { name: "UX Researcher" })).toBeVisible();
+});

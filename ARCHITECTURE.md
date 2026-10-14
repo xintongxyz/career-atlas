@@ -62,6 +62,8 @@ tests/integration    the HTTP API end to end on the real runtime (temp SQLite pe
 tests/local          runtime safety: adapter, lifecycle, firewall, backups, AI adapter
 e2e/                 Playwright against the production build with a throwaway database
 scripts/             start-local, dev, launcher, seed-demo, check-secrets, migration checks
+integrations/claude-desktop/  Claude Desktop extension (.mcpb): dependency-free MCP server with two tools
+                     (create_job_draft, check_job_url) that only talks to the local app
 ```
 
 ## Key decisions

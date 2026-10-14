@@ -54,6 +54,7 @@ const router = createBrowserRouter([
       { path: "applications", element: lazy(() => import("@/pages/applications")) },
       { path: "positions", element: lazy(() => import("@/pages/positions")) },
       { path: "jobs/:id", element: lazy(() => import("@/pages/job-detail")) },
+      { path: "drafts/:id", element: lazy(() => import("@/pages/draft")) },
       { path: "compare", element: lazy(() => import("@/pages/compare")) },
       { path: "calendar", element: lazy(() => import("@/pages/calendar")) },
       { path: "analytics", element: lazy(() => import("@/pages/analytics")) },

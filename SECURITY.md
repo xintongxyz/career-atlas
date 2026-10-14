@@ -46,6 +46,12 @@ The data is personal: job applications, notes, resumes and contacts. It never le
 - **Billing guard:** it runs only when `claude auth status` reports subscription sign-in (`claude.ai`). API keys, tokens, helpers and cloud-provider auth are refused.
 - System instructions are separate from the untrusted posting, which is wrapped in delimiters with look-alikes stripped. Output is data only, validated with zod against a JSON schema; each field must cite a verbatim quote from the posting, sensitive fields without one are dropped, and salary numbers must appear in the quote.
 
+### AI drafts and the Claude Desktop extension
+
+- The extension (`integrations/claude-desktop`) is a dependency-free MCP server with two tools: `create_job_draft` and `check_job_url` (answers yes/no only). It has no file, shell or database access, can only reach `127.0.0.1`/`localhost`, and cannot read, edit, save or delete jobs. Claude Desktop asks before each tool use.
+- Drafts are verified on the server: values claimed from the posting need an exact quote found in the job description; sensitive fields (salary, visa, authorization, eligibility, work mode, deadline) are dropped unless verified; web-sourced values need a source link; inferences are flagged. A draft becomes a job only through the normal review → apply path after the user clicks Save.
+- Nothing about existing jobs is returned to the AI tool.
+
 ### XSS
 
 - React escapes all output; no `dangerouslySetInnerHTML`. Scraped HTML becomes plain text server-side. External links use `rel="noopener noreferrer nofollow"`.

@@ -400,3 +400,38 @@ export const importSchema = z.object({
 });
 
 export { APPLICATION_STATUSES };
+
+// ---------- AI import (Claude Desktop extension, "Import from AI") ----------
+
+export const AI_IMPORT_FORMAT = "career-atlas-ai-import/v1";
+export const AI_BASES = ["posting", "web", "inferred"] as const;
+
+const aiImportField = z.preprocess(
+  // A bare value ("title": "Data Analyst") is accepted and treated as an unverified inference.
+  (v) => (v && typeof v === "object" && !Array.isArray(v) && "value" in (v as object) ? v : { value: v }),
+  z.object({
+    value: z.unknown(),
+    basis: z.enum(AI_BASES).catch("inferred").default("inferred"),
+    evidence: z.string().max(2000).nullable().optional().catch(null),
+    source_url: z.string().max(LIMITS.urlMaxLength).nullable().optional().catch(null),
+  }),
+);
+
+/** Structured job details proposed by an AI tool. Validated and verified again on the server. */
+export const aiImportSchema = z
+  .object({
+    format: z.string().max(60).optional(),
+    source_url: httpUrl.nullable().optional(),
+    job_description: z.string().max(LIMITS.jdMaxChars).nullable().optional(),
+    fields: z.record(z.string().max(60), aiImportField).default({}),
+    notes: z.string().max(4000).nullable().optional(),
+    origin: z.enum(["claude_desktop", "paste"]).default("paste"),
+  })
+  .refine((v) => !!v.source_url || (v.job_description?.trim().length ?? 0) >= 40, { message: "url_or_text_required" });
+export type AiImportInput = z.infer<typeof aiImportSchema>;
+
+export const draftSaveSchema = z.object({
+  fields: z.record(z.string(), z.unknown()),
+  review_later: z.array(z.string()).max(100).optional(),
+  confirm_duplicate: z.boolean().optional(),
+});

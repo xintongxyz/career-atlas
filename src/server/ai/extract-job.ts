@@ -157,7 +157,7 @@ const aiOutputSchema = z.object({
   relocation_requirement: wrap(s),
 });
 
-const normalize = (t: string) =>
+export const normalize = (t: string) =>
   t
     .toLowerCase()
     .replace(/[‘’`´]/g, "'")
@@ -178,6 +178,14 @@ export function evidenceInSource(evidence: string | null | undefined, normalized
 }
 
 const isEmpty = (v: unknown) => v == null || v === "" || (Array.isArray(v) && v.length === 0) || v === "unknown";
+
+/** True when at least one salary number (or its "70k" form) appears in the quoted evidence. */
+export function salaryNumbersInQuote(sal: { min: number | null; max: number | null }, evidence: string | null | undefined): boolean {
+  const digits = (evidence ?? "").replace(/[,\s]/g, "");
+  return [sal.min, sal.max]
+    .filter((n): n is number => n != null)
+    .some((n) => digits.includes(String(Math.round(n))) || digits.includes(String(Math.round(n / 1000)) + "k") || digits.includes(String(Math.round(n / 1000)) + "K"));
+}
 
 export interface AiExtraction {
   fields: CandidateSet;
@@ -207,11 +215,7 @@ export function verifyAiOutput(raw: unknown, sourceText: string): AiExtraction {
       const sal = value as { min: number | null; max: number | null; currency: string | null; period: string };
       if (sal.min == null && sal.max == null) continue;
       // The numbers themselves must appear in the quoted evidence.
-      const digits = (entry.evidence ?? "").replace(/[,\s]/g, "");
-      const numOk = [sal.min, sal.max]
-        .filter((n): n is number => n != null)
-        .some((n) => digits.includes(String(Math.round(n))) || digits.includes(String(Math.round(n / 1000)) + "k") || digits.includes(String(Math.round(n / 1000)) + "K"));
-      if (!found || !numOk) {
+      if (!found || !salaryNumbersInQuote(sal, entry.evidence)) {
         warnings.push("ai_unverified:salary");
         continue;
       }

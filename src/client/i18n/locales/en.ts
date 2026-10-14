@@ -389,6 +389,9 @@ const en = {
       ai_failed: "AI extraction was unavailable; rule-based extraction was used.",
       ai_invalid_output: "The AI response was invalid and was ignored.",
       ai_unverified: "An AI value for “{{field}}” had no matching quote in the posting and was discarded.",
+      ai_quote_not_found: "The AI's quote for “{{field}}” is not in the job description, so it is marked as an inference.",
+      ai_sensitive_dropped: "“{{field}}” was left out: it can only be filled from a quote in the job description, never guessed.",
+      ai_invalid_value: "The AI's value for “{{field}}” was not valid and was left out.",
       adapter_failed: "The job board's public API failed; the page itself was read instead.",
     },
     source: {
@@ -1150,7 +1153,36 @@ const en = {
     recheck: "Check again",
     aiNotice: "AI extraction uses an online service and your Claude plan's usage allowance. It runs only when you tick “Also use Claude AI”, and only the job description is sent.",
     aiEnable: "Offer Claude AI when importing jobs",
-  },};
+  },  drafts: {
+    title: "AI draft",
+    subtitle: "Review what the AI found. Nothing is saved until you click Save.",
+    inbox: "AI drafts",
+    waiting: "{{count}} AI drafts waiting for your review",
+    waiting_one: "1 AI draft waiting for your review",
+    unknownCompany: "Unknown company",
+    untitled: "Untitled role",
+    origin: { claude_desktop: "From Claude Desktop", paste: "Imported from AI" },
+    legend: "Green: quoted in the job posting. Blue: found on another website (check the link). Orange: the AI's own judgment, not stated anywhere. Missing details stay empty.",
+    aiNotes: "AI notes",
+    duplicateUrl: "You already saved this job link:",
+    saveAnyway: "Save as a separate job anyway",
+    alreadySaved: "This draft was already saved. Open the job.",
+    discardedNote: "This draft was discarded.",
+    basis: { posting: "Verified in posting", web: "From the web · {{site}}", inferred: "AI inference" },
+    import: {
+      tab: "Import from AI",
+      intro: "Paste the answer from ChatGPT, Claude or another AI. You will review everything before it is saved.",
+      copyPrompt: "Copy prompt for your AI",
+      promptCopied: "Prompt copied. Paste it into your AI together with the job link or description.",
+      copyFailed: "Could not copy. Select the text manually.",
+      label: "AI answer",
+      hint: "JSON in the Career Atlas format, or simple lines like “Company: …”, “Title: …”, “Job description: …”.",
+      placeholder: "{ \"format\": \"career-atlas-ai-import/v1\", … }",
+      unreadable: "Could not find job details in this text. Use the copied prompt, or write lines like “Company: …”.",
+      createDraft: "Create draft for review",
+    },
+  },
+};
 
 export default en;
 

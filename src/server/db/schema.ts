@@ -515,3 +515,25 @@ export const customViews = sqliteTable(
   (t) => [index("custom_views_user_idx").on(t.userId, t.page)],
 );
 
+
+// AI drafts (Claude Desktop extension or "Import from AI"): structured job details proposed by an
+// AI tool. A draft is NOT a job: it becomes one only when the user reviews it and clicks Save.
+// Added in 0002 (additive).
+export const jobDrafts = sqliteTable(
+  "job_drafts",
+  {
+    id: id(),
+    userId: userId(),
+    origin: text("origin").notNull().default("paste"), // claude_desktop | paste
+    status: text("status").notNull().default("pending"), // pending | saved | discarded
+    sourceUrl: text("source_url"),
+    descriptionText: text("description_text"),
+    /** ExtractionResult with per-field basis (posting / web / inferred), already verified server-side. */
+    result: text("result", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+    notes: text("notes"),
+    savedJobId: text("saved_job_id").references(() => savedJobs.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("job_drafts_user_status_idx").on(t.userId, t.status, t.createdAt)],
+);

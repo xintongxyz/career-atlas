@@ -87,6 +87,24 @@ All extraction paths from the Cloudflare version work locally: Greenhouse, Lever
 
 **What is sent:** only the posting text being extracted (inside `<job_posting>` delimiters, injection markers stripped) with a fixed extraction instruction. Never notes, history, resumes or other records. Output is schema-validated; values without a verbatim quote from the posting are dropped or downgraded (unchanged logic in `ai/extract-job.ts`). The CLI runs in an empty temporary directory with no tools, one call at a time, 3-minute timeout.
 
+## AI drafts: Claude Desktop extension and "Import from AI"
+
+Claude does the research in your normal Claude Desktop chat (no API key, no extra billing; Claude Desktop runs the extension with its built-in Node). Career Atlas only receives the result as a **draft**.
+
+**Set up once**
+1. `npm run mcp:pack` → `dist/career-atlas.mcpb`.
+2. Claude Desktop → Settings → Extensions → Advanced settings → **Install Extension…** → choose `dist/career-atlas.mcpb` → Install. Leave the address at `http://127.0.0.1:4310`.
+
+**Use**
+1. Open Career Atlas (launcher).
+2. In Claude Desktop: *"Add this job to Career Atlas: <link or pasted job description>"*. Allow the Career Atlas tool when Claude asks.
+3. The draft opens in your browser (or: Dashboard → *AI drafts waiting for your review*).
+4. Check the labels — **Verified in posting** (green, exact quote found), **From the web** (blue, with the page link), **AI inference** (orange, Claude's judgment) — edit or untick anything, then **Save selected fields**. *Dismiss* discards the draft.
+
+**Without Claude Desktop:** Add job → **Import from AI** → *Copy prompt for your AI* → paste it into ChatGPT (or any AI) with the job link/description → paste the answer back → *Create draft for review* → review and save as above.
+
+Rules the app enforces regardless of the AI: values claimed from the posting must have a quote that really appears in the job description (otherwise they become inferences); salary, visa sponsorship, work authorization, eligibility, work arrangement and deadlines are only accepted with such a quote; missing details stay empty; duplicate job links are flagged before saving; the original link and job description are stored with the job. The extension can only create drafts and answer "already saved: yes/no"; it cannot see, edit or delete your jobs.
+
 ## Weekly encrypted backups
 
 - **When:** at launch and every hour while the app runs, a backup is made if the last successful one is 7 days old or older. If the Mac was off on the due day, the backup runs at the next launch. Plus **Back up now** in Settings, `npm run local -- backup`, and automatically before every schema migration. Data only changes while the app runs, so this covers every change without a background service.
@@ -125,7 +143,7 @@ Pulling new code and restarting rebuilds the app; the database stays where it is
 | English / 中文 switching | ✅ | unchanged; new strings in both catalogs | i18n parity + e2e |
 | URL import: Greenhouse, Lever, Ashby, SmartRecruiters, Workday, JSON-LD, HTML, rules, evidence, review, snapshots, overrides, refresh diff, duplicates, paste fallback | ✅ | unchanged pipeline; Node DNS + connect-time public-only fetch | unit + integration; live Greenhouse/Ashby e2e passed locally |
 | Background extraction, progress, retries, failure handling | ✅ | in-process runner (replaces Queues) + restart recovery | local tests (recovery, retry) |
-| AI-assisted extraction | ✅ optional, **off** | Claude Code CLI on request (replaces Workers AI) | adapter tests with a fake CLI; no live call yet (CLI not signed in) |
+| AI-assisted extraction | ✅ optional | Claude Desktop extension → AI drafts (no API billing); Import from AI for other tools; Claude Code CLI on request (off) | integration + MCP stdio tests, packaged-bundle walkthrough, e2e |
 | Documents (resume/cover letter upload, preview, link to applications) | ✅ **now enabled** (R2 was never enabled on Preview) | local file store, atomic writes, sniffing + ownership checks unchanged | integration + backup tests |
 | Autosave with Saving/Saved/Failed + close-tab protection | ✅ new | mutation-cache indicator, debounced text fields, keepalive | e2e (save without blur → reload) |
 | Weekly encrypted backups, Back up now, Test restore, restore CLI | ✅ new | `src/local/backup.ts` | local tests + e2e |

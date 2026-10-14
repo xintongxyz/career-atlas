@@ -36,7 +36,23 @@ function same(a: unknown, b: unknown) {
  * confidence and verbatim evidence. Nothing is stored until the user saves.
  * In refresh mode only changed fields are preselected and manual edits are kept.
  */
-export function ExtractionReview({ extraction, onApplied, onDismiss, compact }: { extraction: ExtractionDTO; onApplied?: (savedJobId: string) => void; onDismiss?: () => void; compact?: boolean }) {
+export function ExtractionReview({
+  extraction,
+  onApplied,
+  onDismiss,
+  compact,
+  endpoints,
+  applyExtra,
+}: {
+  extraction: ExtractionDTO;
+  onApplied?: (savedJobId: string) => void;
+  onDismiss?: () => void;
+  compact?: boolean;
+  /** AI drafts save/discard through their own endpoints; extractions use the defaults. */
+  endpoints?: { apply: string; dismiss: string };
+  /** Extra body fields for the apply request (e.g. confirm_duplicate for drafts). */
+  applyExtra?: Record<string, unknown>;
+}) {
   const { t } = useTranslation();
   const onError = useToastError();
   const invalidate = useInvalidateJobs();
@@ -83,7 +99,7 @@ export function ExtractionReview({ extraction, onApplied, onDismiss, compact }: 
       const fields: Record<string, unknown> = {};
       for (const f of selected) fields[f] = values[f];
       if (includeDescription) fields.description_text = true;
-      return api.post<{ saved_job_id: string }>(`/api/extractions/${extraction.id}/apply`, { fields, review_later: [...later].filter((f) => selected.has(f)) });
+      return api.post<{ saved_job_id: string }>(endpoints?.apply ?? `/api/extractions/${extraction.id}/apply`, { fields, review_later: [...later].filter((f) => selected.has(f)), ...applyExtra });
     },
     onSuccess: (res) => {
       toast.success(t("extraction.review.applied"));
@@ -93,7 +109,7 @@ export function ExtractionReview({ extraction, onApplied, onDismiss, compact }: 
     onError,
   });
   const dismiss = useMutation({
-    mutationFn: () => api.post(`/api/extractions/${extraction.id}/dismiss`),
+    mutationFn: () => api.post(endpoints?.dismiss ?? `/api/extractions/${extraction.id}/dismiss`),
     onSuccess: () => {
       toast(t("extraction.review.dismissed"));
       void invalidate();
@@ -171,6 +187,7 @@ export function ExtractionReview({ extraction, onApplied, onDismiss, compact }: 
                             <Badge tone={c.confidence === "high" ? "ok" : c.confidence === "medium" ? "neutral" : "warn"}>{t(`extraction.confidence.${c.confidence}`)}</Badge>
                           </>
                         )}
+                        {c.basis ? <BasisBadge basis={c.basis} sourceUrl={c.source_url ?? null} /> : null}
                         {c.conflict ? <Badge tone="warn">{t("extraction.review.conflict")}</Badge> : null}
                         {c.needs_review ? <Badge tone="warn">{t("extraction.review.needsReview")}</Badge> : null}
                         {r.overridden ? <Badge tone="info">{t("extraction.review.manualEdit")}</Badge> : null}
@@ -232,6 +249,26 @@ export function ExtractionReview({ extraction, onApplied, onDismiss, compact }: 
       </div>
     </div>
   );
+}
+
+/** AI drafts: whether a value is verified in the posting, researched on the web, or inferred. */
+function BasisBadge({ basis, sourceUrl }: { basis: "posting" | "web" | "inferred"; sourceUrl: string | null }) {
+  const { t } = useTranslation();
+  if (basis === "posting") return <Badge tone="ok">{t("drafts.basis.posting")}</Badge>;
+  if (basis === "web") {
+    let host = "";
+    try {
+      host = sourceUrl ? new URL(sourceUrl).hostname : "";
+    } catch {
+      host = "";
+    }
+    return (
+      <Badge tone="info" title={sourceUrl ?? undefined}>
+        {t("drafts.basis.web", { site: host })}
+      </Badge>
+    );
+  }
+  return <Badge tone="warn">{t("drafts.basis.inferred")}</Badge>;
 }
 
 function EvidenceLine({ evidence }: { evidence: string | null }) {

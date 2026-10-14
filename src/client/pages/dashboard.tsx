@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardHeader, EmptyState, ErrorState, Skeleton } from "@/components/ui/misc";
 import { Tooltip } from "@/components/ui/overlay";
 import { useLocaleContext } from "@/hooks/useMe";
+import { DraftsInbox } from "@/components/jobs/drafts-inbox";
 import { api } from "@/lib/api";
 import { formatDateTime, formatRelative, formatShortDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -27,6 +28,7 @@ export default function DashboardPage() {
         <h1 className="text-xl font-semibold tracking-tight">{t("dashboard.title")}</h1>
         <p className="text-[13px] text-ink-3">{t("dashboard.greeting")}</p>
       </div>
+      <DraftsInbox />
       <QuickAddHero />
       {q.isError ? <ErrorState message={t("common.loadingFailed")} onRetry={() => q.refetch()} retryLabel={t("actions.retry")} /> : null}
       {d?.counts.needs_review ? (

@@ -1,6 +1,7 @@
 import { LIMITS } from "@shared/constants";
 import type { DuplicateMatch } from "@shared/types";
 import { useMutation } from "@tanstack/react-query";
+import { AiImportForm } from "./ai-import";
 import { AiOptIn } from "./ai-opt-in";
 import { AlertTriangle, ExternalLink, Link2 } from "lucide-react";
 import * as React from "react";
@@ -20,7 +21,7 @@ import { ExtractionFallback, ExtractionProgress, isTerminal, useExtraction } fro
 import { ExtractionReview } from "./extraction-review";
 import { JobForm, type JobFormSubmit } from "./job-form";
 
-type Tab = "url" | "paste" | "manual";
+type Tab = "url" | "paste" | "manual" | "ai";
 type Pending = { kind: "capture"; body: { url?: string; text?: string; use_ai?: boolean } } | { kind: "manual"; body: JobFormSubmit };
 
 function validUrl(v: string) {
@@ -189,6 +190,7 @@ export function QuickAddDialog({ open, onOpenChange, initialUrl, initialTab, aut
             { value: "url", label: t("quickAdd.tabUrl") },
             { value: "paste", label: t("quickAdd.tabPaste") },
             { value: "manual", label: t("quickAdd.tabManual") },
+            { value: "ai", label: t("drafts.import.tab") },
           ]}
         />
         {tab === "url" ? (
@@ -235,6 +237,13 @@ export function QuickAddDialog({ open, onOpenChange, initialUrl, initialTab, aut
               </Button>
             </div>
           </form>
+        ) : tab === "ai" ? (
+          <AiImportForm
+            onCreated={(id) => {
+              onOpenChange(false);
+              navigate(`/drafts/${id}`);
+            }}
+          />
         ) : (
           <JobForm mode="create" busy={busy} onSubmit={(v) => manual.mutate(v)} />
         )}

@@ -23,7 +23,7 @@ const FORBIDDEN_FILES = [
   /wrangler\.deploy\.jsonc$/,
   /career-atlas-export-.*\.json$/,
   /career-atlas-jobs-.*\.csv$/,
-  /manifest\.json$/,
+  /^(?!integrations\/claude-desktop\/manifest\.json$).*manifest\.json$/, // backup manifests (the extension manifest is allowed)
   /\.pem$/,
   /\.key$/,
   /(^|\/)\.wrangler\//,

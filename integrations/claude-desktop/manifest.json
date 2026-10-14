@@ -1,0 +1,49 @@
+{
+  "manifest_version": "0.3",
+  "name": "career-atlas",
+  "display_name": "Career Atlas",
+  "version": "0.2.0",
+  "description": "Send job postings Claude researched to your local Career Atlas job tracker as drafts you review and save.",
+  "long_description": "Paste a job link or description into Claude and ask it to add the job to Career Atlas. Claude researches the posting and creates a draft in the Career Atlas app running on your computer, with every value labelled as quoted from the posting, found on the web, or inferred. Nothing is saved until you review the draft in Career Atlas and click Save. The extension can only create drafts and check whether a job link is already saved (yes/no); it cannot read, edit or delete your jobs, and it only talks to Career Atlas on this computer.",
+  "author": { "name": "Career Atlas contributors" },
+  "repository": { "type": "git", "url": "https://github.com/xintongxyz/career-atlas" },
+  "homepage": "https://github.com/xintongxyz/career-atlas",
+  "license": "MIT",
+  "keywords": ["jobs", "job search", "tracker", "local"],
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.mjs"],
+      "env": {
+        "CAREER_ATLAS_URL": "${user_config.career_atlas_url}",
+        "CAREER_ATLAS_OPEN_REVIEW": "${user_config.open_review_page}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "create_job_draft", "description": "Create a job draft in Career Atlas for the user to review and save." },
+    { "name": "check_job_url", "description": "Check whether a job URL is already saved in Career Atlas (yes/no only)." }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "node": ">=18.0.0" }
+  },
+  "user_config": {
+    "career_atlas_url": {
+      "type": "string",
+      "title": "Career Atlas address",
+      "description": "Where Career Atlas runs on this computer. Only 127.0.0.1 or localhost addresses are accepted.",
+      "default": "http://127.0.0.1:4310",
+      "required": false
+    },
+    "open_review_page": {
+      "type": "boolean",
+      "title": "Open the draft in Career Atlas automatically",
+      "description": "After Claude creates a draft, open its review page in your browser.",
+      "default": true,
+      "required": false
+    }
+  }
+}
