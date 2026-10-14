@@ -7,6 +7,7 @@
 //   - "Applied" is set only through changeStatus, after a verified confirmation
 import {
   BLOCKING_ATTEMPT_STATES,
+  classificationUrl,
   UPLOADABLE_RESUME_TYPES,
   type ApplyOverview,
   type ApplySupport,
@@ -32,7 +33,7 @@ import { getProfileRow, profileForMatching } from "./profile";
 const { applicationAttempts, documents, applicationDocuments, userProfiles } = schema;
 export type AttemptRow = typeof applicationAttempts.$inferSelect;
 
-const MANUAL_PLATFORMS = new Set(["workday", "linkedin", "indeed", "ashby", "smartrecruiters"]);
+const MANUAL_PLATFORMS = new Set(["linkedin", "ashby", "smartrecruiters"]);
 const MAX_STEPS = 80;
 
 // ---------------------------------------------------------------- helpers
@@ -48,12 +49,18 @@ export function supportFor(url: string | null, allowLoopback: boolean): ApplySup
   const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
   if (u.protocol !== "https:" && !(allowLoopback && loopback && u.protocol === "http:")) return { ats: null, supported: false, mode: "manual", url };
   if (loopback && !allowLoopback) return { ats: null, supported: false, mode: "manual", url };
-  const p = detectPlatform(url).platform;
+  const p = detectPlatform(classificationUrl(url, allowLoopback)).platform;
+  // Workday career sites (*.myworkdayjobs.com, *.myworkdaysite.com). Company-branded Workday portals
+  // on other domains are recognised on the page ("detect").
+  if (p === "workday") return { ats: "workday", supported: true, mode: "adapter", url };
+  // Indeed listings: the user clicks Apply in a visible window; Career Atlas follows to the
+  // employer's form, or assists with an Indeed-hosted application. Indeed itself is never automated.
+  if (p === "indeed") return { ats: "indeed", supported: true, mode: "indeed", url };
   // Greenhouse boards, and Greenhouse embedded on a company site (?gh_jid=…).
   if (p === "greenhouse") return { ats: "greenhouse", supported: true, mode: "adapter", url };
   if (p === "lever" && /^jobs(\.eu)?\.lever\.co$/.test(u.hostname)) return { ats: "lever", supported: true, mode: "adapter", url };
   if (MANUAL_PLATFORMS.has(p)) return { ats: p, supported: false, mode: "manual", url };
-  // Unknown site: the worker looks for a Greenhouse/Lever form and stops without filling otherwise.
+  // Unknown site: the worker looks for a Workday/Greenhouse/Lever form and stops without filling otherwise.
   return { ats: null, supported: true, mode: "detect", url };
 }
 
@@ -84,6 +91,8 @@ export function toDTO(r: AttemptRow, doc?: { deletedAt: number | null; sha256: s
     stage: r.stage,
     ats: r.ats,
     target_url: r.targetUrl,
+    source_url: r.sourceUrl,
+    route: (r.route as AttemptDTO["route"]) ?? null,
     submit_mode: r.submitMode === "auto" ? "auto" : "review",
     resume: {
       id: r.resumeDocumentId,
@@ -155,8 +164,10 @@ export async function applyOverview(db: Db, env: AppEnv, userId: string, savedJo
   const attempts = await Promise.all(rows.map((r) => (r.resumeDocumentId && docById.has(r.resumeDocumentId) ? toDTO(r, docById.get(r.resumeDocumentId)) : dtoWithDoc(db, r))));
   const blocking = rows.find((r) => (BLOCKING_ATTEMPT_STATES as readonly string[]).includes(r.state));
   const preferred = [saved.resumeDocumentId, profileRow?.resumeDocumentId].find((id) => id && docById.has(id)) ?? null;
+  // An employer form found behind the listing by an earlier attempt (e.g. Indeed → Workday).
+  const resolved = rows.find((r) => r.sourceUrl && r.targetUrl !== r.sourceUrl && r.route !== "indeed_apply");
   return {
-    support,
+    support: { ...support, resolved_url: resolved?.targetUrl ?? null },
     resumes: docs.map((d) => ({ id: d.id, version_name: d.versionName, file_name: d.fileName, mime_type: d.mimeType, size_bytes: d.sizeBytes, created_at: d.createdAt, notes: d.notes, uploadable: UPLOADABLE_RESUME_TYPES.includes(d.mimeType) })),
     default_resume_id: preferred,
     profile_check: profileCheck(profile?.profile ?? null),
@@ -183,14 +194,33 @@ export async function attemptSummaries(db: Db, userId: string, savedJobIds: stri
 
 // ---------------------------------------------------------------- start
 
-export async function startAttempt(db: Db, env: AppEnv, userId: string, savedJobId: string, body: { resume_document_id: string; submit_mode: "auto" | "review" }) {
+export async function startAttempt(db: Db, env: AppEnv, userId: string, savedJobId: string, body: { resume_document_id: string; submit_mode: "auto" | "review"; target_url?: string; indeed_window?: boolean }) {
   if (!env.APPLY) throw new ApiError(503, "automation_unavailable", "Application automation is not available");
   const worker = env.APPLY.status();
   if (!worker.available) throw new ApiError(503, "automation_unavailable", worker.reason ?? "No browser available");
   const { saved, posting, application } = await loadSavedJob(db, userId, savedJobId);
   if (saved.archivedAt) throw conflict("job_archived", "Restore the job before applying");
   if (application) throw conflict("already_applied", "This job already has an application");
-  const support = supportFor(posting.applyUrl || posting.originalUrl || posting.canonicalUrl, env.APPLY.allowLoopback);
+  const jobUrl = posting.applyUrl || posting.originalUrl || posting.canonicalUrl;
+  const jobSupport = supportFor(jobUrl, env.APPLY.allowLoopback);
+  // Where the form actually is. The job keeps its original URL (e.g. the Indeed listing); the
+  // employer's application URL is stored on the attempt.
+  let support = jobSupport;
+  let sourceUrl: string | null = null;
+  let route: AttemptDTO["route"] = "adapter";
+  let visible = 0;
+  if (body.target_url) {
+    support = supportFor(body.target_url, env.APPLY.allowLoopback);
+    if (!support.supported || (support.mode !== "adapter" && support.mode !== "detect")) throw conflict("unsupported_site", "This application link is not a supported employer form");
+    if (body.target_url !== jobUrl) sourceUrl = jobUrl;
+    route = jobSupport.mode === "indeed" ? "indeed_company_site" : "adapter";
+  } else if (jobSupport.mode === "indeed") {
+    // Indeed is never automated: the user clicks Apply in a visible window and Career Atlas follows.
+    if (!body.indeed_window) throw new ApiError(422, "indeed_needs_link_or_window", "Paste the employer's application link, or open the Indeed listing in a window");
+    sourceUrl = jobUrl;
+    route = null; // decided when the user's click lands on the employer's site or on Indeed Apply
+    visible = 1;
+  }
   if (!support.supported || !support.url) throw conflict("unsupported_site", "This site is not supported for automatic applications");
 
   // Duplicate protection: one blocking attempt per job, and never the same form twice.
@@ -229,7 +259,10 @@ export async function startAttempt(db: Db, env: AppEnv, userId: string, savedJob
     resumeMimeType: doc.mimeType,
     resumeSizeBytes: doc.sizeBytes,
     targetUrl: support.url,
-    ats: support.ats,
+    sourceUrl,
+    route,
+    visible,
+    ats: support.ats === "indeed" ? null : support.ats,
     state: "queued",
     submitMode: body.submit_mode,
     submitAuthorized: body.submit_mode === "auto" ? 1 : 0,
@@ -310,18 +343,29 @@ export async function continueVisible(db: Db, env: AppEnv, userId: string, id: s
 /** The user resolves an uncertain submission (e.g. after checking their email). */
 export async function resolveAttempt(db: Db, userId: string, id: string, outcome: "submitted" | "not_submitted") {
   const r = await getAttemptRow(db, userId, id);
-  requireState(r, ["submission_unconfirmed"]);
+  // Also for applications the user completed themselves (Indeed Apply, unsupported employer sites).
+  const userCompleted = r.state === "needs_review" && ["confirm_result", "indeed_apply_assisted", "employer_site_manual"].includes(r.intervention ?? "");
+  if (!userCompleted) requireState(r, ["submission_unconfirmed"]);
   const ts = now();
   if (outcome === "submitted") {
-    await updateAttempt(db, id, { state: "submitted_verified", confirmationSource: "user", confirmedAt: ts, finishedAt: ts }, { code: "user_confirmed" });
+    await updateAttempt(db, id, { state: "submitted_verified", confirmationSource: "user", confirmedAt: ts, finishedAt: ts, intervention: null, questions: [] }, { code: "user_confirmed" });
     await syncApplied(db, userId, await getAttemptRow(db, userId, id));
   } else {
-    await updateAttempt(db, id, { state: "failed", errorCode: "user_reported_not_submitted", finishedAt: ts }, { code: "user_reported_not_submitted" });
+    await updateAttempt(db, id, { state: "failed", errorCode: "user_reported_not_submitted", finishedAt: ts, intervention: null, questions: [] }, { code: "user_reported_not_submitted" });
   }
   return getAttempt(db, userId, id);
 }
 
 // ---------------------------------------------------------------- pipeline sync
+
+const ATS_NAMES: Record<string, string> = { workday: "Workday", greenhouse: "Greenhouse", lever: "Lever" };
+function appliedVia(r: AttemptRow) {
+  if (r.route === "indeed_apply") return "Indeed Apply (completed by you, tracked by Career Atlas)";
+  const ats = r.ats ? ATS_NAMES[r.ats] ?? r.ats : null;
+  if (r.route === "employer_manual") return "Employer site (completed by you, tracked by Career Atlas)";
+  const base = `Career Atlas automation${ats ? ` (${ats})` : ""}`;
+  return r.route === "indeed_company_site" ? `${base} via Indeed` : base;
+}
 
 /**
  * After a verified submission: Applied through changeStatus (append-only event with the attempt
@@ -336,9 +380,9 @@ export async function syncApplied(db: Db, userId: string, r: AttemptRow) {
   if (!application) {
     const res = await changeStatus(db, userId, r.savedJobId, "applied", {
       occurredAt: r.confirmedAt ?? now(),
-      appliedVia: `Career Atlas automation${r.ats ? ` (${r.ats === "greenhouse" ? "Greenhouse" : r.ats === "lever" ? "Lever" : r.ats})` : ""}`,
+      appliedVia: appliedVia(r),
       resumeDocumentId: docUsable ? doc.id : null,
-      metadata: { via: "automation", attempt_id: r.id, ats: r.ats, confirmation: r.confirmationSource, resume_sha256: r.resumeSha256, resume_file_name: r.resumeFileName },
+      metadata: { via: r.route === "indeed_apply" || r.route === "employer_manual" ? "assisted" : "automation", route: r.route, source_url: r.sourceUrl, attempt_id: r.id, ats: r.ats, confirmation: r.confirmationSource, resume_sha256: r.resumeSha256, resume_file_name: r.resumeFileName },
     });
     appId = res.applicationId;
   }

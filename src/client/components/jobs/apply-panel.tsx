@@ -20,7 +20,19 @@ import { api } from "@/lib/api";
 import { formatDate, formatDateTime, formatFileSize } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
+const hostOf = (u: string | null) => {
+  try {
+    return u ? new URL(u).hostname : "";
+  } catch {
+    return "";
+  }
+};
+
 const RUNNING: AttemptState[] = ["queued", "filling", "submitting"];
+/** The worker is watching a visible window in these states (the user acts there). */
+const WATCHING = ["manual_in_browser", "indeed_apply_assisted", "employer_site_manual"];
+/** The user completed (or is completing) the application themselves and reports the result. */
+const USER_COMPLETES = ["indeed_apply_assisted", "employer_site_manual", "confirm_result"];
 const STATE_TONE: Record<AttemptState, "info" | "warn" | "ok" | "danger" | "neutral" | "violet"> = {
   queued: "info",
   filling: "info",
@@ -39,7 +51,7 @@ export function useApplyOverview(jobId: string) {
     // Poll only while the worker is busy or a visible browser is open.
     refetchInterval: (q) => {
       const a = q.state.data?.attempts[0];
-      return a && (RUNNING.includes(a.state) || a.intervention === "manual_in_browser") ? 1500 : false;
+      return a && (RUNNING.includes(a.state) || WATCHING.includes(a.intervention ?? "") || a.stage === "waiting_for_you") ? 1500 : false;
     },
   });
 }
@@ -78,15 +90,30 @@ export function StartApplicationDialog({ job, open, onOpenChange, onStarted }: {
   const [resumeId, setResumeId] = React.useState<string | null>(null);
   const [mode, setMode] = React.useState<"auto" | "review">("review");
   const [authorized, setAuthorized] = React.useState(false);
+  // Indeed listings: follow the user's click in a window, or use the employer's link directly.
+  const [route, setRoute] = React.useState<"window" | "link">("window");
+  const [link, setLink] = React.useState("");
   React.useEffect(() => {
     if (open && data) {
       // A preselected default still has to be confirmed with the authorization tick below.
       setResumeId((v) => v ?? data.default_resume_id);
       setAuthorized(false);
+      if (data.support.resolved_url) {
+        setLink(data.support.resolved_url);
+        setRoute("link");
+      }
     }
   }, [open, data]);
+  const isIndeed = data?.support.mode === "indeed";
+  const linkOk = /^https?:\/\/\S+$/.test(link.trim());
   const start = useMutation({
-    mutationFn: () => api.post<AttemptDTO>(`/api/jobs/${job.id}/apply`, { resume_document_id: resumeId, submit_mode: mode, confirm: true }),
+    mutationFn: () =>
+      api.post<AttemptDTO>(`/api/jobs/${job.id}/apply`, {
+        resume_document_id: resumeId,
+        submit_mode: mode,
+        confirm: true,
+        ...(isIndeed ? (route === "window" ? { indeed_window: true } : { target_url: link.trim() }) : {}),
+      }),
     onSuccess: () => {
       toast.success(t("apply.started"));
       void qc.invalidateQueries({ queryKey: ["apply", job.id] });
@@ -99,7 +126,7 @@ export function StartApplicationDialog({ job, open, onOpenChange, onStarted }: {
   });
   const selected = data?.resumes.find((r) => r.id === resumeId) ?? null;
   const missingRequired = data?.profile_check.filter((c) => c.required && !c.ok) ?? [];
-  const canStart = !!data && data.support.supported && data.worker.available && !data.blocked_by && !!selected?.uploadable && !missingRequired.length && authorized;
+  const canStart = !!data && data.support.supported && data.worker.available && !data.blocked_by && !!selected?.uploadable && !missingRequired.length && authorized && (!isIndeed || route === "window" || linkOk);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -164,6 +191,28 @@ export function StartApplicationDialog({ job, open, onOpenChange, onStarted }: {
                 <dd className="text-ink">{selected ? `${selected.version_name} (${selected.file_name})` : <span className="text-warn">{t("apply.selectResume")}</span>}</dd>
               </dl>
             </section>
+
+            {isIndeed ? (
+              <section>
+                <SectionTitle>{t("apply.indeed.title")}</SectionTitle>
+                <p className="mt-1 text-xs text-ink-3">{t("apply.indeed.help")}</p>
+                <div role="radiogroup" aria-label={t("apply.indeed.title")} className="mt-2 grid gap-2">
+                  {(["window", "link"] as const).map((r) => (
+                    <label key={r} className={cn("cursor-pointer rounded-md border px-3 py-2 text-[13px]", route === r ? "border-accent bg-accent-soft/40" : "border-line hover:bg-subtle")}>
+                      <span className="flex items-center gap-2 font-medium text-ink">
+                        <input type="radio" name="apply-route" checked={route === r} onChange={() => setRoute(r)} className="accent-[var(--color-accent)]" />
+                        {t(`apply.indeed.${r}`)}
+                      </span>
+                      <span className="mt-0.5 block text-xs text-ink-3">{t(`apply.indeed.${r}Help`)}</span>
+                      {r === "link" && route === "link" ? (
+                        <Input className="mt-2" aria-label={t("apply.indeed.link")} placeholder={t("apply.indeed.linkPlaceholder")} value={link} onChange={(e) => setLink(e.target.value)} />
+                      ) : null}
+                    </label>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+            {data.support.ats === "workday" ? <Notice tone="info">{t("apply.workdayNote")}</Notice> : null}
 
             <section>
               <SectionTitle>{t("apply.profileCheck")}</SectionTitle>
@@ -238,7 +287,8 @@ function Notice({ tone, children }: { tone: "warn" | "danger" | "info"; children
 
 // ---------------------------------------------------------------- manual assistance
 
-function ManualAssistance({ job, support }: { job: JobDetail; support: ApplyOverview["support"] }) {
+/** The applicant's details from My Profile, each with a copy button. */
+function ProfileCopyList() {
   const { t } = useTranslation();
   const profile = useQuery({ queryKey: ["profile"], queryFn: () => api.get<{ profile: import("@shared/profile").Profile }>("/api/profile") });
   const c = profile.data?.profile.contact;
@@ -258,22 +308,29 @@ function ManualAssistance({ job, support }: { job: JobDetail; support: ApplyOver
       () => toast.error(t("drafts.import.copyFailed")),
     );
   return (
+    <ul className="divide-y divide-line rounded-md border border-line">
+      {rows
+        .filter(([, v]) => v)
+        .map(([k, v]) => (
+          <li key={k} className="flex items-center gap-2 px-3 py-1.5 text-[13px]">
+            <span className="w-32 shrink-0 text-ink-3">{k}</span>
+            <span className="min-w-0 flex-1 truncate text-ink">{v}</span>
+            <Button size="icon-sm" variant="ghost" aria-label={`${t("actions.copy")} ${k}`} onClick={() => copy(v!)}>
+              <Copy />
+            </Button>
+          </li>
+        ))}
+    </ul>
+  );
+}
+
+function ManualAssistance({ job, support }: { job: JobDetail; support: ApplyOverview["support"] }) {
+  const { t } = useTranslation();
+  return (
     <div className="space-y-4">
       <Notice tone="info">{support.ats ? t("apply.manualFor", { site: t(`platform.${support.ats}`, { defaultValue: support.ats }) }) : support.url ? t("apply.manualUnknown") : t("apply.noUrl")}</Notice>
       <p className="text-[13px] text-ink-2">{t("apply.manualIntro")}</p>
-      <ul className="divide-y divide-line rounded-md border border-line">
-        {rows
-          .filter(([, v]) => v)
-          .map(([k, v]) => (
-            <li key={k} className="flex items-center gap-2 px-3 py-1.5 text-[13px]">
-              <span className="w-32 shrink-0 text-ink-3">{k}</span>
-              <span className="min-w-0 flex-1 truncate text-ink">{v}</span>
-              <Button size="icon-sm" variant="ghost" aria-label={`${t("actions.copy")} ${k}`} onClick={() => copy(v!)}>
-                <Copy />
-              </Button>
-            </li>
-          ))}
-      </ul>
+      <ProfileCopyList />
       <div className="flex flex-wrap gap-2">
         {support.url ? (
           <Button asChild variant="primary">
@@ -382,7 +439,13 @@ function AttemptCard({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: string
         {!a.resume.still_available ? <Badge tone="warn">{t("apply.resumeGone")}</Badge> : a.resume.unchanged === false ? <Badge tone="warn">{t("apply.resumeChanged")}</Badge> : null}
       </p>
 
-      {a.state === "needs_review" ? <Intervention attempt={a} jobId={jobId} /> : null}
+      {a.source_url ? (
+        <p className="text-xs text-ink-3">
+          {t(`apply.route.${a.route ?? "pending"}`, { host: hostOf(a.target_url) })} · {t("apply.routeFrom", { host: hostOf(a.source_url) })}
+        </p>
+      ) : null}
+
+      {a.state === "needs_review" ? <Intervention key={`${a.id}:${a.updated_at}`} attempt={a} jobId={jobId} /> : null}
 
       {a.state === "submission_unconfirmed" ? (
         <div className="space-y-2 rounded-md border border-warn/25 bg-warn-soft px-3 py-2.5 text-[13px] text-ink-2">
@@ -465,9 +528,12 @@ function AttemptCard({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: string
 function Intervention({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: string }) {
   const { t } = useTranslation();
   const act = useAttemptAction(jobId);
-  const [answers, setAnswers] = React.useState<Record<string, string | string[] | boolean>>({});
+  // Values a site pre-filled from the resume are shown so the user can confirm or correct them.
+  const [answers, setAnswers] = React.useState<Record<string, string | string[] | boolean>>(() => Object.fromEntries(a.questions.filter((q) => q.reason === "parsed_unverified" && q.hint && q.kind !== "radio").map((q) => [q.key, q.hint!])));
   const [remember, setRemember] = React.useState<Record<string, boolean>>({});
   const reason = a.intervention ?? "unexpected_page";
+  const watching = WATCHING.includes(reason) || a.stage === "waiting_for_you";
+  const helpKey = reason === "login_required" && a.ats === "workday" ? "login_required_workday" : reason;
   const answered = (q: PendingQuestion) => {
     const v = answers[q.key];
     return q.kind === "checkbox" ? v === true : Array.isArray(v) ? v.length > 0 : typeof v === "string" && v.trim() !== "";
@@ -479,10 +545,11 @@ function Intervention({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: strin
         <AlertTriangle className="size-4" />
         {t(`apply.intervention.${reason}`)}
       </p>
-      <p className="text-xs text-ink-2">{t(`apply.interventionHelp.${reason}`)}</p>
+      <p className="text-xs text-ink-2">{t(`apply.interventionHelp.${helpKey}`)}</p>
+      {USER_COMPLETES.includes(reason) ? <UserCompletes attempt={a} onResolve={(outcome) => act.mutate({ id: a.id, action: "resolve", body: { outcome } })} busy={act.isPending} /> : null}
       {a.error_message && reason === "validation_errors" ? <p className="rounded bg-surface px-2 py-1 text-xs text-ink-2">{a.error_message}</p> : null}
 
-      {a.questions.length && reason !== "manual_in_browser" ? (
+      {a.questions.length && !USER_COMPLETES.includes(reason) ? (
         <form
           className="space-y-3"
           onSubmit={(e) => {
@@ -508,7 +575,7 @@ function Intervention({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: strin
             {reason === "validation_errors" ? t("apply.retrySubmit") : t("apply.approveSubmit")}
           </Button>
         ) : null}
-        {reason !== "manual_in_browser" ? (
+        {!watching && reason !== "confirm_result" ? (
           <Button size="sm" disabled={act.isPending} onClick={() => act.mutate({ id: a.id, action: "visible" })} title={t("apply.visibleHelp")}>
             <MonitorUp />
             {t("apply.openVisible")}
@@ -524,6 +591,31 @@ function Intervention({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: strin
             <ExternalLink />
             {t("apply.openApplication")}
           </a>
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** Indeed Apply / unsupported employer sites: the user applies; their resume and details are at hand. */
+function UserCompletes({ attempt: a, onResolve, busy }: { attempt: AttemptDTO; onResolve: (o: "submitted" | "not_submitted") => void; busy: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-2 rounded-md bg-surface px-3 py-2 text-[13px]">
+      {a.resume.id && a.resume.still_available ? (
+        <p>
+          <a className="text-accent underline" href={`/api/documents/${a.resume.id}/content`}>
+            {t("apply.downloadResume", { file: a.resume.file_name })}
+          </a>
+        </p>
+      ) : null}
+      <ProfileCopyList />
+      <div className="flex flex-wrap gap-2 pt-1">
+        <Button size="sm" variant="primary" disabled={busy} onClick={() => onResolve("submitted")}>
+          {t("apply.resolveSubmitted")}
+        </Button>
+        <Button size="sm" disabled={busy} onClick={() => onResolve("not_submitted")}>
+          {t("apply.resolveNotSubmitted")}
         </Button>
       </div>
     </div>

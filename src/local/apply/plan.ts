@@ -13,7 +13,7 @@
 import type { FilledField, PendingQuestion } from "@shared/apply";
 import type { Profile } from "@shared/profile";
 
-export type Control = "text" | "textarea" | "select" | "radio" | "checkbox" | "checkboxes" | "file" | "combobox";
+export type Control = "text" | "textarea" | "select" | "radio" | "checkbox" | "checkboxes" | "file" | "combobox" | "listbox" | "date";
 
 export interface FieldOption {
   value: string;
@@ -43,6 +43,15 @@ export interface FieldDescriptor {
   visible: boolean;
   /** Combobox whose options load only after typing (e.g. a location search). */
   asyncOptions?: boolean;
+  /** Workday: the field's formField-<name>. */
+  wdField?: string;
+  /** Workday repeating panels (work / education / skills): filled by the Workday adapter, not the generic planner. */
+  group?: "work" | "education" | "skills" | null;
+  groupIndex?: number | null;
+  /** The site marked the field as invalid (aria-invalid / Workday inputAlert). */
+  invalid?: boolean;
+  /** Date fields typed as separate month / day / year inputs (refs). */
+  parts?: { month?: string; day?: string; year?: string };
 }
 
 export type Semantic =
@@ -93,6 +102,7 @@ export type PlannedAction =
   | { ref: string; key: string; label: string; control: Control; kind: "choose"; values: string[]; source: string; optionRefs?: string[] }
   | { ref: string; key: string; label: string; control: Control; kind: "check"; value: boolean; source: string }
   | { ref: string; key: string; label: string; control: Control; kind: "upload"; source: "resume" }
+  | { ref: string; key: string; label: string; control: Control; kind: "date"; value: { month?: string; day?: string; year?: string }; parts: { month?: string; day?: string; year?: string }; source: string }
   /** Search-as-you-type combobox: type `value`, then pick the one option containing every `match` part. */
   | { ref: string; key: string; label: string; control: Control; kind: "search"; value: string; match: string[]; source: string };
 
@@ -115,7 +125,8 @@ export const norm = (s: string | null | undefined) =>
     .trim();
 
 /** Stable key of a field across page loads (used for the user's answers). */
-export function fieldKey(f: Pick<FieldDescriptor, "name" | "id" | "label">): string {
+export function fieldKey(f: Pick<FieldDescriptor, "name" | "id" | "label"> & { wdField?: string }): string {
+  if (f.wdField) return `wd:${f.wdField}`.slice(0, 200);
   const n = f.name.replace(/\[\]$/, "");
   if (n && !/^\d+$/.test(n)) return `name:${n}`.slice(0, 200);
   if (f.id && !/^\d+$|^:r/.test(f.id)) return `id:${f.id}`.slice(0, 200);
@@ -142,9 +153,10 @@ export function classify(f: FieldDescriptor): Semantic {
     return "unknown";
   }
   // Voluntary self-identification is recognised before anything else so it is never filled.
-  if (f.demographic || /^eeo\[/.test(name) || DEMOGRAPHIC_RE.test(label)) return "demographic";
-  // Declarations, consents and signatures need the user's explicit approval.
+  if (/^eeo\[/.test(name) || DEMOGRAPHIC_RE.test(label)) return "demographic";
+  // Declarations, consents and signatures need the user's explicit approval (also inside an EEO section).
   if (/^consent\[/.test(name) || /signature/.test(all) || (LEGAL_RE.test(label) && f.control !== "text" && f.control !== "textarea")) return "legal";
+  if (f.demographic) return "demographic";
   return classifyStandard(f, name, id, ac, label, keys, all);
 }
 
@@ -154,7 +166,7 @@ function classifyStandard(f: FieldDescriptor, name: string, id: string, ac: stri
   if (/preferred_?name/.test(keys) || /^preferred (first )?name/.test(label)) return "preferred_name";
   if (ac === "name" || name === "name" || /^(full |legal )?name$/.test(label)) return "full_name";
   if (ac === "email" || f.inputType === "email" || /(^|[^a-z])e?-?mail/.test(keys) || /^e ?mail/.test(label)) return "email";
-  if (f.control !== "combobox" && f.control !== "select" && (ac.startsWith("tel") || f.inputType === "tel" || /phone|mobile/.test(keys) || /^(phone|mobile|telephone|cell)/.test(label))) return "phone";
+  if (f.control !== "combobox" && f.control !== "select" && f.control !== "listbox" && (ac.startsWith("tel") || f.inputType === "tel" || /phone|mobile/.test(keys) || /^(phone|mobile|telephone|cell)/.test(label))) return "phone";
   if (/linkedin/.test(all)) return "linkedin";
   if (/github/.test(all)) return "github";
   if (/portfolio/.test(all)) return "portfolio";
@@ -365,9 +377,9 @@ export function savedAnswerFor(profile: Profile, label: string): unknown {
   return profile.saved_answers.find((s) => norm(s.question) === n)?.answer;
 }
 
-function question(f: FieldDescriptor, key: string, reason: string, sensitive: boolean, hint?: string | null): PendingQuestion {
+export function question(f: FieldDescriptor, key: string, reason: string, sensitive: boolean, hint?: string | null): PendingQuestion {
   const kind: PendingQuestion["kind"] =
-    f.control === "textarea" ? "textarea" : f.control === "select" || f.control === "combobox" ? "select" : f.control === "radio" ? "radio" : f.control === "checkbox" ? "checkbox" : f.control === "checkboxes" ? "multi" : f.inputType === "date" ? "date" : f.inputType === "number" ? "number" : "text";
+    f.control === "textarea" ? "textarea" : f.control === "select" || f.control === "combobox" || f.control === "listbox" ? "select" : f.control === "date" ? "date" : f.control === "radio" ? "radio" : f.control === "checkbox" ? "checkbox" : f.control === "checkboxes" ? "multi" : f.inputType === "date" ? "date" : f.inputType === "number" ? "number" : "text";
   return {
     key,
     label: (f.label || f.placeholder || f.name || f.id).slice(0, 500),
@@ -383,7 +395,7 @@ function question(f: FieldDescriptor, key: string, reason: string, sensitive: bo
 const SENSITIVE_SEMANTICS = new Set<Semantic>(["work_authorization", "sponsorship", "driver_licence", "vehicle", "legal", "demographic"]);
 
 /** Turns a resolved value into a concrete action for the control, or null when it does not fit. */
-function toAction(f: FieldDescriptor, key: string, value: unknown, source: string): PlannedAction | { misfit: string } {
+export function toAction(f: FieldDescriptor, key: string, value: unknown, source: string): PlannedAction | { misfit: string } {
   const base = { ref: f.ref, key, label: f.label, control: f.control };
   switch (f.control) {
     case "text":
@@ -397,6 +409,13 @@ function toAction(f: FieldDescriptor, key: string, value: unknown, source: strin
       if (NO_RE.test(s)) return { ...base, kind: "check", value: false, source };
       return { misfit: String(value) };
     }
+    case "date": {
+      const d = parseDateAnswer(typeof value === "string" ? value : "");
+      const p = f.parts ?? {};
+      if (!d || (p.month && !d.month) || (p.day && !d.day) || (p.year && !d.year)) return { misfit: String(value) };
+      return { ...base, kind: "date", value: { month: p.month ? d.month : undefined, day: p.day ? d.day : undefined, year: p.year ? d.year : undefined }, parts: p, source };
+    }
+    case "listbox":
     case "select":
     case "radio": {
       const opt = matchOption(f.options.filter((o) => !isPlaceholderOption(o)), typeof value === "boolean" ? (value ? "yes" : "no") : String(value));
@@ -429,6 +448,7 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
   let resumeDone = false;
   for (const f of fields) {
     if (!f.visible && f.control !== "file") continue;
+    if (f.group) continue; // Workday work / education / skills panels: filled by the adapter
     const key = fieldKey(f);
     const sem = classify(f);
     if (sem === "resume") {
@@ -484,4 +504,17 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
 
 export function filledSummary(actions: PlannedAction[], verified: Set<string>): FilledField[] {
   return actions.map((a) => ({ label: (a.label || a.key).slice(0, 300), source: a.source, verified: verified.has(a.ref) }));
+}
+
+/** Accepts YYYY-MM-DD, YYYY-MM, YYYY, MM/DD/YYYY, MM/YYYY. Never guesses a missing part. */
+export function parseDateAnswer(raw: string): { month?: string; day?: string; year?: string } | null {
+  const s = raw.trim();
+  let m: RegExpMatchArray | null;
+  const pad = (x: string) => x.padStart(2, "0");
+  if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/))) return { year: m[1], month: pad(m[2]), day: pad(m[3]) };
+  if ((m = s.match(/^(\d{4})-(\d{1,2})$/))) return { year: m[1], month: pad(m[2]) };
+  if ((m = s.match(/^(\d{4})$/))) return { year: m[1] };
+  if ((m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) return { month: pad(m[1]), day: pad(m[2]), year: m[3] };
+  if ((m = s.match(/^(\d{1,2})\/(\d{4})$/))) return { month: pad(m[1]), year: m[2] };
+  return null;
 }

@@ -43,6 +43,13 @@
       "when": 1792000608867,
       "tag": "0005_application_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792004074070,
+      "tag": "0006_attempt_routes",
+      "breakpoints": true
     }
   ]
 }

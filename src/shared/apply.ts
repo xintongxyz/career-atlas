@@ -22,7 +22,7 @@ export const BLOCKING_ATTEMPT_STATES: readonly AttemptState[] = ["queued", "fill
 export const FINAL_ATTEMPT_STATES: readonly AttemptState[] = ["submitted_verified", "failed", "cancelled"];
 
 /** Application systems with a working adapter. Everything else gets manual assistance. */
-export const SUPPORTED_ATS = ["greenhouse", "lever"] as const;
+export const SUPPORTED_ATS = ["workday", "greenhouse", "lever"] as const;
 export type SupportedAts = (typeof SUPPORTED_ATS)[number];
 
 /** Why an attempt is waiting for the user. */
@@ -36,6 +36,9 @@ export const INTERVENTION_REASONS = [
   "validation_errors", // the site rejected the form before submitting
   "unexpected_page",
   "manual_in_browser", // the user is finishing in a visible browser window
+  "indeed_apply_assisted", // an Indeed-hosted application: the user completes it on Indeed
+  "employer_site_manual", // the employer's site is not supported: the user completes it there
+  "confirm_result", // the window closed without a confirmation the app could see: did it go through?
 ] as const;
 export type InterventionReason = (typeof INTERVENTION_REASONS)[number];
 
@@ -77,6 +80,9 @@ export interface AttemptDTO {
   stage: string | null;
   ats: string | null;
   target_url: string;
+  /** The listing the user started from (e.g. Indeed) when the form is elsewhere. */
+  source_url: string | null;
+  route: AttemptRoute | null;
   submit_mode: "auto" | "review";
   resume: { id: string | null; version_name: string; file_name: string; sha256: string; size_bytes: number; still_available: boolean; unchanged: boolean | null };
   visible: boolean;
@@ -103,12 +109,21 @@ export interface AttemptSummary {
   updated_at: number;
 }
 
+export const ATTEMPT_ROUTES = ["adapter", "indeed_company_site", "indeed_apply", "employer_manual"] as const;
+export type AttemptRoute = (typeof ATTEMPT_ROUTES)[number];
+
 export interface ApplySupport {
   ats: string | null;
   supported: boolean;
-  /** "detect": unknown site; the worker will look for a supported form and otherwise stop. */
-  mode: "adapter" | "detect" | "manual";
+  /**
+   * adapter: Workday / Greenhouse / Lever form · detect: unknown site, the worker looks for a supported
+   * form · indeed: an Indeed listing (the user clicks Apply; Career Atlas follows to the employer's
+   * form, or assists with Indeed Apply) · manual: copy-ready assistance only.
+   */
+  mode: "adapter" | "detect" | "indeed" | "manual";
   url: string | null;
+  /** Employer application URL found by an earlier attempt for this job (e.g. behind Indeed). */
+  resolved_url?: string | null;
 }
 
 export interface ProfileCheckItem {
@@ -130,6 +145,10 @@ export interface ApplyOverview {
 export const startApplySchema = z.object({
   resume_document_id: z.string().min(1).max(64),
   submit_mode: z.enum(["auto", "review"]),
+  /** The employer's application link (e.g. copied from Indeed's "Apply on company site"). */
+  target_url: z.string().trim().url().max(2000).optional(),
+  /** Indeed: open the listing in a visible window; the user clicks Apply and Career Atlas follows. */
+  indeed_window: z.boolean().optional(),
   /** The user ticked the authorization checkbox in the confirmation dialog. */
   confirm: z.literal(true),
 });
@@ -144,3 +163,25 @@ export const resolveSchema = z.object({ outcome: z.enum(["submitted", "not_submi
 
 /** Resume types an application form can receive. */
 export const UPLOADABLE_RESUME_TYPES = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"];
+
+/**
+ * Test/dev instances serve synthetic ATS forms from 127.0.0.1 under /wd/, /indeed/ and
+ * /indeed/smartapply/. This maps such a URL to the real-site shape it imitates, so URL rules are
+ * exercised by the tests. Only applies when loopback targets are allowed (never on the personal
+ * instance); every other URL is returned unchanged.
+ */
+export function classificationUrl(raw: string, allowLoopback: boolean): string {
+  if (!allowLoopback) return raw;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return raw;
+  }
+  if (!["127.0.0.1", "localhost"].includes(u.hostname)) return raw;
+  const rest = `${u.search}${u.hash}`;
+  if (u.pathname.startsWith("/indeed/smartapply/")) return `https://smartapply.indeed.com/${u.pathname.slice("/indeed/smartapply/".length)}${rest}`;
+  if (u.pathname.startsWith("/indeed/")) return `https://www.indeed.com/${u.pathname.slice("/indeed/".length)}${rest}`;
+  if (u.pathname.startsWith("/wd/")) return `https://fixture.wd1.myworkdayjobs.com/${u.pathname.slice("/wd/".length)}${rest}`;
+  return raw;
+}

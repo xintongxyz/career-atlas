@@ -578,6 +578,10 @@ export const applicationAttempts = sqliteTable(
     resumeMimeType: text("resume_mime_type").notNull(),
     resumeSizeBytes: integer("resume_size_bytes").notNull(),
     targetUrl: text("target_url").notNull(),
+    /** Where the user started (e.g. the Indeed listing) when the form lives elsewhere. Added in 0006. */
+    sourceUrl: text("source_url"),
+    /** adapter | indeed_company_site | indeed_apply | employer_manual. Added in 0006. */
+    route: text("route"),
     ats: text("ats"),
     state: text("state").notNull().default("queued"),
     stage: text("stage"),

@@ -120,9 +120,11 @@ Rules the app enforces regardless of the AI: values claimed from the posting mus
 
 ## Automated applications
 
-*Start application* on a job fills in Greenhouse and Lever application forms in a separate,
-local Playwright browser, with the resume version you choose, and marks the job *Applied* only
-after the employer's site confirms. Everything else gets manual assistance. Workflow, states,
+*Start application* on a job fills in Workday, Greenhouse and Lever application forms in a
+separate, local Playwright browser, with the resume version you choose, follows Indeed listings
+to the employer's form (Indeed itself is never automated), and marks the job *Applied* only
+after a confirmation. Everything else gets manual assistance. Workday sign-ins are done by you in
+a visible window; the session stays in the automation profile below. Workflow, states,
 safeguards and synthetic testing: [AUTO_APPLY.md](AUTO_APPLY.md). The automation browser uses
 its own profile in `…/CareerAtlas/automation/` (never your Chrome profile) and runs one
 application at a time; attempts survive a restart (an interrupted submission becomes

@@ -6,6 +6,8 @@
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { indeedRoute, newIndeedState, type IndeedFixtureState } from "./indeed-fixture";
+import { newWorkdayState, workdayRoute, type WorkdayFixtureState } from "./workday-fixture";
 
 export interface Submission {
   path: string;
@@ -17,6 +19,8 @@ export interface AtsFixture {
   url: string;
   submissions: Submission[];
   hits: string[];
+  workday: WorkdayFixtureState;
+  indeed: IndeedFixtureState;
   close(): Promise<void>;
 }
 
@@ -166,10 +170,14 @@ async function readBody(req: IncomingMessage) {
 export async function startAtsFixture(): Promise<AtsFixture> {
   const submissions: Submission[] = [];
   const hits: string[] = [];
+  const workday = newWorkdayState();
+  const indeed = newIndeedState();
   const server: Server = createServer(async (req, res) => {
     const u = new URL(req.url ?? "/", "http://127.0.0.1");
-    const variant = u.searchParams.get("variant") ?? "";
     hits.push(`${req.method} ${u.pathname}`);
+    if (await workdayRoute(req, res, u, workday)) return;
+    if (await indeedRoute(req, res, u, indeed)) return;
+    const variant = u.searchParams.get("variant") ?? "";
     const html = (s: string, status = 200) => {
       res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
       res.end(s);
@@ -210,6 +218,8 @@ export async function startAtsFixture(): Promise<AtsFixture> {
     url: `http://127.0.0.1:${port}`,
     submissions,
     hits,
+    workday,
+    indeed,
     close: () => new Promise((r) => server.close(() => r())),
   };
 }

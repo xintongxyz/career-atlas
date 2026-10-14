@@ -74,11 +74,46 @@ test("start an application with a chosen resume, answer what the profile doesn't
 });
 
 test("unsupported sites get manual assistance instead of automation", async ({ page, request }) => {
-  const res = await request.post("/api/jobs", { headers: ORIGIN, data: { job: { company_name: "Contoso (synthetic)", title: "Workday Analyst", original_url: "https://contoso.wd3.myworkdayjobs.com/en-US/careers/job/Toronto/Analyst_R123" }, confirm_duplicate: true } });
+  const res = await request.post("/api/jobs", { headers: ORIGIN, data: { job: { company_name: "Contoso (synthetic)", title: "SmartRecruiters Analyst", original_url: "https://jobs.smartrecruiters.com/Contoso/744000012345678-analyst" }, confirm_duplicate: true } });
   const { id } = (await res.json()) as { id: string };
   await page.goto(`/jobs/${id}`);
   await page.getByRole("button", { name: "Start application" }).first().click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Automatic applications are not available for Workday")).toBeVisible();
+  await expect(dialog.getByText("Automatic applications are not available for SmartRecruiters")).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Copy Email" })).toBeVisible();
+});
+
+test("Workday: sign-in is handed to the user with clear guidance (never automated)", async ({ page, request }) => {
+  const url = `${fx.url}/wd/northwind/job/Toronto-ON/Data-Analyst_R900?variant=login`;
+  const res = await request.post("/api/jobs", { headers: ORIGIN, data: { job: { company_name: "Northwind (synthetic Workday)", title: "Workday Analyst", country: "Canada", original_url: url }, confirm_duplicate: true } });
+  const { id } = (await res.json()) as { id: string };
+  await page.goto(`/jobs/${id}`);
+  await page.getByRole("button", { name: "Start application" }).first().click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText(/most employers ask you to create an account or sign in first/)).toBeVisible();
+  await dialog.getByRole("radio", { name: "General resume" }).check();
+  await dialog.getByRole("checkbox", { name: "Authorize this application" }).click();
+  await dialog.getByRole("button", { name: "Start", exact: true }).click();
+  await expect(page.getByText(/asks you to sign in or create an account/).first()).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByRole("button", { name: "Continue in a visible browser" })).toBeVisible();
+  expect(fx.workday.authTouched).toEqual([]);
+  await page.getByRole("button", { name: "Cancel", exact: true }).first().click();
+});
+
+test("Indeed: the employer's application link is used; the Indeed listing stays the job's source", async ({ page, request }) => {
+  const listing = `${fx.url}/indeed/viewjob?jk=abcdefabcdef0001&type=company`;
+  const res = await request.post("/api/jobs", { headers: ORIGIN, data: { job: { company_name: "Northwind (via Indeed, synthetic)", title: "Indeed Analyst", country: "Canada", original_url: listing }, confirm_duplicate: true } });
+  const { id } = (await res.json()) as { id: string };
+  await page.goto(`/jobs/${id}`);
+  await page.getByRole("button", { name: "Start application" }).first().click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("How to reach the application")).toBeVisible();
+  await dialog.getByRole("radio", { name: /Use the employer's application link/ }).check();
+  await dialog.getByPlaceholder("https://…myworkdayjobs.com/…").fill(`${fx.url}/lever/northwind/0b6c0a6e-1111-4222-8333-444455556666/apply`);
+  await dialog.getByRole("radio", { name: "General resume" }).check();
+  await dialog.getByRole("checkbox", { name: "Authorize this application" }).click();
+  await dialog.getByRole("button", { name: "Start", exact: true }).click();
+  await expect(page.getByText(/started from 127\.0\.0\.1/)).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText("Some required questions need your answer", { exact: true }).first()).toBeVisible({ timeout: 60_000 });
+  await page.getByRole("button", { name: "Cancel", exact: true }).first().click();
 });

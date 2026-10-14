@@ -22,6 +22,8 @@ export function createApplyRunner(opts: {
   automationDir: string;
   allowLoopback: boolean;
   timeouts?: EngineDeps["timeouts"];
+  /** Tests only: run visible-window logic headless. */
+  forceHeadless?: boolean;
   /** Tests may force a choice (e.g. unavailable). */
   choice?: BrowserChoice;
 }): ApplyRunner {
@@ -58,6 +60,7 @@ export function createApplyRunner(opts: {
             allowLoopback: opts.allowLoopback,
             isCancelled: (a) => cancelled.has(a),
             timeouts: opts.timeouts,
+            forceHeadless: opts.forceHeadless,
           },
           id,
         );
@@ -110,6 +113,8 @@ export function createApplyRunner(opts: {
         .run();
       // A visible hand-off cannot survive a restart: back to the user with the reason.
       await db.prepare("UPDATE application_attempts SET intervention = 'unexpected_page', visible = 0, stage = NULL, updated_at = ? WHERE state = 'needs_review' AND intervention = 'manual_in_browser'").bind(now).run();
+      // Applications the user was completing in a window (Indeed Apply, unsupported employer site): ask how it ended.
+      await db.prepare("UPDATE application_attempts SET intervention = 'confirm_result', visible = 0, stage = NULL, updated_at = ? WHERE state = 'needs_review' AND intervention IN ('indeed_apply_assisted', 'employer_site_manual')").bind(now).run();
       await db.prepare("UPDATE application_attempts SET state = 'cancelled', finished_at = ?, updated_at = ? WHERE state IN ('queued','filling') AND cancel_requested_at IS NOT NULL").bind(now, now).run();
       await db.prepare("UPDATE application_attempts SET state = 'queued', stage = NULL, updated_at = ? WHERE state = 'filling'").bind(now).run();
       const rows = await db.prepare("SELECT id FROM application_attempts WHERE state = 'queued' ORDER BY created_at").all<{ id: string }>();

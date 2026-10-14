@@ -17,9 +17,12 @@ export interface PageSignals {
   greenhouseIframe: string | null;
   greenhouseForm: boolean;
   leverForm: boolean;
+  workday: boolean;
 }
 
-export type Ats = "greenhouse" | "lever";
+import { classificationUrl } from "@shared/apply";
+
+export type Ats = "workday" | "greenhouse" | "lever";
 
 export function atsFromUrl(raw: string): Ats | null {
   let u: URL;
@@ -31,11 +34,13 @@ export function atsFromUrl(raw: string): Ats | null {
   const host = u.hostname.toLowerCase();
   if (/(^|\.)greenhouse\.io$/.test(host)) return "greenhouse";
   if (/^jobs(\.eu)?\.lever\.co$/.test(host)) return "lever";
+  if (/\.myworkdayjobs\.com$|\.myworkdaysite\.com$|\.myworkday\.com$/.test(host)) return "workday";
   return null;
 }
 
-export function atsFromSignals(s: Pick<PageSignals, "url" | "greenhouseForm" | "leverForm">): Ats | null {
-  return atsFromUrl(s.url) ?? (s.greenhouseForm ? "greenhouse" : s.leverForm ? "lever" : null);
+export function atsFromSignals(s: Pick<PageSignals, "url" | "greenhouseForm" | "leverForm" | "workday">, allowLoopback = false): Ats | null {
+  // Company-branded Workday portals are recognised by Workday's own markup, whatever the domain.
+  return atsFromUrl(classificationUrl(s.url, allowLoopback)) ?? (s.workday ? "workday" : s.greenhouseForm ? "greenhouse" : s.leverForm ? "lever" : null);
 }
 
 /** The page that holds the application form, for a posting URL. */
@@ -54,6 +59,8 @@ const SUCCESS_TEXT = [
   /thanks for applying/i,
   /application (has been |was )?(successfully )?(submitted|received|sent)/i,
   /(we('ve| have)|we) received your application/i,
+  /you have (successfully )?(submitted|applied)/i,
+  /successfully (submitted|applied)/i,
   /your application (is|has been) (on its way|in)/i,
 ];
 

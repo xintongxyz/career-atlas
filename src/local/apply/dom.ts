@@ -4,7 +4,7 @@
 
 /** Returns FieldDescriptor[] (see plan.ts) for the form controls in `root` (default: document). */
 export const SCAN_FIELDS = String.raw`(() => {
-  const root = document.querySelector('form#application-form, form#application_form, form.application-form, form[data-qa="application-form"]') || document;
+  const root = document.querySelector('form#application-form, form#application_form, form.application-form, form[data-qa="application-form"], [data-automation-id="applyFlowPage"]') || document;
   let n = Number(document.documentElement.getAttribute('data-ca-seq') || 0);
   const ref = (el) => {
     if (!el.getAttribute('data-ca-ref')) { n += 1; el.setAttribute('data-ca-ref', 'f' + n); }
@@ -23,8 +23,32 @@ export const SCAN_FIELDS = String.raw`(() => {
     return clean(c.textContent);
   };
   const byIds = (ids) => clean((ids || '').split(/\s+/).map((i) => textOf(document.getElementById(i))).join(' '));
-  const container = (el) => el.closest('.field, .application-question, .application-field, .form-field, li, fieldset, [class*="question"], [class*="field"]');
+  // Workday: every control sits in [data-automation-id="formField-<name>"] with its label.
+  const wdField = (el) => el.closest('[data-automation-id^="formField-"]');
+  const wdName = (el) => { const f = wdField(el); return f ? f.getAttribute('data-automation-id').slice(10) : ''; };
+  const container = (el) => wdField(el) || el.closest('.field, .application-question, .application-field, .form-field, li, fieldset, [class*="question"], [class*="field"]');
+  const wdLabel = (el) => { const f = wdField(el); if (!f) return ''; const l = f.querySelector('label, legend'); return l ? textOf(l) : ''; };
+  // Workday repeating panels (work experience, education): Workday marks each panel
+  // (data-automation-id="workExperience-1", "education-2") and prefixes its inputs' ids the same way.
+  const PANEL_RE = /^(workExperience|education)-(\d+)$/;
+  const panelOf = (el) => {
+    let a = el;
+    while (a && a !== document.body) {
+      const m = (a.getAttribute && a.getAttribute('data-automation-id') || '').match(PANEL_RE);
+      if (m) {
+        const all = [...document.querySelectorAll('[data-automation-id^="' + m[1] + '-"]')].filter((x) => PANEL_RE.test(x.getAttribute('data-automation-id')));
+        return { group: m[1] === 'workExperience' ? 'work' : 'education', groupIndex: all.indexOf(a) };
+      }
+      a = a.parentElement;
+    }
+    const idm = (el.id || '').match(/^(workExperience|education)-(\d+)--/);
+    if (idm) return { group: idm[1] === 'workExperience' ? 'work' : 'education', groupIndex: Number(idm[2]) - 1 };
+    if (wdName(el) === 'skills') return { group: 'skills', groupIndex: 0 };
+    return { group: null, groupIndex: null };
+  };
   const labelFor = (el) => {
+    const w = wdLabel(el);
+    if (w) return w;
     if (el.id) {
       const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
       if (l && textOf(l)) return textOf(l);
@@ -48,17 +72,55 @@ export const SCAN_FIELDS = String.raw`(() => {
     if (sec) { const h = sec.querySelector('h1,h2,h3,h4,legend'); if (h) head = textOf(h); head += ' ' + (sec.id || ''); }
     return clean(head);
   };
-  const isDemo = (el) => !!el.closest('#demographic-section, #eeoc_fields, .eeo-section, [class*="demographic"], [data-qa*="eeo"]') || /voluntary|self.identif|demographic|equal employment|eeo/i.test(sectionOf(el));
+  const isDemo = (el) => !!el.closest('#demographic-section, #eeoc_fields, .eeo-section, [class*="demographic"], [data-qa*="eeo"], [data-automation-id="applyFlowVoluntaryDisclosuresPage"], [data-automation-id="applyFlowSelfIdentifyPage"], [data-automation-id="voluntaryDisclosuresPage"], [data-automation-id="selfIdentificationPage"]') || /voluntary|self.identif|demographic|equal employment|eeo/i.test(sectionOf(el));
   const requiredOf = (el, label) => el.required || el.getAttribute('aria-required') === 'true' || /\*\s*$|\*\s*\(|\(required\)/i.test(label) || !!(container(el) && container(el).querySelector('.required, [class*="required"], abbr[title="required"]'));
   const out = [];
   const seenGroups = new Set();
-  const controls = root.querySelectorAll('input, select, textarea');
+  const seenDates = new Set();
+  const controls = root.querySelectorAll('input, select, textarea, button[aria-haspopup="listbox"]');
   for (const el of controls) {
-    const type = (el.getAttribute('type') || el.tagName).toLowerCase();
+    const type = el.tagName === 'BUTTON' ? 'listbox' : (el.getAttribute('type') || el.tagName).toLowerCase();
     if (['hidden', 'submit', 'button', 'reset', 'image', 'search', 'password'].includes(type)) continue;
+    // Never touch honeypots ("for robots only") or sign-in / account forms.
+    if (el.closest('[data-automation-id="beecatcher"]') || el.getAttribute('data-automation-id') === 'beecatcher') continue;
+    if (el.closest('[data-automation-id="signInContent"], form[data-automation-id^="signInForm"]')) continue;
+    if (el.closest('[data-automation-id="selectedItemList"]')) continue;
     if (el.disabled || el.readOnly && type !== 'file') continue;
     if (el.closest('[aria-hidden="true"]') && type !== 'file') continue;
-    const base = { inputType: type, name: el.name || '', id: el.id || '', placeholder: clean(el.getAttribute('placeholder')), autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(), section: sectionOf(el), demographic: isDemo(el), options: [] };
+    const panel = panelOf(el);
+    const invalid = el.getAttribute('aria-invalid') === 'true' || !!(wdField(el) && wdField(el).querySelector('[data-automation-id="inputAlert"], [data-automation-id="errorMessage"]'));
+    const base = { invalid, inputType: type, name: el.name || wdName(el), id: el.id || '', placeholder: clean(el.getAttribute('placeholder')), autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(), section: sectionOf(el), demographic: isDemo(el), options: [], wdField: wdName(el), group: panel.group, groupIndex: panel.groupIndex };
+    // Workday date: month / day / year inputs typed separately -> one field.
+    const dai = el.getAttribute('data-automation-id') || '';
+    const datePart = (dai.match(/^dateSection(Month|Day|Year)-input$/) || [])[1];
+    if (datePart) {
+      const wrap = el.closest('[data-automation-id="dateInputWrapper"]') || wdField(el) || el.parentElement;
+      if (seenDates.has(wrap)) continue;
+      seenDates.add(wrap);
+      const parts = {};
+      const vals = [];
+      for (const p of ['Month', 'Day', 'Year']) {
+        const i = wrap.querySelector('[data-automation-id="dateSection' + p + '-input"]');
+        if (i) { parts[p.toLowerCase()] = ref(i); if (i.value) vals.push(i.value); }
+      }
+      const label = labelFor(el);
+      out.push({ ...base, inputType: 'date', ref: ref(el), control: 'date', label, required: requiredOf(el, label), parts, value: vals.join('/'), visible: visible(wrap) });
+      continue;
+    }
+    if (type === 'listbox') {
+      const label = labelFor(el);
+      const t = clean(el.textContent);
+      out.push({ ...base, ref: ref(el), control: 'listbox', label, required: requiredOf(el, label), value: t && !/^select one$/i.test(t) ? [t] : [], visible: visible(el) });
+      continue;
+    }
+    // Workday searchable multiselect ("prompt"): chosen values are shown as selectedItem chips.
+    if (el.closest('[data-automation-id="multiselectInputContainer"], [data-automation-id="multiSelectContainer"]')) {
+      const label = labelFor(el);
+      const holder = wdField(el) || el.closest('[data-automation-id="multiselectInputContainer"], [data-automation-id="multiSelectContainer"]');
+      const chips = [...holder.querySelectorAll('[data-automation-id="selectedItem"]')].map(textOf).filter(Boolean);
+      out.push({ ...base, ref: ref(el), control: 'combobox', asyncOptions: true, label, required: requiredOf(el, label), value: chips, visible: visible(el) || visible(holder) });
+      continue;
+    }
     if (type === 'radio' || (type === 'checkbox' && el.name && (el.name.endsWith('[]') || root.querySelectorAll('input[type="checkbox"][name="' + CSS.escape(el.name) + '"]').length > 1))) {
       const gname = el.name || el.id;
       if (seenGroups.has(type + gname)) continue;
@@ -134,6 +196,7 @@ export const PAGE_SIGNALS = String.raw`(() => {
     text,
     greenhouseIframe: iframeGh ? iframeGh.src : null,
     greenhouseForm: !!document.querySelector('form#application-form input#first_name, form#application_form input#first_name, #application_form [name="job_application[first_name]"]'),
+    workday: !!document.querySelector('[data-automation-id="adventureButton"], [data-automation-id="applyFlowPage"], [data-automation-id="jobPostingHeader"], [data-automation-id="jobPostingPage"]'),
     leverForm: !!document.querySelector('form input[name="resume"]#resume-upload-input, form#application-form input[name="name"][data-qa="name-input"], .application-page form input[name="urls[LinkedIn]"]'),
   };
 })()`;
