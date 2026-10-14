@@ -41,6 +41,7 @@ export async function exportJson(db: Db, userId: string) {
   const jobTags = (await db.select().from(T.jobTags)).filter((jt) => savedIds.has(jt.savedJobId));
   const appIds = new Set(apps.map((a) => a.id));
   const appDocs = (await db.select().from(T.applicationDocuments)).filter((ad) => appIds.has(ad.applicationId));
+  const profileRow = await db.query.userProfiles.findFirst({ where: eq(T.userProfiles.userId, userId) });
   return {
     format: EXPORT_FORMAT,
     version: EXPORT_VERSION,
@@ -65,6 +66,8 @@ export async function exportJson(db: Db, userId: string) {
       job_source_snapshots: strip(snapshots as Row[], "userId"),
       extracted_field_evidence: strip(evidence as Row[], "userId"),
       user_field_overrides: strip(overrides as Row[], "userId"),
+      /** Personal profile used for job matching (resume link and pending draft excluded). */
+      profile: profileRow?.data ?? null,
     },
   };
 }

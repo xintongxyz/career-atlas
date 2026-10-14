@@ -141,6 +141,8 @@ export interface JobListItem {
   /** Extraction finished but not yet reviewed/saved by the user. */
   pending_extraction: boolean;
   tags: TagDTO[];
+  /** Profile match summary (only when the user has a profile; computed locally). */
+  match?: import("./match").MatchSummary | null;
 }
 
 export interface EvidenceDTO {

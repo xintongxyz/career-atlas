@@ -539,3 +539,17 @@ export const jobDrafts = sqliteTable(
   },
   (t) => [index("job_drafts_user_status_idx").on(t.userId, t.status, t.createdAt)],
 );
+
+// Personal profile for job matching (one per user). `data` follows shared/profile.ts; `draft` holds
+// facts proposed from a resume (Claude Desktop / Import from AI) until the user accepts them.
+// Added in 0004 (additive). Stored only in the local database.
+export const userProfiles = sqliteTable("user_profiles", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  data: text("data", { mode: "json" }).$type<Record<string, unknown>>().notNull(),
+  draft: text("draft", { mode: "json" }).$type<Record<string, unknown>>(),
+  resumeDocumentId: text("resume_document_id").references(() => documents.id, { onDelete: "set null" }),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});

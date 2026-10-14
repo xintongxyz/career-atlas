@@ -7,6 +7,7 @@ import * as React from "react";
 import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
+import { MatchLevelBadge } from "@/components/jobs/match-panel";
 import { localizedTitle } from "@/lib/job-i18n";
 import { CompanyAvatar, ExtractionBadge, PriorityBadge, SalaryText, StarMark, StatusBadge, displayCompany, displayTitle } from "@/components/jobs/badges";
 import { Button } from "@/components/ui/button";
@@ -149,6 +150,20 @@ export default function PositionsPage() {
         ),
       },
       { id: "status", header: () => t("positions.columns.status"), cell: ({ row }) => <StatusBadge status={row.original.status} /> },
+      {
+        id: "match",
+        header: () => t("positions.columns.match"),
+        cell: ({ row }) => {
+          const m = row.original.match;
+          if (!m) return <span className="text-xs text-ink-4">—</span>;
+          return (
+            <span className="flex flex-col items-start gap-0.5 whitespace-nowrap">
+              <MatchLevelBadge level={m.level} score={null} />
+              <span className="text-[11px] text-ink-4">{t("match.mustHavesShort", { met: m.mandatory.met, total: m.mandatory.total })}</span>
+            </span>
+          );
+        },
+      },
       {
         id: "location",
         header: () => t("positions.columns.location"),

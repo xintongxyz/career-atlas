@@ -72,7 +72,14 @@ describe("Claude Desktop extension (MCP over stdio)", () => {
       mcp.notify("notifications/initialized");
 
       const list = await mcp.request("tools/list");
-      expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual(["create_job_draft", "check_job_url"]);
+      expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual(["create_job_draft", "create_profile_draft", "check_job_url"]);
+
+      const prof = await mcp.request("tools/call", {
+        name: "create_profile_draft",
+        arguments: { resume_text: "Skills: SQL, Excel", items: [{ section: "skills", value: ["SQL", "Excel"], basis: "resume", evidence: "Skills: SQL, Excel" }, { section: "driver_licence", value: { has: false }, basis: "inferred" }] },
+      });
+      expect(prof.result.content[0].text).toMatch(/1 item\(s\), 1 quoted from the resume/);
+      expect(prof.result.content[0].text).toMatch(/Left out: driver_licence \(sensitive_not_verified\)/);
       expect(list.result.tools[0].annotations).toMatchObject({ destructiveHint: false });
       expect(list.result.tools[0].inputSchema.properties).toHaveProperty("translations");
 

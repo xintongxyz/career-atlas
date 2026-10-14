@@ -6,6 +6,7 @@ import { getDb } from "./db/client";
 import type { HonoEnv } from "./env";
 import { ApiError } from "./lib/errors";
 import { registerDraftRoutes } from "./routes/drafts";
+import { registerProfileRoutes } from "./routes/profile";
 import { registerJobRoutes } from "./routes/jobs";
 import { registerMiscRoutes } from "./routes/misc";
 import { ensureUser } from "./services/users";
@@ -105,6 +106,7 @@ export function createApp(extend?: (app: Hono<HonoEnv>) => void) {
   registerJobRoutes(app);
   registerMiscRoutes(app);
   registerDraftRoutes(app);
+  registerProfileRoutes(app);
   extend?.(app);
 
   app.all("/api/*", () => {

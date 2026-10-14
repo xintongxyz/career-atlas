@@ -20,6 +20,7 @@ Read HANDOFF.md for current status, docs/LOCAL_FIRST.md for operations and ARCHI
 - Schema: edit `src/server/db/schema.ts` → `npm run db:generate` → review → `npm run db:test-upgrade` → `npm run db:lock` in the same commit. Never edit a locked migration. Additive first; expand → backfill → switch → contract; never drop in the same release. The app backs up (verified) before migrating and refuses modified history.
 - Destructive or high-risk database changes need a verified encrypted backup (`npm run local -- backup`) and the owner's approval. If a backup or check fails, stop.
 - Saving a job never creates a Git commit. Only source code goes to GitHub: no databases, `*.sqlite*`, documents, backups, dumps, exports, keys, real emails, screenshots of real data or deployment identifiers. The pre-commit hook and `npm run check:secrets` must pass.
+- The owner's profile (education, experience, licence, work authorization), resumes and match results are personal data: never in fixtures, logs, prompts, screenshots or Git. Matching runs locally (`src/server/match`); never send the profile to an AI service, and never treat missing profile facts as "no".
 - Logs never contain request bodies, JD text, notes or SQL parameters (use `scrubLogText`). AI only sees the posting being extracted, only when the owner ticks "Use Claude AI"; Claude Code runs with no tools and subscription auth only. Never add API-key billing, paid services, Ollama, Tauri/Electron or extra infrastructure without approval.
 
 ## Engineering

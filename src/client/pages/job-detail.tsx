@@ -24,10 +24,11 @@ import { useLocaleContext } from "@/hooks/useMe";
 import { api, ApiRequestError } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { hasTranslation, localizePosting } from "@/lib/job-i18n";
+import { MatchPanel } from "@/components/jobs/match-panel";
 import { NotFound } from "./system";
 import { useAiOnRequest } from "@/components/jobs/ai-opt-in";
 
-const TABS = ["overview", "requirements", "original", "application", "activity", "notes"] as const;
+const TABS = ["overview", "requirements", "match", "original", "application", "activity", "notes"] as const;
 
 export default function JobDetailPage() {
   const { id = "" } = useParams();
@@ -240,6 +241,9 @@ function JobDetailView({ job }: { job: JobDetail }) {
               </TabsContent>
               <TabsContent value="requirements">
                 <RequirementsTab ctx={ctx} />
+              </TabsContent>
+              <TabsContent value="match">
+                <MatchPanel job={shownJob} />
               </TabsContent>
               <TabsContent value="original">
                 <OriginalTab ctx={ctx} onExtract={setExtractionId} />

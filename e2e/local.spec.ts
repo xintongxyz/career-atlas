@@ -173,3 +173,57 @@ Requirements: 2+ years in inventory planning; Excel.`;
   await page.goto("/positions?q=Woodgrove");
   await expect(page.getByRole("link", { name: "Inventory Planner" })).toBeVisible();
 });
+
+test("profile & match: a missing mandatory driver's licence is shown first and recalculates after a profile edit", async ({ page, request }) => {
+  const job = await request.post("/api/jobs", {
+    headers: ORIGIN,
+    data: {
+      confirm_duplicate: true,
+      job: {
+        company_name: "Litware Logistics (fictional)",
+        title: "Field Data Analyst",
+        city: "Ottawa",
+        country: "Canada",
+        required_qualifications: ["Valid driver's licence and access to a vehicle", "2+ years of data analysis experience", "Proficiency with Excel and SQL"],
+        preferred_qualifications: ["Experience with Power BI"],
+        language_requirements: ["Professional English"],
+      },
+    },
+  });
+  const { id } = (await job.json()) as { id: string };
+
+  // Before a profile exists, nothing is judged.
+  await page.goto(`/jobs/${id}?tab=match`);
+  await page.getByRole("radio", { name: "EN" }).first().click();
+  await expect(page.getByText("See how you match this job")).toBeVisible();
+
+  // Fill in the profile (autosaves).
+  await page.goto("/profile");
+  await page.getByLabel("Driver's licence", { exact: true }).selectOption("no");
+  await page.getByRole("button", { name: "Add", exact: true }).nth(1).click(); // 0 = work authorization, 1 = languages
+  await page.getByLabel("Language", { exact: true }).last().fill("English");
+  await expect(page.getByTestId("save-status")).toHaveAttribute("data-state", "saved", { timeout: 6000 });
+
+  await page.goto(`/jobs/${id}?tab=match`);
+  await expect(page.getByText("Must-have requirement not met")).toBeVisible();
+  await expect(page.getByText("Your profile says you don't have a driver's licence.").first()).toBeVisible();
+  await expect(page.getByText("Your English meets the Professional level.")).toBeVisible();
+  await expect(page.getByText("Add your work experience to check this.")).toBeVisible(); // unknown, not "no"
+
+  // All Positions shows the summary; Chinese interface translates the analysis.
+  await page.goto("/positions?q=Litware");
+  await expect(page.getByText("Must-have not met").first()).toBeVisible();
+  await page.goto(`/jobs/${id}?tab=match`);
+  await page.getByRole("radio", { name: "中文" }).first().click();
+  await expect(page.getByText("你的档案显示你没有驾照。").first()).toBeVisible();
+  await page.getByRole("radio", { name: "EN" }).first().click();
+
+  // Editing the profile recalculates immediately.
+  await page.goto("/profile");
+  await page.getByLabel("Driver's licence", { exact: true }).selectOption("yes");
+  await page.getByLabel("Access to a vehicle", { exact: true }).selectOption("yes");
+  await expect(page.getByTestId("save-status")).toHaveAttribute("data-state", "saved", { timeout: 6000 });
+  await page.goto(`/jobs/${id}?tab=match`);
+  await expect(page.getByText("You have a driver's licence.")).toBeVisible();
+  await expect(page.getByText("Must-have requirement not met")).toHaveCount(0);
+});

@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { useToastError } from "./useApiError";
 
-export const JOB_QUERY_ROOTS = ["jobs", "board", "job", "dashboard", "analytics", "calendar", "events", "reminders", "nav-counts", "compare", "extraction", "documents"];
+export const JOB_QUERY_ROOTS = ["jobs", "board", "job", "dashboard", "analytics", "calendar", "events", "reminders", "nav-counts", "compare", "extraction", "documents", "match"];
 
 export function useInvalidateJobs() {
   const qc = useQueryClient();

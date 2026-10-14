@@ -109,6 +109,14 @@ Manual entry and normal link import keep working without AI and are not translat
 
 Rules the app enforces regardless of the AI: values claimed from the posting must have a quote that really appears in the job description (otherwise they become inferences); salary, visa sponsorship, work authorization, eligibility, work arrangement and deadlines are only accepted with such a quote; missing details stay empty; duplicate job links are flagged before saving; the original link and job description are stored with the job. The extension can only create drafts and answer "already saved: yes/no"; it cannot see, edit or delete your jobs.
 
+## My Profile and job match
+
+**Profile** (sidebar → *My Profile*): location, work authorization, driver's licence and vehicle, security clearance, languages with levels, education, dated work experience with areas, optional "years of X" totals, skills, certifications and projects. Saved automatically, stored only in the local database (and in the encrypted backups). Anything left as *Not specified* is never treated as a "no".
+
+**From a resume:** keep the file in Documents and link it on the profile page. In Claude Desktop, attach the resume and write *"Update my Career Atlas profile from this resume"* (extension v0.4.0): Claude proposes facts with quotes from the resume; they appear at the top of *My Profile*, marked *Quoted from resume* or *Not found in resume text*, and only the items you tick are added. Driver's licence, work authorization and clearance are only accepted when the resume states them. Without Claude Desktop, use *Copy prompt for your AI* on the profile page and paste the answer back.
+
+**Match** (job page → *My match*, the *Match* column in All Positions, and Compare): Career Atlas sorts each job's requirements into *Must-have*, *Preferred* and *Unclear importance*, keeps the original wording, and checks each against your profile — met, partly met, not met, or can't be checked yet — with the reason and the supporting fact from your profile. Failed must-haves (licence, work authorization, clearance, required certifications, …) are listed first in a separate box; the overall score (skills and preferences) never hides them. Requirements the AI only inferred are never treated as must-haves, and wording that allows alternatives ("or equivalent", "may be considered") gives *partly met*, not *not met*. Matching runs locally with rules (no AI call per job) and updates instantly whenever a job or your profile changes, for every saved job.
+
 ## Weekly encrypted backups
 
 - **When:** at launch and every hour while the app runs, a backup is made if the last successful one is 7 days old or older. If the Mac was off on the due day, the backup runs at the next launch. Plus **Back up now** in Settings, `npm run local -- backup`, and automatically before every schema migration. Data only changes while the app runs, so this covers every change without a background service.

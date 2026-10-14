@@ -1,6 +1,6 @@
 import type { DashboardDTO } from "@shared/types";
 import { useQuery } from "@tanstack/react-query";
-import { BarChart3, Bookmark, CalendarDays, FileText, LayoutDashboard, Menu as MenuIcon, Plus, Search, Settings, Table2, Trello, X } from "lucide-react";
+import { BarChart3, Bookmark, UserRound, CalendarDays, FileText, LayoutDashboard, Menu as MenuIcon, Plus, Search, Settings, Table2, Trello, X } from "lucide-react";
 import * as React from "react";
 import { useTranslation } from "react-i18next";
 import { NavLink, Outlet, useLocation } from "react-router";
@@ -25,6 +25,7 @@ const NAV = [
   { to: "/calendar", key: "calendar", icon: CalendarDays },
   { to: "/analytics", key: "analytics", icon: BarChart3 },
   { to: "/documents", key: "documents", icon: FileText },
+  { to: "/profile", key: "profile", icon: UserRound },
   { to: "/settings", key: "settings", icon: Settings },
 ] as const;
 

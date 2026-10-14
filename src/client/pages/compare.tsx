@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { GitCompare, Plus, X } from "lucide-react";
 import * as React from "react";
 import { Link, useSearchParams } from "react-router";
+import { MatchLevelBadge, useMatch } from "@/components/jobs/match-panel";
 import { localizePosting, localizedTitle } from "@/lib/job-i18n";
 import { CompanyAvatar, PriorityBadge, SalaryText, StatusBadge, displayCompany, displayTitle } from "@/components/jobs/badges";
 import { Button } from "@/components/ui/button";
@@ -170,6 +171,16 @@ export default function ComparePage() {
                   );
                 })}
               </tr>
+              <tr className="align-top">
+                <th scope="row" className="px-3 py-2.5 text-left text-xs font-medium text-ink-3">
+                  {t("match.compareRow")}
+                </th>
+                {jobs.map((j) => (
+                  <td key={j.id} className="px-3 py-2.5">
+                    <CompareMatch jobId={j.id} />
+                  </td>
+                ))}
+              </tr>
               {rows.map((r) => {
                 const values = jobs.map(r.get);
                 const nonEmpty = values.filter((v) => !empty(v));
@@ -243,5 +254,19 @@ function AddJobPicker({ exclude, onAdd }: { exclude: string[]; onAdd: (id: strin
         </NativeSelect>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** Profile match (qualifications vs. the user's profile) for one compared job. */
+function CompareMatch({ jobId }: { jobId: string }) {
+  const { t } = useLocaleContext();
+  const m = useMatch(jobId).data?.summary;
+  if (!m) return null;
+  if (!m.has_profile) return <Link to="/profile" className="text-xs text-accent hover:underline">{t("match.setUpProfile")}</Link>;
+  return (
+    <Link to={`/jobs/${jobId}?tab=match`} className="flex flex-col items-start gap-0.5 hover:underline">
+      <MatchLevelBadge level={m.level} score={m.score} />
+      <span className="text-[11px] text-ink-4">{t("match.mustHavesShort", { met: m.mandatory.met, total: m.mandatory.total })}</span>
+    </Link>
   );
 }
