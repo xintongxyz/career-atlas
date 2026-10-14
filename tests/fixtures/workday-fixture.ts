@@ -24,9 +24,14 @@ export interface WorkdayFixtureState {
   created: string[];
   signIns: string[];
   failures: Record<string, number>;
+  /** E-mails this synthetic site "sent" (served by the synthetic IMAP server in tests). */
+  outbox: { to: string; from: string; subject: string; html: string; text: string; at: number }[];
+  /** Accounts waiting for e-mail verification: e-mail → code / link token. */
+  pending: Record<string, { code: string; token: string }>;
+  verified: string[];
 }
 
-export const newWorkdayState = (): WorkdayFixtureState => ({ signedIn: false, uploads: [], deletes: [], saves: [], submissions: [], authTouched: [], accounts: {}, created: [], signIns: [], failures: {} });
+export const newWorkdayState = (): WorkdayFixtureState => ({ signedIn: false, uploads: [], deletes: [], saves: [], submissions: [], authTouched: [], accounts: {}, created: [], signIns: [], failures: {}, outbox: [], pending: {}, verified: [] });
 
 const html = (title: string, body: string, script = "") => `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${title}</title>
 <style>
@@ -214,7 +219,8 @@ function stepHtml() {
 
 function authHtml() {
   const err = authError ? '<div data-automation-id="errorMessage" role="alert">' + esc(authError) + '</div>' : '';
-  if (verifyPending) return '<div data-automation-id="signInContent"><h3>Verify your account</h3><p>A verification code was sent to your email.</p><input type="text" data-automation-id="verificationCode" data-auth="1"></div>';
+  if (verifyPending && has('verifylink')) return '<div data-automation-id="signInContent"><h3>Verify your account</h3><p>We sent you an email. Please check your email to verify your account.</p></div>';
+  if (verifyPending) return '<div data-automation-id="signInContent"><h3>Verify your account</h3><p>A verification code was sent to your email.</p>' + err + '<input type="text" data-automation-id="verificationCode" data-auth="1"> <button type="button" data-verify="1">Verify</button></div>';
   if (authView === 'signin') return '<div data-automation-id="signInContent"><h3>Sign In</h3>' + err + '<form data-automation-id="signInFormo" onsubmit="return false">' +
     '<div data-automation-id="formField-email"><label>Email Address*</label><input type="text" data-automation-id="email" data-auth="1"></div>' +
     '<div data-automation-id="formField-password"><label>Password*</label><input type="password" data-automation-id="password" data-auth="1"></div>' +
@@ -237,15 +243,32 @@ function render() {
     return;
   }
   if (autofillPending()) {
+    const items = has('slowparse') ? S.files.map((f) => '<div data-automation-id="file-upload-item"><span>' + esc(f) + '</span> <div data-automation-id="file-upload-successful">Successfully Uploaded!</div></div>').join('') : '';
     app.innerHTML = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(0) +
-      '<div data-automation-id="applyFlowAutofillPage"><h2>Autofill with Resume</h2><div data-automation-id="formField-resume"><label>Upload your resume to fill in the application</label><div data-automation-id="attachments-FileUpload"><div data-automation-id="file-upload-drop-zone">Drop file here or select files</div><input type="file" data-automation-id="file-upload-input-ref" style="display:none"></div></div></div>' +
-      '<div data-automation-id="pageFooter"><button type="button" data-automation-id="pageFooterNextButton">Continue</button></div></div>';
+      '<div data-automation-id="applyFlowAutofillPage"><h2>Autofill with Resume</h2><div data-automation-id="formField-resume"><label>Upload your resume to fill in the application</label><div data-automation-id="attachments-FileUpload"><div data-automation-id="file-upload-drop-zone">Drop file here or select files</div><input type="file" data-automation-id="file-upload-input-ref" style="display:none"></div>' + items + '</div></div>' +
+      (CFG.parsing ? '<div data-automation-id="loadingSpinner" style="width:24px;height:24px;background:#ccc">Parsing your resume…</div>' : '') +
+      '<div data-automation-id="pageFooter"><button type="button" data-automation-id="pageFooterNextButton"' + (CFG.parsing ? ' disabled' : '') + '>Continue</button></div></div>';
+    return;
+  }
+  // Slow tenants: the step appears first as an empty shell; its fields are drawn a moment later.
+  if (has('slowrender') && !(CFG.drawn = CFG.drawn || {})[step]) {
+    CFG.drawn[step] = true;
+    const ids = ['applyFlowMyInfoPage', 'applyFlowMyExpPage', 'applyFlowPrimaryQuestionsPage', 'applyFlowVoluntaryDisclosuresPage', 'applyFlowReviewPage'];
+    app.innerHTML = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(step) + '<div data-automation-id="' + ids[step] + '"></div>' +
+      '<div data-automation-id="pageFooter"><button type="button" data-automation-id="pageFooterNextButton">' + (step === 4 ? 'Submit' : 'Save and Continue') + '</button></div></div>';
+    setTimeout(render, 2500);
     return;
   }
   app.innerHTML = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(step) +
     (errors.length ? '<div data-automation-id="errorHeading">Errors Found</div>' : '') + stepHtml() +
     '<div data-automation-id="pageFooter">' + (step > 0 ? '<button type="button" data-automation-id="pageFooterBackButton">Back</button> ' : '') +
     '<button type="button" data-automation-id="pageFooterNextButton">' + (step === 4 ? 'Submit' : 'Save and Continue') + '</button></div></div>';
+}
+// Signed in. Some tenants then forget "Autofill with Resume" and open the manual form.
+function afterAuth() {
+  CFG.signedIn = true;
+  if (has('losemode') && CFG.mode === 'autofillWithResume') { location.href = location.href.replace('/apply/autofillWithResume', '/apply/applyManually'); return; }
+  render();
 }
 function progress(active) {
   const all = (CFG.login ? ['Create Account/Sign In'] : []).concat(STEPS);
@@ -335,6 +358,7 @@ document.addEventListener('change', (e) => {
     const fd = new FormData(); fd.append('file', f);
     fetch('/wd/api/upload', { method: 'POST', body: fd }).then(() => {
       S.files = S.files.concat(f.name);
+      if (autofillPending() && has('slowparse')) { CFG.parsing = true; render(); setTimeout(() => { CFG.parsing = false; render(); }, 17000); return; } // parsing, then "Continue"
       if (autofillPending()) { setTimeout(() => { S = PARSED(); save(); step = 0; render(); }, 800); return; } // parsing…
       save(); render();
     });
@@ -364,23 +388,31 @@ document.addEventListener('click', (e) => {
   if (a === 'createAccountSubmitButton') {
     if (has('signupcaptcha')) { CFG.captchaShown = true; render(); return; } // a challenge only the user can pass
     const cb = document.querySelector('[data-automation-id="createAccountCheckbox"]');
-    post('/wd/api/create', { email: val('email'), password: val('password'), verify: val('verifyPassword'), terms: cb ? cb.checked : null, needTerms: has('terms') }).then((r) => r.json()).then((j) => {
+    post('/wd/api/create', { email: val('email'), password: val('password'), verify: val('verifyPassword'), terms: cb ? cb.checked : null, needTerms: has('terms'), verifyMode: has('verifylink') ? 'link' : has('verify') ? 'code' : null, next: location.href }).then((r) => r.json()).then((j) => {
       if (j.error) { authError = j.error; render(); return; }
-      if (has('verify')) { verifyPending = true; render(); return; }
-      CFG.signedIn = true; render();
+      if (has('verify') || has('verifylink')) { CFG.email = val('email'); verifyPending = true; authError = ''; render(); return; }
+      afterAuth();
     });
     return;
   }
   if (a === 'signInSubmitButton') {
     post('/wd/api/signin', { email: val('email'), password: val('password') }).then((r) => r.json()).then((j) => {
       if (j.error) { authError = j.error; render(); return; }
-      CFG.signedIn = true; render();
+      afterAuth();
+    });
+    return;
+  }
+  if (t.dataset.verify) {
+    const code = document.querySelector('[data-automation-id="verificationCode"]').value;
+    post('/wd/api/verify-code', { email: CFG.email, code }).then((r) => r.json()).then((j) => {
+      if (j.error) { authError = j.error; render(); return; }
+      verifyPending = false; afterAuth();
     });
     return;
   }
   if (a === 'delete-file') { post('/wd/api/delete', { name: t.dataset.file }); S.files = S.files.filter((x) => x !== t.dataset.file); save(); render(); return; }
   if (a === 'pageFooterBackButton') { errors = []; step = Math.max(0, step - 1); render(); return; }
-  if (a === 'pageFooterNextButton' && autofillPending()) { return; } // waits for the upload
+  if (a === 'pageFooterNextButton' && autofillPending()) { if (has('slowparse') && S.files.length && !CFG.parsing) { S = PARSED(); save(); step = 0; render(); } return; } // waits for the upload
   if (a === 'pageFooterNextButton') {
     if (step === 4) {
       t.disabled = true;
@@ -443,11 +475,33 @@ export async function workdayRoute(req: IncomingMessage, res: ServerResponse, u:
       if (err) return send(200, JSON.stringify({ error: err }), "application/json"), true;
       st.accounts[email] = pw;
       st.created.push(email);
+      if (json.verifyMode) {
+        const code = String(100000 + Math.floor(Math.random() * 899999));
+        const token = createHash("sha256").update(`${email}${Date.now()}${Math.random()}`).digest("hex").slice(0, 24);
+        st.pending[email] = { code, token };
+        const origin = `http://${req.headers.host}`;
+        const link = `${origin}/wd/api/activate?token=${token}&next=${encodeURIComponent(String(json.next ?? ""))}`;
+        const html =
+          json.verifyMode === "link"
+            ? `<p>Welcome to Northwind Analytics careers.</p><p>Please verify your account: <a href="${link.replace(/&/g, "&amp;")}">Verify Account</a></p><p>Need help? <a href="https://www.example.test/help">Help centre</a></p>`
+            : `<p>Welcome to Northwind Analytics careers.</p><p>Your verification code is:</p><p><b>${code}</b></p><p>It expires in 15 minutes. Office: 2024 Example Street.</p>`;
+        st.outbox.push({ to: email, from: "Northwind Analytics <northwind@workday.example.test>", subject: json.verifyMode === "link" ? "Verify your candidate account" : "Your verification code", html, text: html.replace(/<[^>]+>/g, " "), at: Date.now() });
+        return send(200, "{}", "application/json"), true;
+      }
+      st.signedIn = true;
+      return send(200, "{}", "application/json"), true;
+    }
+    if (u.pathname === "/wd/api/verify-code") {
+      const email = String(json.email ?? "").toLowerCase();
+      if (!st.pending[email] || st.pending[email].code !== String(json.code ?? "")) return send(200, JSON.stringify({ error: "The verification code is invalid." }), "application/json"), true;
+      delete st.pending[email];
+      st.verified.push(email);
       st.signedIn = true;
       return send(200, "{}", "application/json"), true;
     }
     if (u.pathname === "/wd/api/signin") {
       const email = String(json.email ?? "").toLowerCase();
+      if (st.pending[email]) return send(200, JSON.stringify({ error: "Your account has not been verified. Please check your email." }), "application/json"), true;
       if ((st.failures[email] ?? 0) >= 3) return send(200, JSON.stringify({ error: "Your account is locked. Reset your password." }), "application/json"), true;
       if (st.accounts[email] === undefined || st.accounts[email] !== String(json.password ?? "")) {
         st.failures[email] = (st.failures[email] ?? 0) + 1;
@@ -466,6 +520,18 @@ export async function workdayRoute(req: IncomingMessage, res: ServerResponse, u:
       if (/variant=ambiguous/.test(ref)) return await new Promise<void>((r) => setTimeout(r, 60_000)).then(() => send(200, "{}", "application/json")), true;
     }
     return send(200, "{}", "application/json"), true;
+  }
+  if (u.pathname === "/wd/api/activate") {
+    const token = u.searchParams.get("token");
+    const email = Object.keys(st.pending).find((e) => st.pending[e].token === token);
+    if (email) {
+      delete st.pending[email];
+      st.verified.push(email);
+    }
+    st.signedIn = false; // Workday asks to sign in after verifying
+    res.writeHead(302, { location: u.searchParams.get("next") || "/" });
+    res.end();
+    return true;
   }
   const m = u.pathname.match(/^\/wd\/([^/]+)\/job\/([^/]+)\/([^/]+?)(\/apply\/(\w+))?$/);
   if (m) {

@@ -15,8 +15,13 @@ import { openDatabase, schemaVersion } from "./database";
 import { localFileStore } from "./file-store";
 import { createTaskRunner, type TaskRunner } from "./tasks";
 import { createApplyRunner, type ApplyRunner } from "./apply/runner";
-import { accountManager, keychainStore, memoryStore, passwordProblems } from "./apply/credentials";
-import { accountSettingsSchema, sharedPasswordSchema } from "@shared/apply";
+import { accountManager, keychainStore, memoryStore, passwordProblems, tenantOf } from "./apply/credentials";
+import { mailVerifier } from "./apply/mail";
+import { accountSettingsSchema, existingAccountSchema, mailSettingsSchema, sharedPasswordSchema } from "@shared/apply";
+import { profileSchema } from "@shared/profile";
+import { spawn } from "node:child_process";
+import { getDb } from "../server/db/client";
+import { getProfileRow } from "../server/services/profile";
 
 export const DEFAULT_OWNER_EMAIL = "owner@career-atlas.example.test";
 
@@ -121,12 +126,15 @@ export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: 
   // Application automation: own browser profile and screenshots under <data>/automation (owner-only).
   // Only test/dev instances may target synthetic forms on 127.0.0.1.
   // Workday account passwords: macOS Keychain on the personal instance; memory for test/dev instances.
+  const secrets = cfg.kind === "personal" ? keychainStore() : memoryStore();
   const accounts = accountManager({
-    store: cfg.kind === "personal" ? keychainStore() : memoryStore(),
+    store: secrets,
     dir: join(cfg.dataDir, "automation"),
     settings: () => ({ mode: cfg.settings.workday_password_mode === "shared" ? "shared" : "unique", autoSignIn: cfg.settings.workday_auto_sign_in !== false }),
   });
-  const apply = createApplyRunner({ getEnv: () => env, automationDir: join(cfg.dataDir, "automation"), allowLoopback: cfg.kind !== "personal", accounts, ...opts.apply });
+  // Gmail verification e-mails: opt-in; the app password shares the same secure store.
+  const mail = mailVerifier({ store: secrets, settings: () => ({ enabled: cfg.settings.gmail_verification === true, address: cfg.settings.gmail_address ?? null }) });
+  const apply = createApplyRunner({ getEnv: () => env, automationDir: join(cfg.dataDir, "automation"), allowLoopback: cfg.kind !== "personal", accounts, mail, ...opts.apply });
   await apply.init();
   env.APPLY = apply;
 
@@ -265,11 +273,71 @@ function registerLocalRoutes(app: Hono<HonoEnv>, rt: { cfg: LocalConfig; d1: Loc
     await accounts.deleteShared();
     return c.json(await accountView());
   });
+  // A password the user already has for an employer site (e.g. an account made by hand): Keychain only.
+  app.put("/api/local/accounts/existing", async (c) => {
+    const body = await jsonBody(c, existingAccountSchema);
+    const site = /^https?:\/\//i.test(body.site) ? body.site : `https://${body.site}`;
+    const tenant = tenantOf(site);
+    if (!tenant || !/\./.test(tenant)) throw new ApiError(422, "invalid_site", "Enter the employer's Workday address");
+    if (!accounts.available) throw new ApiError(503, "keychain_unavailable", "No secure store available");
+    await accounts.save(tenant, body.email, body.password, "unique", "created");
+    return c.json(await accountView());
+  });
+  // Copies a saved password to this Mac's clipboard (so the user can sign in by hand). The password
+  // never travels through HTTP: the local server hands it to pbcopy on stdin.
+  app.post("/api/local/accounts/:tenant/copy", async (c) => {
+    const email = c.req.query("email") ?? "";
+    const pw = await accounts.password(c.req.param("tenant"), email);
+    if (!pw) throw new ApiError(404, "not_found", "No saved password for this site");
+    if (process.platform !== "darwin") throw new ApiError(501, "clipboard_unavailable", "Copying is only available on macOS");
+    await new Promise<void>((resolve, reject) => {
+      const p = spawn("/usr/bin/pbcopy", [], { stdio: ["pipe", "ignore", "ignore"] });
+      p.on("error", reject);
+      p.on("exit", (code) => (code === 0 ? resolve() : reject(new Error("clipboard_failed"))));
+      p.stdin.end(pw);
+    });
+    return c.json({ ok: true });
+  });
   app.delete("/api/local/accounts/:tenant", async (c) => {
     const email = c.req.query("email") ?? "";
     await accounts.forget(c.req.param("tenant"), email);
     return c.json(await accountView());
   });
+  // ---------- Gmail verification e-mails (app password stays in the Keychain; never returned) ----------
+  const mail = rt.apply.mail!;
+  const profileEmail = async (c: Parameters<typeof userOf>[0]) => {
+    const row = await getProfileRow(getDb(rt.env.DB), userOf(c).id);
+    const p = profileSchema.safeParse(row?.data ?? {});
+    return p.success ? (p.data.contact.email ?? null) : null;
+  };
+  const mailView = async (c: Parameters<typeof userOf>[0]) => {
+    const fallback = await profileEmail(c);
+    const address = mail.address(fallback);
+    return { available: mail.available, store: mail.storeKind, enabled: mail.settings().enabled, address: cfg.settings.gmail_address ?? "", profile_email: fallback, effective_address: address || null, password_saved: address ? await mail.hasPassword(address) : false };
+  };
+  app.get("/api/local/mail", async (c) => c.json(await mailView(c)));
+  app.put("/api/local/mail", async (c) => {
+    const body = await jsonBody(c, mailSettingsSchema);
+    if (body.address !== undefined) writeSettings(cfg, { gmail_address: body.address || undefined });
+    if (body.app_password) {
+      const pw = body.app_password.replace(/\s+/g, "");
+      if (!/^[a-zA-Z]{16}$/.test(pw)) throw new ApiError(422, "app_password_format", "A Google app password has 16 letters");
+      const address = mail.address(await profileEmail(c));
+      if (!address) throw new ApiError(422, "address_missing", "Enter the Gmail address first");
+      if (!mail.available) throw new ApiError(503, "keychain_unavailable", "No secure store available");
+      await mail.setPassword(address, pw);
+    }
+    if (body.enabled !== undefined) writeSettings(cfg, { gmail_verification: body.enabled });
+    return c.json(await mailView(c));
+  });
+  app.delete("/api/local/mail/password", async (c) => {
+    const address = mail.address(await profileEmail(c));
+    if (address) await mail.deletePassword(address);
+    writeSettings(cfg, { gmail_verification: false });
+    return c.json(await mailView(c));
+  });
+  app.post("/api/local/mail/check", async (c) => c.json({ result: await mail.check(await profileEmail(c)) }));
+
   app.patch("/api/local/settings", async (c) => {
     const body = await jsonBody(c, z.object({ ai_provider: z.enum(["none", "claude_code"]).optional() }));
     if (body.ai_provider) {

@@ -20,9 +20,10 @@
 // password, verifyPassword, createAccountSubmitButton, signInLink), the beecatcher honeypot and
 // the legalNotice cookie banner. Everything after sign-in is untested on a real tenant.
 //
-// Not adopted from those projects: creating accounts or typing passwords, reading e-mail codes,
-// auto-ticking terms, default answers, "Use My Last Application", random "human" delays, and
-// treating "no error" as a submission.
+// Not adopted from those projects: auto-ticking terms, default answers, "Use My Last Application",
+// random "human" delays, and treating "no error" as a submission. Account creation / sign-in run
+// only as authorised per application (Keychain); verification e-mails only via the owner's opt-in
+// Gmail reader (mail.ts).
 import type { Locator, Page } from "playwright-core";
 import { norm } from "./plan";
 
@@ -37,7 +38,7 @@ export async function declineCookies(page: Page) {
   if (await b.isVisible().catch(() => false)) await b.click().catch(() => {});
 }
 
-export type EnterResult = { result: "entered" | "already" | "no_apply" | "closed"; mode: "manual" | "autofill" | null };
+export type EnterResult = { result: "entered" | "already" | "no_apply" | "closed"; mode: "manual" | "autofill" | null; /** Address of the chosen entry (e.g. …/apply/autofillWithResume), to return to after signing in. */ url?: string | null };
 
 /**
  * From the job page into the application wizard. Prefers "Autofill with Resume" (Workday parses the
@@ -64,10 +65,11 @@ export async function enterApplyFlow(page: Page, prefer: "autofill" | "manual" =
     if (await opt.isVisible().catch(() => false)) {
       // A synthetic click is sometimes ignored by Workday: follow the link when it has one.
       const href = await opt.getAttribute("href").catch(() => null);
-      if (href && !href.startsWith("#") && !href.startsWith("javascript:")) await page.goto(new URL(href, page.url()).toString(), { waitUntil: "domcontentloaded" });
+      const url = href && !href.startsWith("#") && !href.startsWith("javascript:") ? new URL(href, page.url()).toString() : null;
+      if (url) await page.goto(url, { waitUntil: "domcontentloaded" });
       else await opt.click();
       await page.waitForLoadState("domcontentloaded").catch(() => {});
-      return { result: "entered", mode };
+      return { result: "entered", mode, url: url ?? page.url() };
     }
   }
   return { result: "entered", mode: null };
@@ -90,7 +92,7 @@ export const WD_STATE = String.raw`(() => {
   const qa = (s) => [...document.querySelectorAll(s)];
   const text = (document.body ? document.body.innerText : '').replace(/\s+/g, ' ');
   const auth = qa('[data-automation-id="signInContent"], [data-automation-id="signInFormo"], form[data-automation-id^="signInForm"], [data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]').some(vis);
-  const verify = qa('[data-automation-id="verificationCode"], input[name*="verification" i]').some(vis) || /verify your (email|account)|verification (code|email) (has been |was )?sent/i.test(text);
+  const verify = qa('[data-automation-id="verificationCode"], input[name*="verification" i], input[autocomplete="one-time-code"]').some(vis) || /verify your (e-?mail|account)|verification (code|e-?mail|link) (has been |was )?sent|check your (e-?mail|inbox) (to|for)|account (has )?not (yet )?been verified|activate your account/i.test(text);
   const pageIds = ['applyFlowMyInfoPage','applyFlowMyExpPage','applyFlowPrimaryQuestionsPage','applyFlowSecondaryQuestionsPage','applyFlowVoluntaryDisclosuresPage','applyFlowSelfIdentifyPage','applyFlowReviewPage','contactInformationPage','myExperiencePage','voluntaryDisclosuresPage','selfIdentificationPage'];
   const pageId = pageIds.find((id) => vis(q('[data-automation-id="' + id + '"]'))) || null;
   const active = q('[data-automation-id="progressBarActiveStep"]');
@@ -138,6 +140,114 @@ export async function wdSettle(page: Page, timeout = 15_000): Promise<WdState> {
 
 export function nextButton(page: Page): Locator {
   return page.locator(`${aid("pageFooterNextButton")}, ${aid("bottom-navigation-next-button")}`).first();
+}
+
+const BUSY = '[data-automation-id="loadingSpinner"], [data-automation-id*="LoadingIndicator" i], [data-automation-id*="spinner" i], [aria-busy="true"]';
+
+/** Number of form controls on the current step (outside the footer), or -1 while a spinner shows. */
+const CONTROLS = String.raw`((busySel) => {
+  const vis = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden'; };
+  if ([...document.querySelectorAll(busySel)].some(vis)) return -1;
+  const root = document.querySelector('[data-automation-id="applyFlowPage"]') || document.body;
+  return [...root.querySelectorAll('input, textarea, select, button[aria-haspopup], [role="radio"], [role="checkbox"], [data-automation-id="add-button"]')]
+    .filter((e) => !e.closest('[data-automation-id="pageFooter"]') && (vis(e) || e.type === 'file')).length;
+})`;
+
+/**
+ * Waits until the step has finished rendering: no spinner and the same number of controls for
+ * about a second (Workday draws the form in several passes after the page itself appears).
+ */
+export async function wdReady(page: Page, timeout = 20_000): Promise<number> {
+  const until = Date.now() + timeout;
+  let last = -2;
+  let same = 0;
+  while (Date.now() < until) {
+    const n = (await page.evaluate(`${CONTROLS}(${JSON.stringify(BUSY)})`).catch(() => -1)) as number;
+    if (n > 0 && n === last) {
+      if (++same >= 3) return n;
+    } else same = 0;
+    last = n;
+    await sleep(400);
+  }
+  return Math.max(last, 0);
+}
+
+/**
+ * Workday overlays some buttons with a "click_filter" element that receives the click: a normal
+ * click first; if something keeps intercepting it, a click at the button's position.
+ */
+async function clickThrough(b: Locator) {
+  await b.click({ timeout: 5000 }).catch(() => b.click({ force: true, timeout: 5000 }));
+}
+
+/**
+ * "Continue" / "Save and Continue": waits until it is shown and enabled (Workday disables it while
+ * it parses a resume or saves), then clicks. False when it never became available.
+ */
+export async function clickNext(page: Page, timeout = 90_000): Promise<boolean> {
+  const until = Date.now() + timeout;
+  const b = nextButton(page);
+  while (Date.now() < until) {
+    const ready =
+      (await b.isVisible().catch(() => false)) &&
+      (await b.isEnabled().catch(() => false)) &&
+      (await b.getAttribute("aria-disabled").catch(() => null)) !== "true" &&
+      !(await page.locator(BUSY).filter({ visible: true }).count().catch(() => 0));
+    if (ready) {
+      await clickThrough(b);
+      return true;
+    }
+    await sleep(500);
+  }
+  return false;
+}
+
+/** Active step text from the progress bar (cheap; used to notice that the page moved on). */
+export async function activeStep(page: Page): Promise<string> {
+  return (await page
+    .locator(aid("progressBarActiveStep"))
+    .first()
+    .innerText({ timeout: 1000 })
+    .catch(() => "")).replace(/\s+/g, " ").trim();
+}
+
+/** The resume upload step of "Autofill with Resume" (a file input and no other questions yet). */
+export async function isAutofillUpload(page: Page): Promise<boolean> {
+  return /autofillWithResume/i.test(page.url()) || (await page.locator(`${aid("applyFlowAutofillPage")}, ${aid("autofillWithResumePage")}`).count()) > 0;
+}
+
+// ---------------------------------------------------------------- e-mail verification
+
+/** A verification-code field on the current page, if any. */
+export function codeInput(page: Page): Locator {
+  return page
+    .locator(`${aid("verificationCode")}, input[autocomplete="one-time-code"], input[name*="verification" i], input[id*="verification" i], input[aria-label*="code" i], input[name*="code" i]`)
+    .filter({ visible: true })
+    .first();
+}
+
+/** Types the code from the verification e-mail and submits it. */
+export async function submitVerificationCode(page: Page, code: string): Promise<AccountOutcome> {
+  const input = codeInput(page);
+  if (!(await input.count())) return "unknown";
+  await input.fill(code);
+  const btn = page
+    .locator(`${aid("verifyButton")}, ${aid("verificationSubmitButton")}, ${aid("submitButton")}, ${aid("signInContent")} button:has-text("Verify"), ${aid("signInContent")} button:has-text("Submit"), ${aid("signInContent")} button:has-text("Continue")`)
+    .filter({ visible: true })
+    .first();
+  if (await btn.count()) await clickThrough(btn);
+  else await input.press("Enter");
+  const until = Date.now() + 20_000;
+  await sleep(600);
+  while (Date.now() < until) {
+    const st = await wdState(page).catch(() => null);
+    if (st && (st.kind === "step" || st.kind === "review")) return "ok";
+    if (st?.kind === "auth") return "ok"; // verified; Workday asks to sign in
+    const err = String(await page.evaluate(AUTH_ERR).catch(() => ""));
+    if (/invalid|incorrect|expired|wrong/i.test(err)) return "invalid";
+    await sleep(500);
+  }
+  return "unknown";
 }
 
 // ---------------------------------------------------------------- resume

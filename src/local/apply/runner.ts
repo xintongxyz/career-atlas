@@ -10,9 +10,11 @@ import type { ApplyController, AppEnv } from "../../server/env";
 import { chooseBrowser, type BrowserChoice } from "./browser";
 import { tenantOf, type AccountManager } from "./credentials";
 import { runAttempt, type EngineDeps } from "./engine";
+import type { MailVerifier } from "./mail";
 
 export interface ApplyRunner extends ApplyController {
   accounts: AccountManager;
+  mail: MailVerifier | null;
   init(): Promise<void>;
   recover(): Promise<{ requeued: number; unconfirmed: number }>;
   idle(): Promise<void>;
@@ -29,6 +31,8 @@ export function createApplyRunner(opts: {
   /** Tests may force a choice (e.g. unavailable). */
   choice?: BrowserChoice;
   accounts: AccountManager;
+  /** Gmail verification e-mails (opt-in). */
+  mail?: MailVerifier | null;
 }): ApplyRunner {
   const queue: string[] = [];
   const cancelled = new Set<string>();
@@ -72,6 +76,7 @@ export function createApplyRunner(opts: {
             timeouts: opts.timeouts,
             forceHeadless: opts.forceHeadless,
             accounts: opts.accounts,
+            mail: opts.mail ?? null,
           },
           id,
           ),
@@ -98,6 +103,7 @@ export function createApplyRunner(opts: {
   return {
     allowLoopback: opts.allowLoopback,
     accounts: opts.accounts,
+    mail: opts.mail ?? null,
     async accountStatus(url, email) {
       const a = opts.accounts;
       const tenant = tenantOf(url);
@@ -112,6 +118,7 @@ export function createApplyRunner(opts: {
         password_mode: st.mode,
         shared_configured: await a.sharedConfigured(),
         auto_sign_in: st.autoSignIn,
+        mail_verification: !!opts.mail && (await opts.mail.configured(email)),
       };
     },
     async init() {

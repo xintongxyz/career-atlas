@@ -9,8 +9,10 @@
 //   - submit_clicked_at is written durably BEFORE the click; an attempt with an uncertain outcome
 //     becomes "submission_unconfirmed" and is never submitted again automatically
 //   - every submission consumes the authorisation (submit_authorized → 0)
-//   - CAPTCHAs, sign-ins, account creation and email codes are handed to the user, never bypassed;
-//     Career Atlas never types passwords or creates accounts
+//   - CAPTCHAs are handed to the user, never bypassed. Workday sign-in / account creation only as
+//     authorised per application (Keychain credentials, never retried after a failure); Workday
+//     verification e-mails are read from Gmail only when the owner turned it on (mail.ts),
+//     otherwise they are handed to the user
 //   - Indeed is never automated: in the visible window the user clicks; Career Atlas only reads
 //     page addresses to follow them to the employer's form
 //   - logs contain attempt ids and codes only — never field values, resume content or URLs
@@ -35,7 +37,8 @@ import { PAGE_SIGNALS, SCAN_FIELDS } from "./dom";
 import { classifyIndeedUrl } from "./indeed";
 import { applicationUrl, atsFromSignals, classifyAfterSubmit, stripQuery, type Ats, type PageSignals } from "./outcome";
 import { fieldKey, filledSummary, holds, norm, planForm, question, toAction, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
-import { accountTermsLabel, addButton, declineCookies, degreeOption, deletePanel, enterApplyFlow, nextButton, uploadResume, WD_OPTION_SEL, wdSettle, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
+import type { MailVerifier } from "./mail";
+import { accountTermsLabel, activeStep, addButton, clickNext, codeInput, declineCookies, degreeOption, deletePanel, enterApplyFlow, isAutofillUpload, nextButton, submitVerificationCode, uploadResume, WD_OPTION_SEL, wdReady, wdSettle, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
 
 const { applicationAttempts, documents, jobPostings, companies } = schema;
 
@@ -46,16 +49,25 @@ export interface EngineDeps {
   evidenceDir: (attemptId: string) => string;
   allowLoopback: boolean;
   isCancelled: (attemptId: string) => boolean;
-  timeouts?: Partial<{ navigation: number; afterSubmit: number; manual: number }>;
+  timeouts?: Partial<{ navigation: number; afterSubmit: number; manual: number; stepReady: number; mailWait: number }>;
   /** Tests: run the visible-window logic in a headless browser. */
   forceHeadless?: boolean;
   /** Workday candidate accounts (Keychain-backed). */
   accounts?: AccountManager;
+  /** Gmail verification e-mails (opt-in, Settings). */
+  mail?: MailVerifier | null;
 }
 
 class Stop extends Error {
   constructor(public code: string) {
     super(code);
+  }
+}
+
+/** The Workday page moved on while it was being filled (e.g. the user clicked Continue in the window). */
+class StepMoved extends Error {
+  constructor() {
+    super("step_moved");
   }
 }
 
@@ -79,7 +91,7 @@ const hostOf = (u: string) => {
 
 export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<AttemptState> {
   const db = getDb(deps.env.DB);
-  const t = { navigation: 45_000, afterSubmit: 45_000, manual: 30 * 60_000, ...deps.timeouts };
+  const t = { navigation: 45_000, afterSubmit: 45_000, manual: 30 * 60_000, stepReady: 90_000, mailWait: 180_000, ...deps.timeouts };
   let row = await db.query.applicationAttempts.findFirst({ where: eq(applicationAttempts.id, attemptId) });
   if (!row || row.state !== "queued") return (row?.state as AttemptState) ?? "failed";
   const visible = !!row.visible;
@@ -100,6 +112,13 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   };
   const checkCancel = async () => {
     if (await cancelled()) throw new Stop("cancelled");
+  };
+  // Workday: the step being filled; if the page moves on meanwhile, filling stops and the loop re-reads it.
+  let fillingStep: { page: Page; step: string } | null = null;
+  const checkStep = async () => {
+    if (!fillingStep) return;
+    const now = await activeStep(fillingStep.page);
+    if (now && fillingStep.step && now !== fillingStep.step) throw new StepMoved();
   };
   const shot = async (page: Page, name: string) => {
     try {
@@ -296,7 +315,9 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     let lastStep = "";
     let resumeHandled = false;
     let stuck = 0;
-    const accountTried = { signIn: false, create: false };
+    let signedInNow = false;
+    let reentered = false;
+    const accountTried = { signIn: false, create: false, mail: false };
     for (let i = 0; i < MAX_WORKDAY_STEPS; i++) {
       await checkCancel();
       await declineCookies(page);
@@ -307,9 +328,21 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         if (!(await waitForUser(page, async () => !(await signals(page)).challenge, "captcha"))) return pause("captcha");
         continue;
       }
+      // Verification e-mail: read from Gmail when the user turned it on (Settings), otherwise the user.
+      if (st.kind === "verify_email" && !accountTried.mail && deps.mail && row!.accountMode && row!.accountMode !== "none") {
+        accountTried.mail = true;
+        const r = await verifyByEmail(page, Date.now() - 15 * 60_000);
+        if (r === "ok") {
+          signedInNow = true;
+          continue;
+        }
+      }
       if (st.kind === "auth" && row!.accountMode && row!.accountMode !== "none" && deps.accounts?.available) {
         const r = await workdayAccount(page, accountTried);
-        if (r === "continue") continue;
+        if (r === "continue") {
+          signedInNow = true;
+          continue;
+        }
         if (r !== "user") return r;
       }
       if (st.kind === "auth" || st.kind === "verify_email") {
@@ -320,38 +353,67 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         }, "login_required");
         if (!ok) return pause("login_required", [], { stage: "workday_sign_in" });
         await set({ state: "filling", intervention: null, stage: "filling" }, "workday_signed_in");
+        signedInNow = true;
         continue;
       }
       if (/already applied/i.test(st.errors.join(" "))) throw new Stop("already_applied_on_site");
       if (st.kind === "review") break;
       if (st.kind !== "step") return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page");
+      // After signing in, Workday sometimes drops the "Autofill with Resume" choice and opens the
+      // empty form instead: go back to the autofill address once, so the resume is uploaded and parsed.
+      if (signedInNow && entered.mode === "autofill" && entered.url && !resumeHandled && !reentered && !(await isAutofillUpload(page)) && !(await page.locator('input[type="file"]').count())) {
+        reentered = true;
+        await set({}, "workday_autofill_resumed");
+        await goto(page, entered.url, t.navigation);
+        continue;
+      }
+      await wdReady(page);
+      st = await wdState(page);
       const name = `${st.step ?? ""}|${st.pageId ?? ""}`;
       if (name !== lastStep) await set({ stage: "filling" }, "workday_step", { step: st.step ?? st.pageId ?? "?", n: st.index ?? 0, total: st.total ?? 0 });
       lastStep = name;
 
-      // Resume: exactly the selected file. Files already attached are removed only with the user's OK;
-      // a file with the same name is not assumed to be the same version.
-      if (!resumeHandled && (await page.locator('input[type="file"]').count())) {
-        const ours = await uploadedEarlier();
-        const r = await uploadResume(page, resumeFile, { ours, decide: (name) => String(planCtx.answers[`attachment:${norm(name)}`] ?? "") as "Remove" | "Keep" | "" });
-        if (r.result === "failed") throw new Stop("resume_upload_failed");
-        if (r.result === "confirm") {
-          await shot(page, `step-${st.index ?? i + 1}-attachments`);
-          return pause("approval_needed", r.files.map((name) => ({ key: `attachment:${norm(name)}`, label: name === resumeFile.name ? `A file named “${name}” is already attached on the employer's site. It may be an older version of your resume. Replace it with the selected version?` : `The employer's site already has “${name}” attached. Remove it? (Your selected resume “${resumeFile.name}” is attached either way.)`, kind: "radio" as const, required: true, options: ["Remove", "Keep"], reason: "attachment", sensitive: false, hint: null, rememberable: false })));
+      try {
+        fillingStep = { page, step: await activeStep(page) };
+        // Resume: exactly the selected file. Files already attached are removed only with the user's OK;
+        // a file with the same name is not assumed to be the same version.
+        if (!resumeHandled && (await page.locator('input[type="file"]').count())) {
+          const ours = await uploadedEarlier();
+          const r = await uploadResume(page, resumeFile, { ours, decide: (name) => String(planCtx.answers[`attachment:${norm(name)}`] ?? "") as "Remove" | "Keep" | "" });
+          if (r.result === "failed") throw new Stop("resume_upload_failed");
+          if (r.result === "confirm") {
+            await shot(page, `step-${st.index ?? i + 1}-attachments`);
+            return pause("approval_needed", r.files.map((name) => ({ key: `attachment:${norm(name)}`, label: name === resumeFile.name ? `A file named “${name}” is already attached on the employer's site. It may be an older version of your resume. Replace it with the selected version?` : `The employer's site already has “${name}” attached. Remove it? (Your selected resume “${resumeFile.name}” is attached either way.)`, kind: "radio" as const, required: true, options: ["Remove", "Keep"], reason: "attachment", sensitive: false, hint: null, rememberable: false })));
+          }
+          if (r.result === "uploaded") await set({}, "uploaded_resume", { file: resumeFile.name, sha256: row!.resumeSha256 });
+          resumeHandled = r.result !== "no_input";
+          if (r.result === "uploaded" && parsedMode && (await waitForParsing(page, fillingStep.step))) {
+            fillingStep = null;
+            continue; // Workday moved on to the parsed form: read it afresh
+          }
         }
-        if (r.result === "uploaded") await set({}, "uploaded_resume", { file: resumeFile.name, sha256: row!.resumeSha256 });
-        resumeHandled = r.result !== "no_input";
-        if (r.result === "uploaded" && parsedMode) await sleep(1500); // let resume parsing finish
-      }
-      const sections = await fillWorkdaySections(page);
-      const generic = await fillPage(page, { uploadInPlan: false, parsedMode });
-      const questions = [...sections.questions, ...generic.questions];
-      if (questions.length) {
-        await shot(page, `step-${st.index ?? i + 1}`);
-        return visible ? manual(page, "workday", reasonFor(questions), questions) : pause(reasonFor(questions), questions);
+        const sections = await fillWorkdaySections(page);
+        const generic = await fillPage(page, { uploadInPlan: false, parsedMode });
+        const questions = [...sections.questions, ...generic.questions];
+        fillingStep = null;
+        if (questions.length) {
+          await shot(page, `step-${st.index ?? i + 1}`);
+          return visible ? manual(page, "workday", reasonFor(questions), questions) : pause(reasonFor(questions), questions);
+        }
+      } catch (e) {
+        fillingStep = null;
+        if (e instanceof StepMoved) {
+          lastStep = "";
+          continue; // the page moved on (e.g. the user clicked Continue): read the new step
+        }
+        if (isTimeout(e)) return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "page_slow" });
+        throw e;
       }
       // Save and Continue. Workday validates on the server; errors keep us on the same step.
-      await nextButton(page).click();
+      if (!(await clickNext(page, t.stepReady))) {
+        await shot(page, `step-${st.index ?? i + 1}-stuck`);
+        return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "next_not_available" });
+      }
       await sleep(800);
       st = await wdSettle(page);
       const after = `${st.step ?? ""}|${st.pageId ?? ""}`;
@@ -395,6 +457,66 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   }
 
   /**
+   * After the resume upload on "Autofill with Resume": waits while Workday parses it. True when the
+   * page moved on to the parsed form by itself; false when it waits for "Continue" (clicked next).
+   */
+  async function waitForParsing(page: Page, stepBefore: string): Promise<boolean> {
+    const until = Date.now() + t.stepReady;
+    while (Date.now() < until) {
+      await checkCancel();
+      const now = await activeStep(page);
+      if (now && now !== stepBefore && !(await isAutofillUpload(page))) return true;
+      const st = await wdState(page).catch(() => null);
+      if (st?.kind === "step" && (await nextButton(page).isEnabled().catch(() => false)) && (await wdReady(page, 3000)) > 0) {
+        await sleep(1000);
+        const again = await activeStep(page);
+        return !!again && again !== stepBefore && !(await isAutofillUpload(page));
+      }
+      await sleep(500);
+    }
+    return false;
+  }
+
+  /**
+   * Verification e-mail (opt-in): finds Workday's message in Gmail and enters the code or opens the
+   * verification link on the employer's site. Never logs or stores the code, link or message.
+   */
+  async function verifyByEmail(page: Page, since: number): Promise<"ok" | "none"> {
+    const mail = deps.mail;
+    const email = planCtx.profile.contact.email?.trim() ?? null;
+    if (!mail || !(await mail.configured(email))) return "none";
+    const tenant = tenantOf(page.url());
+    await set({ stage: "workday_verify_email" }, "workday_mail_waiting", { tenant });
+    const v = await mail.waitForWorkday({ tenant, since, timeoutMs: t.mailWait, fallbackAddress: email, stop: cancelled });
+    if (!v) {
+      await set({}, "workday_mail_not_found");
+      return "none";
+    }
+    if (v.code && (await codeInput(page).count())) {
+      const r = await submitVerificationCode(page, v.code);
+      if (r === "ok") {
+        await set({ stage: "filling" }, "workday_email_verified", { via: "code" });
+        return "ok";
+      }
+      await set({}, "workday_mail_code_rejected");
+      return "none";
+    }
+    if (v.link) {
+      const host = tenantOf(v.link);
+      if (host !== tenant && !/(^|\.)(myworkdayjobs|myworkday|myworkdaysite)\.com$/i.test(host.split(":")[0])) return "none";
+      const back = page.url();
+      await goto(page, v.link, t.navigation);
+      await sleep(1500);
+      await set({ stage: "filling" }, "workday_email_verified", { via: "link" });
+      // Back to the application (Workday usually asks to sign in again).
+      if (tenantOf(page.url()) !== tenant || !(await page.locator('[data-automation-id="applyFlowPage"], [data-automation-id="signInContent"]').count())) await goto(page, back, t.navigation);
+      return "ok";
+    }
+    await set({}, "workday_mail_not_found");
+    return "none";
+  }
+
+  /**
    * Workday candidate account, as authorised for THIS application (account_mode):
    *  - sign_in: a saved credential (Keychain) is used — once; a failure is never retried automatically
    *  - create: if no credential exists, a new account is registered with the e-mail from My Profile and
@@ -403,10 +525,12 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
    *    accounts and unclear results are handed to the user.
    * Returns "continue" (signed in), "user" (the normal hand-off applies) or a paused state.
    */
-  async function workdayAccount(page: Page, tried: { signIn: boolean; create: boolean }): Promise<AttemptState | "continue" | "user"> {
+  async function workdayAccount(page: Page, tried: { signIn: boolean; create: boolean; mail: boolean }): Promise<AttemptState | "continue" | "user"> {
     const acc = deps.accounts!;
     const email = planCtx.profile.contact.email?.trim();
-    if (!email || visible) return "user"; // in a visible window the user signs in themselves
+    if (!email) return "user";
+    // In a visible window an earlier failed try of THIS attempt is left to the user (never retried).
+    if (visible && (await signInTriedBefore())) return "user";
     const tenant = tenantOf(page.url());
     if (acc.blocked(tenant, email)) return pause("login_required", [], { stage: "workday_sign_in", errorCode: "sign_in_failed_recently" });
     const has = await acc.hasCredential(tenant, email);
@@ -415,7 +539,12 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       const pw = await acc.password(tenant, email);
       if (!pw) return "user";
       await set({ stage: "workday_sign_in" }, "workday_sign_in_attempt", { tenant });
-      const r = await workdaySignIn(page, email, pw);
+      const t0 = Date.now();
+      let r = await workdaySignIn(page, email, pw);
+      if (r === "verify" && !tried.mail) {
+        tried.mail = true;
+        if ((await verifyByEmail(page, t0 - 15 * 60_000)) === "ok") r = "ok";
+      }
       if (r === "ok") {
         acc.mark(tenant, email, { status: "signed_in", last_sign_in_at: Date.now(), last_failure_at: null, last_failure_code: null });
         await set({ stage: "filling" }, "workday_signed_in_auto", { tenant });
@@ -440,11 +569,21 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       if (!np) return pause("login_required", [], { stage: "workday_sign_in", errorCode: "shared_password_missing" });
       await acc.save(tenant, email, np.password, np.mode, "pending");
       await set({ stage: "workday_create_account" }, "workday_account_creating", { tenant });
-      const r = await workdayCreateAccount(page, email, np.password, !!terms);
+      const t0 = Date.now();
+      let r = await workdayCreateAccount(page, email, np.password, !!terms);
+      // No clear answer on the page: a verification e-mail from Workday confirms the account was made.
+      if (r === "unknown" && deps.mail && (await deps.mail.configured(email))) {
+        const st = await wdState(page).catch(() => null);
+        if (st?.kind !== "step" && st?.kind !== "review") r = "verify";
+      }
       if (r === "ok" || r === "verify") {
         acc.mark(tenant, email, { status: "created" });
         await set({}, "workday_account_created", { tenant });
-        if (r === "verify") return pause("login_required", [], { stage: "workday_verify_email", errorCode: "verification_required" });
+        if (r === "verify") {
+          tried.mail = true;
+          if ((await verifyByEmail(page, t0 - 60_000)) === "ok") return "continue";
+          return pause("login_required", [], { stage: "workday_verify_email", errorCode: "verification_required" });
+        }
         return "continue";
       }
       // Not created: the unused generated password is removed again (a shared one stays the user's).
@@ -457,6 +596,13 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       return pause("login_required", [], { stage: "workday_sign_in", errorCode: "account_unclear" });
     }
     return "user";
+  }
+
+  /** Did an earlier run of THIS attempt already try the saved password (and not get in)? */
+  async function signInTriedBefore(): Promise<boolean> {
+    const steps = ((await current())?.steps as { code: string }[] | null) ?? [];
+    const i = steps.map((x) => x.code).lastIndexOf("workday_sign_in_attempt");
+    return i >= 0 && !steps.slice(i).some((x) => x.code === "workday_signed_in_auto");
   }
 
   /** Did an earlier run of THIS attempt upload the selected resume (same pinned SHA-256)? */
@@ -492,11 +638,12 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         await sleep(1200);
         fields = await scan(page);
       }
-      const now = await enrichOptions(page, fields.filter((f) => f.visible && !handled.has(fieldKey(f))));
+      const now = await enrichOptions(page, fields.filter((f) => f.visible && !handled.has(fieldKey(f))), checkStep);
       plan = planForm(now, planCtx);
       const before = new Map(now.map((f) => [f.ref, f.value]));
       for (const a of plan.actions) {
         await checkCancel();
+        await checkStep();
         if (a.kind !== "upload") await perform(page, a).catch(() => {});
       }
       const after = await scan(page);
@@ -658,7 +805,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         let keepSite = false;
         if (preexisting.has(pi)) {
           const diffs: string[] = [];
-          for (const f of (await enrichOptions(page, panelsOf(await scan(page), group).get(pi) ?? []))) {
+          for (const f of (await enrichOptions(page, panelsOf(await scan(page), group).get(pi) ?? [], checkStep))) {
             if (!f.visible || !f.wdField || f.control === "file" || f.wdField === "degree") continue;
             const v = want(f.wdField);
             if (v === null || v === undefined || v === "" || (isEmpty(f.value) && f.control !== "checkbox")) continue;
@@ -683,7 +830,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           await perform(page, { ref: cb.ref, key: `${group}:${k}:currentlyWorkHere`, label: cb.label, control: "checkbox", kind: "check", value: cv, source: "experience" }).catch(() => {});
           await sleep(300);
         }
-        ds = await enrichOptions(page, panelsOf(await scan(page), group).get(pi) ?? []);
+        ds = await enrichOptions(page, panelsOf(await scan(page), group).get(pi) ?? [], checkStep);
         for (const f of ds) {
           if (!f.visible || !f.wdField || f.control === "file") continue;
           if (keepSite && !isEmpty(f.value)) continue; // the user kept the form's values
@@ -739,6 +886,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       if (!list.length) return;
       for (const a of list) {
         await checkCancel();
+        await checkStep();
         await perform(page, a).catch(() => {});
       }
       const after = await scan(page);
@@ -907,9 +1055,10 @@ async function visibleOptions(page: Page): Promise<Locator[]> {
 }
 
 /** Reads the options of comboboxes / listboxes (they exist only while the menu is open). */
-async function enrichOptions(page: Page, fields: FieldDescriptor[]): Promise<FieldDescriptor[]> {
+async function enrichOptions(page: Page, fields: FieldDescriptor[], guard?: () => Promise<void>): Promise<FieldDescriptor[]> {
   for (const f of fields) {
     if ((f.control !== "combobox" && f.control !== "listbox") || !f.visible || f.options.length || (f.control === "combobox" && f.asyncOptions)) continue;
+    await guard?.();
     const loc = page.locator(`[data-ca-ref="${f.ref}"]`);
     try {
       await loc.click({ timeout: 3000 });
@@ -1105,6 +1254,8 @@ async function waitForOutcome(page: Page, ats: Ats | null, posts: ReturnType<typ
   }
   return last.kind === "validation_errors" && !posts.posted() ? last : last.kind === "challenge" || last.kind === "email_code" ? last : ({ kind: "pending" } as const);
 }
+
+const isTimeout = (e: unknown) => (e as Error)?.name === "TimeoutError" || /Timeout \d+ms exceeded/.test(String((e as Error)?.message ?? ""));
 
 function errorCode(e: unknown): string {
   const m = String((e as Error)?.message ?? "");

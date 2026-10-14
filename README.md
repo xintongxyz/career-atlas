@@ -57,9 +57,10 @@ Career Atlas does not:
 - guess salaries
 - predict who will hire you
 - send an application without your explicit authorization for that job, or claim one was sent without the site's confirmation
-- solve CAPTCHAs, read your e-mail verification codes, or create an employer account without your authorization for that employer
+- solve CAPTCHAs, or create an employer account without your authorization for that employer
+- read your e-mail — except, when you turn it on, Workday verification messages in Gmail (read-only, with an app password kept in the Keychain)
 
-Gmail, Google Calendar and a browser extension are planned but **not** implemented. See [ARCHITECTURE.md](ARCHITECTURE.md#future-extensions).
+Gmail sync, Google Calendar and a browser extension are planned but **not** implemented (the only Gmail use is the opt-in Workday verification reader). See [ARCHITECTURE.md](ARCHITECTURE.md#future-extensions).
 
 ## Quick start
 

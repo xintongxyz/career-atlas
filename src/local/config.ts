@@ -35,6 +35,10 @@ export interface LocalSettings {
   workday_password_mode?: "unique" | "shared";
   /** Workday: sign in automatically when a Keychain credential exists for the employer site (default on). */
   workday_auto_sign_in?: boolean;
+  /** Workday: read the verification e-mail from Gmail (IMAP, app password in the Keychain) and complete it. Off by default. */
+  gmail_verification?: boolean;
+  /** The Gmail address to read (defaults to the e-mail in My Profile). Not secret. */
+  gmail_address?: string;
   /** Absolute path to the `claude` executable (auto-detected when unset). */
   claude_path?: string;
   claude_model?: string;

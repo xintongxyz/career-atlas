@@ -111,7 +111,8 @@ Optional, per application, authorised in the start dialog:
   for each employer** (default) or **your shared password** (opt-in in Settings; typed once into a
   password field, never shown again). Agreements on the registration form are shown to you first
   and ticked only with your approval. "Account already exists" → no duplicate; you sign in or use
-  *Forgot your password?*. E-mail verification, CAPTCHA, MFA/one-time codes and SSO are yours.
+  *Forgot your password?*. CAPTCHA, MFA via an authenticator app and SSO are always yours. E-mail
+  verification is yours too unless you turn on *Verification e-mails (Gmail)* (below).
 - Passwords are stored only in the **macOS Keychain** (service "Career Atlas – Workday account";
   the shared one under "Career Atlas – Workday shared password"), written through `security`'s
   standard input (never a process argument), read back and compared before use, and saved
@@ -119,7 +120,40 @@ Optional, per application, authorised in the start dialog:
   never in the repository, `.env`, SQLite, attempt records, logs, screenshots or the browser UI
   (the API only reports whether one exists). The non-secret index (which employer site has an
   account for which e-mail, last sign-in, last failure) is `…/CareerAtlas/automation/accounts.json`
-  (owner-only). *Settings → Workday accounts* lists them and can forget one (deletes the Keychain item).
+  (owner-only). *Settings → Workday accounts* lists them, can forget one (deletes the Keychain item),
+  **copy** a saved password to this Mac's clipboard (the local server hands it to `pbcopy`; it never
+  travels through HTTP), and **save a password you already have** for an employer site (an account
+  you made yourself) so the next application signs in for you.
+- **After signing in**, Workday sometimes forgets *Autofill with Resume* and opens the empty form;
+  Career Atlas then returns once to the autofill address so the selected resume is uploaded and parsed.
+- **Slow pages.** Each step is filled only after it has finished drawing (no spinner, same number of
+  fields for about a second). "Continue" is clicked only when it is shown and enabled (Workday
+  disables it while it reads the resume; up to 90 s). If the page moves on while it is being filled
+  (for example you click *Continue* in the window), filling stops and the new step is read. A page
+  that doesn't respond is handed to you (visible window) or paused — never failed with the window closed.
+
+### Verification e-mails (Gmail, opt-in)
+
+Off by default; turned on by the owner on 2026-10-14 for their own Mac. *Settings → Workday accounts
+→ Verification e-mails (Gmail)*:
+
+- **Access** is IMAP over TLS to `imap.gmail.com:993` with a Google **app password** (16 letters,
+  created at myaccount.google.com/apppasswords; needs 2-Step Verification). It is stored only in
+  the macOS Keychain (service "Career Atlas – Gmail app password"), never returned by the API,
+  logged or written to SQLite/config. The address (default: the e-mail in My Profile) is in
+  `config.json`.
+- **Read-only and narrow.** Mailboxes are opened with `EXAMINE`, messages with `BODY.PEEK` — nothing
+  is marked read, moved or deleted. Only messages received since the account step began (INBOX and
+  Spam) from a Workday sender — or naming the employer's Workday site — are opened, and only a
+  verification code or a verification link on the employer's Workday site (https) is taken.
+  Nothing from the mailbox is stored or logged; the attempt records only "waiting for the
+  verification e-mail" / "e-mail verified" / "not found".
+- **Used when** Workday shows a verification step after an account was created or a sign-in was
+  tried *for this application* (account automation authorised in the start dialog). The code is
+  typed into Workday's code field, or the link is opened in the automation browser; then sign-in
+  continues with the saved password. If nothing arrives within 3 minutes the step is handed to you.
+- Plain-text IMAP is refused with the real Keychain; tests use a synthetic IMAP server
+  (`tests/fixtures/imap-server.ts`) and the in-memory store.
 
 ## Indeed
 
@@ -178,8 +212,8 @@ actually uploaded, and the resume is linked to the application.
 - **Duplicates.** One open attempt per job; a job that already has an application, or an
   unresolved *Unconfirmed* attempt, can't start another; the same form URL can't be submitted
   from two saved jobs.
-- **No bypassing.** CAPTCHAs, bot checks, sign-ins and email codes are handed to you in a visible
-  window. The browser's user agent and behaviour are not disguised.
+- **No bypassing.** CAPTCHAs, bot checks and sign-ins you didn't authorise are handed to you in a
+  visible window; e-mail codes too, unless you turned on Gmail verification (above). The browser's user agent and behaviour are not disguised.
 - **Isolated browser.** Playwright drives Chromium in its own profile folder
   (`…/CareerAtlas/automation/browser-profile`, owner-only). Your everyday Chrome profile,
   passwords and cookies are never opened. The automation browser cannot reach this computer's
