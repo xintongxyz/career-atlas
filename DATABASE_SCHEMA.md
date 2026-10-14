@@ -54,6 +54,8 @@ users 1─* custom_views
 | `contacts` | Recruiters, referrals | Optional company |
 | `reminders` | In-app to-dos and calendar items | `kind`, `due_at`, `completed_at`, `auto_key` for system-created reminders (follow-up, manual follow-up date, event-linked) |
 | `custom_views` | Saved table filters and columns | `state` JSON |
+| `user_profiles` | My Profile (one per user), resume-import draft | `data` JSON (contact details, eligibility, languages, education, experience, skills, approved reusable application answers); `null` = not specified |
+| `application_attempts` | Automated application runs (execution state, not the pipeline status). Added in 0005 | `state` queued/filling/needs_review/submitting/submitted_verified/submission_unconfirmed/failed/cancelled; the resume is pinned by `resume_document_id` + `resume_sha256`, file name, version name, size; `submit_clicked_at` is written before the click and never cleared (no automatic re-submission); confirmation text/URL/time/source; `questions`/`answers` for pauses; `filled` stores labels and sources only, never values; `application_id` set after the verified `changeStatus` |
 
 ## Duplicate detection
 

@@ -40,6 +40,7 @@ The first start (and the first start after you change the code) builds the app a
 |---|---|---|
 | `~/Library/Application Support/CareerAtlas/career-atlas.sqlite` (+ `-wal`, `-shm`) | All records: companies, jobs, URLs, JDs, snapshots, evidence, overrides, applications, append-only events, notes, reminders, tags, contacts, views, preferences, document metadata | Never |
 | `…/CareerAtlas/documents/` | Uploaded resumes / cover letters (never uploaded anywhere) | Never |
+| `…/CareerAtlas/automation/` | Automated applications: the isolated browser profile (`browser-profile/`) and local screenshots per attempt (`attempts/<id>/`) | Never (not in backups either) |
 | `…/CareerAtlas/config.json` | Local settings (owner identity, AI on/off, backup retention) | Never |
 | `…/CareerAtlas/backup-state.json`, `logs/` | Last backup result; server log (no request bodies, JD text or notes) | Never |
 | `~/CareerAtlasBackups/personal-<time>/` | Encrypted backups | Never (refused inside the repo) |
@@ -116,6 +117,16 @@ Rules the app enforces regardless of the AI: values claimed from the posting mus
 **From a resume:** keep the file in Documents and link it on the profile page. In Claude Desktop, attach the resume and write *"Update my Career Atlas profile from this resume"* (extension v0.4.0): Claude proposes facts with quotes from the resume; they appear at the top of *My Profile*, marked *Quoted from resume* or *Not found in resume text*, and only the items you tick are added. Driver's licence, work authorization and clearance are only accepted when the resume states them. Without Claude Desktop, use *Copy prompt for your AI* on the profile page and paste the answer back.
 
 **Match** (job page → *My match*, the *Match* column in All Positions, and Compare): Career Atlas sorts each job's requirements into *Must-have*, *Preferred* and *Unclear importance*, keeps the original wording, and checks each against your profile — met, partly met, not met, or can't be checked yet — with the reason and the supporting fact from your profile. Failed must-haves (licence, work authorization, clearance, required certifications, …) are listed first in a separate box; the overall score (skills and preferences) never hides them. Requirements the AI only inferred are never treated as must-haves, and wording that allows alternatives ("or equivalent", "may be considered") gives *partly met*, not *not met*. Matching runs locally with rules (no AI call per job) and updates instantly whenever a job or your profile changes, for every saved job.
+
+## Automated applications
+
+*Start application* on a job fills in Greenhouse and Lever application forms in a separate,
+local Playwright browser, with the resume version you choose, and marks the job *Applied* only
+after the employer's site confirms. Everything else gets manual assistance. Workflow, states,
+safeguards and synthetic testing: [AUTO_APPLY.md](AUTO_APPLY.md). The automation browser uses
+its own profile in `…/CareerAtlas/automation/` (never your Chrome profile) and runs one
+application at a time; attempts survive a restart (an interrupted submission becomes
+*Unconfirmed*, never re-submitted).
 
 ## Weekly encrypted backups
 

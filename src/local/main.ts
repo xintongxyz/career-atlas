@@ -75,7 +75,8 @@ async function main() {
     console.log(`\n${signal}: finishing pending work…`);
     stopBackups();
     server.close();
-    await Promise.race([rt.runner.idle(), new Promise((r) => setTimeout(r, 10_000))]);
+    rt.apply.stop();
+    await Promise.race([Promise.all([rt.runner.idle(), rt.apply.idle()]), new Promise((r) => setTimeout(r, 10_000))]);
     rt.close(); // closes SQLite cleanly (checkpoints the WAL)
     try {
       const lock = JSON.parse(readFileSync(lockFile, "utf8")) as { pid: number };

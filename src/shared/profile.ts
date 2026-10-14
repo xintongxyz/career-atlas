@@ -12,7 +12,26 @@ const optTxt = (max = 300) => txt(max).nullable().optional();
 const month = z.string().regex(/^\d{4}(-\d{2})?$/, "YYYY or YYYY-MM").nullable().optional();
 const tags = z.array(txt(120).min(1)).max(200).default([]);
 
+// Plain text (not strictly validated): the profile autosaves while the user is still typing.
+const url = optTxt(500);
+
 export const profileSchema = z.object({
+  /** Contact details used to fill application forms. */
+  contact: z
+    .object({
+      first_name: optTxt(120),
+      last_name: optTxt(120),
+      preferred_name: optTxt(120),
+      email: optTxt(254),
+      phone: optTxt(40),
+      linkedin_url: url,
+      github_url: url,
+      portfolio_url: url,
+      website_url: url,
+      address: optTxt(300),
+      postal_code: optTxt(20),
+    })
+    .default({}),
   based_in: z.object({ city: optTxt(120), region: optTxt(120), country: optTxt(120) }).default({}),
   work_authorization: z
     .array(z.object({ country: txt(120).min(1), status: z.enum(AUTH_STATUSES), note: optTxt(500), expires: month }))
@@ -63,6 +82,14 @@ export const profileSchema = z.object({
   certifications: z.array(z.object({ name: txt(200).min(1), status: z.enum(CERT_STATUSES).default("held") })).max(60).default([]),
   projects: z.array(z.object({ name: txt(200).min(1), description: optTxt(2000), skills: tags })).max(60).default([]),
   notes: optTxt(4000),
+  /**
+   * Answers the user explicitly approved for reuse in application forms (e.g. "How did you hear
+   * about us?"). Matched only by the exact (normalized) question text.
+   */
+  saved_answers: z
+    .array(z.object({ question: txt(500).min(1), answer: z.union([txt(4000), z.array(txt(500)).max(50), z.boolean()]), created_at: z.number().int().optional() }))
+    .max(200)
+    .default([]),
 });
 export type Profile = z.infer<typeof profileSchema>;
 export const emptyProfile = (): Profile => profileSchema.parse({});

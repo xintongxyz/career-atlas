@@ -1,6 +1,6 @@
 import type { JobDetail } from "@shared/types";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Archive, ArchiveRestore, ChevronLeft, ExternalLink, Loader2, MoreHorizontal, Pencil, RotateCcw, Sparkles, Star, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Bot, ChevronLeft, ExternalLink, Loader2, MoreHorizontal, Pencil, RotateCcw, Send, Sparkles, Star, Trash2 } from "lucide-react";
 import * as React from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useSearchParams } from "react-router";
@@ -25,10 +25,11 @@ import { api, ApiRequestError } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { hasTranslation, localizePosting } from "@/lib/job-i18n";
 import { MatchPanel } from "@/components/jobs/match-panel";
+import { ApplyTab, AttemptStateBadge, StartApplicationDialog, useApplyOverview } from "@/components/jobs/apply-panel";
 import { NotFound } from "./system";
 import { useAiOnRequest } from "@/components/jobs/ai-opt-in";
 
-const TABS = ["overview", "requirements", "match", "original", "application", "activity", "notes"] as const;
+const TABS = ["overview", "requirements", "match", "original", "application", "apply", "activity", "notes"] as const;
 
 export default function JobDetailPage() {
   const { id = "" } = useParams();
@@ -65,6 +66,11 @@ function JobDetailView({ job }: { job: JobDetail }) {
   const [editing, setEditing] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [reviewOpen, setReviewOpen] = React.useState(false);
+  const [applyOpen, setApplyOpen] = React.useState(false);
+  const applyOv = useApplyOverview(job.id);
+  const attempt = applyOv.data?.attempts[0];
+  const attemptOpen = attempt && ["queued", "filling", "needs_review", "submitting", "submission_unconfirmed"].includes(attempt.state);
+  const showTab = (v: string) => setParams((prev) => { const n = new URLSearchParams(prev); n.set("tab", v); return n; }, { replace: true });
   const [extractionId, setExtractionId] = React.useState<string | null>(job.latest_extraction?.id ?? null);
   React.useEffect(() => setExtractionId(job.latest_extraction?.id ?? null), [job.latest_extraction?.id]);
 
@@ -140,6 +146,12 @@ function JobDetailView({ job }: { job: JobDetail }) {
           ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {!job.application && !archived && !attemptOpen ? (
+            <Button variant="primary" onClick={() => setApplyOpen(true)}>
+              <Send />
+              {t("apply.startApplication")}
+            </Button>
+          ) : null}
           {p.original_url ? (
             <Button asChild variant="secondary">
               <a href={p.apply_url || p.original_url} target="_blank" rel="noopener noreferrer nofollow">
@@ -201,6 +213,20 @@ function JobDetailView({ job }: { job: JobDetail }) {
         </div>
       ) : null}
 
+      {/* Automated application in progress or waiting for the user */}
+      {attemptOpen ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-subtle px-3 py-2 text-[13px] text-ink-2" aria-live="polite">
+          <Bot className="size-4" />
+          <span className="flex-1">{attempt!.state === "needs_review" && attempt!.intervention ? t(`apply.intervention.${attempt!.intervention}`) : t("apply.bannerRunning")}</span>
+          <AttemptStateBadge state={attempt!.state} intervention={attempt!.intervention} />
+          {tab !== "apply" ? (
+            <Button size="sm" onClick={() => showTab("apply")}>
+              {t("apply.viewProgress")}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* Extraction state banner */}
       {running ? (
         <div className="flex items-center gap-2 rounded-lg border border-info/20 bg-info-soft px-3 py-2 text-[13px] text-info" aria-live="polite">
@@ -227,7 +253,7 @@ function JobDetailView({ job }: { job: JobDetail }) {
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="min-w-0 rounded-xl border border-line bg-surface shadow-card">
-          <Tabs value={tab} onValueChange={(v) => setParams((prev) => { const n = new URLSearchParams(prev); n.set("tab", v); return n; }, { replace: true })}>
+          <Tabs value={tab} onValueChange={showTab}>
             <TabsList className="px-3">
               {TABS.map((k) => (
                 <TabsTrigger key={k} value={k}>
@@ -250,6 +276,9 @@ function JobDetailView({ job }: { job: JobDetail }) {
               </TabsContent>
               <TabsContent value="application">
                 <ApplicationTab ctx={ctx} />
+              </TabsContent>
+              <TabsContent value="apply">
+                <ApplyTab job={job} onStart={() => setApplyOpen(true)} />
               </TabsContent>
               <TabsContent value="activity">
                 <ActivityTab ctx={ctx} />
@@ -280,6 +309,8 @@ function JobDetailView({ job }: { job: JobDetail }) {
           ) : null}
         </DialogContent>
       </Dialog>
+
+      <StartApplicationDialog job={job} open={applyOpen} onOpenChange={setApplyOpen} onStarted={() => showTab("apply")} />
 
       <DeleteJobDialog
         jobId={job.id}

@@ -10,7 +10,8 @@ const dataDir = mkdtempSync(join(tmpdir(), "career-atlas-it-"));
 process.env.CA_BACKUP_DIR = mkdtempSync(join(tmpdir(), "career-atlas-it-backups-"));
 process.env.CA_BACKUP_KEY_FILE = join(dataDir, "..", `${dataDir.split("/").pop()}-test.key`);
 const cfg = loadConfig({ kind: "test", dataDir, port: 80 });
-const rt = await createLocalRuntime(cfg, { serveStatic: false, extraHosts: ["localhost"] });
+// Short waits after Submit so "unconfirmed" outcomes are reached quickly in tests.
+const rt = await createLocalRuntime(cfg, { serveStatic: false, extraHosts: ["localhost"], apply: { timeouts: { afterSubmit: 6000, manual: 4000, navigation: 20_000 } } });
 rt.env.MAX_UPLOAD_BYTES = "1048576";
 
 export const env = rt.env;

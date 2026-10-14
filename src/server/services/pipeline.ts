@@ -115,7 +115,7 @@ export async function changeStatus(
   userId: string,
   savedJobId: string,
   target: PipelineStatus,
-  opts: { occurredAt?: number | null; note?: string | null } = {},
+  opts: { occurredAt?: number | null; note?: string | null; metadata?: Record<string, unknown> | null; appliedVia?: string | null; resumeDocumentId?: string | null } = {},
 ): Promise<StatusChangeResult> {
   const { saved, application } = await loadSavedJob(db, userId, savedJobId);
   const from = effectiveStatus(saved, application);
@@ -187,7 +187,8 @@ export async function changeStatus(
         lastActivityAt: at,
         nextFollowUpAt: followUp,
         finalOutcomeAt: TERMINAL_APPLICATION_STATUSES.includes(status) ? at : null,
-        resumeDocumentId: saved.resumeDocumentId,
+        appliedVia: opts.appliedVia ?? null,
+        resumeDocumentId: opts.resumeDocumentId ?? saved.resumeDocumentId,
         coverLetterDocumentId: saved.coverLetterDocumentId,
         createdAt: ts,
         updatedAt: ts,
@@ -196,7 +197,7 @@ export async function changeStatus(
       }),
     );
     items.push(
-      eventInsert(db, { userId, savedJobId, applicationId: appId, type: "application_submitted", fromStatus: underlying, toStatus: "applied", details: opts.note, occurredAt: at }),
+      eventInsert(db, { userId, savedJobId, applicationId: appId, type: "application_submitted", fromStatus: underlying, toStatus: "applied", details: opts.note, metadata: opts.metadata, occurredAt: at }),
     );
     if (status !== "applied") {
       items.push(

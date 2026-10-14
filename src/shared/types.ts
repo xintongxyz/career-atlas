@@ -143,6 +143,8 @@ export interface JobListItem {
   tags: TagDTO[];
   /** Profile match summary (only when the user has a profile; computed locally). */
   match?: import("./match").MatchSummary | null;
+  /** Pending or running automated application attempt (execution state, not the pipeline status). */
+  automation?: import("./apply").AttemptSummary | null;
 }
 
 export interface EvidenceDTO {

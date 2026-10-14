@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/misc";
 import { useLocaleContext } from "@/hooks/useMe";
 import { formatRelative, formatShortDate, locationText } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { AutomationBadge } from "./apply-panel";
 import { CompanyAvatar, ExtractionBadge, PriorityBadge, SalaryText, StarMark, WorkModeBadge, displayCompany, displayTitle } from "./badges";
 
 /** Compact job card used on the board and saved list. */
@@ -57,8 +58,9 @@ export const JobCard = React.forwardRef<HTMLDivElement, { job: JobListItem; drag
             ))}
           </div>
         ) : null}
-        <div className="mt-2 flex items-center gap-2 border-t border-line/70 pt-2 text-[11px] text-ink-4">
+        <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-line/70 pt-2 text-[11px] text-ink-4">
           <PriorityBadge priority={job.priority} />
+          <AutomationBadge automation={job.automation} />
           {soon ? (
             <span className="inline-flex items-center gap-0.5 text-warn">
               <CalendarX2 className="size-3" />

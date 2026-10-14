@@ -36,6 +36,13 @@
       "when": 1791995442168,
       "tag": "0004_user_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792000608867,
+      "tag": "0005_application_attempts",
+      "breakpoints": true
     }
   ]
 }

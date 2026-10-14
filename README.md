@@ -30,6 +30,7 @@ _All data shown is fictional demo data (`npm run db:seed:demo`)._
   - Unknown stays unknown. AI salary or visa claims without a matching quote in the posting are discarded.
 - **AI drafts from Claude Desktop or any AI.** A small Claude Desktop extension lets Claude research a job and send it to your local Career Atlas as a draft; or paste any AI's answer into *Import from AI*. Every value is labelled *verified in posting*, *from the web* or *AI inference*, and nothing is saved until you review it. Claude also returns English and 简体中文 versions of the descriptive fields in the same pass, so the job itself switches language with the interface (originals and evidence are kept untouched). No API key or extra billing.
 - **My Profile & job match.** Record your education, experience, skills, certifications, languages, driver's licence and work authorization (or import them from your resume via Claude, reviewed item by item). Every saved job is then checked against your profile on your computer: must-haves met or not, preferred qualifications, what can't be checked yet, and the evidence for each — with failed must-haves shown separately, never hidden by a score.
+- **Automated applications (Greenhouse & Lever).** *Start application* on a job: choose one of your resume versions, and a local Playwright browser fills in the employer's form from My Profile, uploads exactly that resume, asks you about anything it doesn't know (never guessing, never answering diversity questions, never ticking declarations without you), and submits only when you authorised it. The job becomes *Applied* only after the site confirms; uncertain results are never re-submitted. Other sites get copy-ready manual assistance. See [docs/AUTO_APPLY.md](docs/AUTO_APPLY.md).
 - **Human in the loop.** You review extractions before saving. Manual edits are kept as overrides alongside the original extracted value.
   - "Refresh from source" shows a diff, and you choose which changes to apply.
 - **Saved ≠ Applied.** Job posting, saved job and application are separate records. Pipeline: Saved → Preparing → Applied → … → Offer, Accepted, Rejected or Withdrawn.
@@ -55,7 +56,8 @@ Career Atlas does not:
 - fetch LinkedIn, Indeed or Glassdoor pages automatically (their terms prohibit it; paste the description instead)
 - guess salaries
 - predict who will hire you
-- send applications for you
+- send an application without your explicit authorization for that job, or claim one was sent without the site's confirmation
+- solve CAPTCHAs or sign in for you
 
 Gmail, Google Calendar and a browser extension are planned but **not** implemented. See [ARCHITECTURE.md](ARCHITECTURE.md#future-extensions).
 
@@ -95,6 +97,7 @@ Your data is created in `~/Library/Application Support/CareerAtlas/` — outside
 - [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md): entities, relationships, integrity rules
 - [SECURITY.md](SECURITY.md): threat model, controls, reporting vulnerabilities
 - [docs/LOCAL_FIRST.md](docs/LOCAL_FIRST.md): running locally, data locations, autosave, backups and restore, Claude AI, feature parity
+- [docs/AUTO_APPLY.md](docs/AUTO_APPLY.md): automated applications — workflow, states, safeguards, supported systems, synthetic testing
 - [docs/DATA_PROTECTION.md](docs/DATA_PROTECTION.md): how personal data stays private and safe across updates and schema changes
 - [TESTING.md](TESTING.md): test strategy and acceptance coverage
 - [HANDOFF.md](HANDOFF.md): implemented, tested and deployed status, next steps

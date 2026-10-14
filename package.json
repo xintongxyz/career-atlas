@@ -43,6 +43,7 @@
     "hono": "4.13.10",
     "i18next": "25.10.10",
     "lucide-react": "0.544.0",
+    "playwright-core": "1.56.0",
     "radix-ui": "1.4.3",
     "react": "19.2.0",
     "react-dom": "19.2.0",

@@ -23,6 +23,8 @@ export interface AppEnv {
   AI_MODEL?: string;
   /** Hands an extraction to the in-process background task runner. */
   EXTRACTION_DISPATCH?: (msg: ExtractionMessage) => Promise<void>;
+  /** Local Playwright application worker (absent when automation is unavailable). */
+  APPLY?: ApplyController;
   MAX_UPLOAD_BYTES?: string;
   /** "read_only" rejects all writes (e.g. while restoring). */
   MAINTENANCE_MODE?: string;
@@ -42,3 +44,14 @@ export type HonoEnv = {
   Bindings: AppEnv;
   Variables: { user: CurrentUser; requestId: string };
 };
+
+export interface ApplyController {
+  enqueue(attemptId: string): void;
+  /** Stops a running attempt as soon as it is safe (never after Submit was clicked). */
+  cancel(attemptId: string): void;
+  status(): { available: boolean; browser: string | null; reason: string | null };
+  /** A local screenshot taken during the attempt (PNG), or null. */
+  readEvidence(attemptId: string, name: string): Uint8Array | null;
+  /** Test/dev instances may target synthetic forms on 127.0.0.1; the personal instance never does. */
+  allowLoopback: boolean;
+}

@@ -553,3 +553,60 @@ export const userProfiles = sqliteTable("user_profiles", {
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
+
+// Automated application attempts (local Playwright worker). One row per attempt; these are
+// execution states only — the pipeline status changes solely through changeStatus, after a
+// verified submission. The resume actually used is pinned by its hash and metadata, so later
+// edits or deletion of the document never change what this attempt says was submitted.
+// Added in 0005 (additive). Stored only in the local database.
+export const applicationAttempts = sqliteTable(
+  "application_attempts",
+  {
+    id: id(),
+    userId: userId(),
+    savedJobId: text("saved_job_id")
+      .notNull()
+      .references(() => savedJobs.id, { onDelete: "cascade" }),
+    jobPostingId: text("job_posting_id")
+      .notNull()
+      .references(() => jobPostings.id, { onDelete: "cascade" }),
+    applicationId: text("application_id").references(() => applications.id, { onDelete: "set null" }),
+    resumeDocumentId: text("resume_document_id").references(() => documents.id, { onDelete: "set null" }),
+    resumeSha256: text("resume_sha256").notNull(),
+    resumeFileName: text("resume_file_name").notNull(),
+    resumeVersionName: text("resume_version_name").notNull(),
+    resumeMimeType: text("resume_mime_type").notNull(),
+    resumeSizeBytes: integer("resume_size_bytes").notNull(),
+    targetUrl: text("target_url").notNull(),
+    ats: text("ats"),
+    state: text("state").notNull().default("queued"),
+    stage: text("stage"),
+    submitMode: text("submit_mode").notNull().default("review"), // auto | review
+    /** 1 once the user approved submission for this attempt (auto mode at start, or "Submit" in review). */
+    submitAuthorized: integer("submit_authorized").notNull().default(0),
+    visible: integer("visible").notNull().default(0),
+    intervention: text("intervention"),
+    questions: text("questions", { mode: "json" }).$type<unknown[]>(),
+    answers: text("answers", { mode: "json" }).$type<Record<string, unknown>>(),
+    filled: text("filled", { mode: "json" }).$type<unknown[]>(),
+    steps: text("steps", { mode: "json" }).$type<unknown[]>(),
+    evidence: text("evidence", { mode: "json" }).$type<string[]>(),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    /** Set durably BEFORE the submit button is clicked. Never cleared; blocks any automatic retry. */
+    submitClickedAt: integer("submit_clicked_at"),
+    confirmationText: text("confirmation_text"),
+    confirmationUrl: text("confirmation_url"),
+    confirmationSource: text("confirmation_source"), // page | user
+    confirmedAt: integer("confirmed_at"),
+    cancelRequestedAt: integer("cancel_requested_at"),
+    createdAt: createdAt(),
+    startedAt: integer("started_at"),
+    finishedAt: integer("finished_at"),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("attempts_saved_job_idx").on(t.savedJobId, t.createdAt),
+    index("attempts_user_state_idx").on(t.userId, t.state),
+  ],
+);

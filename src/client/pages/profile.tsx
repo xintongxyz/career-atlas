@@ -19,6 +19,7 @@ import { setDirty } from "@/lib/save-state";
 import { PageFallback, PageHeader } from "./system";
 
 type Tri = "yes" | "no" | "unknown";
+const CONTACT_FIELDS = ["first_name", "last_name", "preferred_name", "email", "phone", "linkedin_url", "github_url", "portfolio_url", "website_url", "address", "postal_code"] as const;
 const toTri = (v: boolean | null | undefined): Tri => (v === true ? "yes" : v === false ? "no" : "unknown");
 const fromTri = (v: string): boolean | null => (v === "yes" ? true : v === "no" ? false : null);
 
@@ -114,6 +115,23 @@ function ProfileEditor({ dto }: { dto: ProfileDTO }) {
             <DocumentSelect id="pf-resume" kind="resume" label={t("profile.resumeFile")} value={dto.resume_document_id} onChange={(v) => save.mutate({ profile: p, resume_document_id: v })} />
           </Field>
           <ProfileAiImport />
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader title={t("profile.sections.contact")} description={t("profile.contactHelp")} />
+        <div className="grid gap-3 px-4 pb-4 sm:grid-cols-2">
+          {CONTACT_FIELDS.map((k) => (
+            <Field key={k} label={t(`profile.contact.${k}`)} htmlFor={`pf-c-${k}`}>
+              <Input
+                id={`pf-c-${k}`}
+                type={k === "email" ? "email" : k === "phone" ? "tel" : k.endsWith("_url") ? "url" : "text"}
+                autoComplete="off"
+                value={p.contact[k] ?? ""}
+                onChange={(e) => set("contact", { ...p.contact, [k]: e.target.value.trim() ? e.target.value : null })}
+              />
+            </Field>
+          ))}
         </div>
       </Card>
 
@@ -268,6 +286,23 @@ function ProfileEditor({ dto }: { dto: ProfileDTO }) {
               {addBtn(() => add("projects", { name: "", description: null, skills: [] }))}
             </div>
           </div>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader title={t("profile.sections.savedAnswers")} description={t("profile.savedAnswersHelp")} />
+        <div className="space-y-2 px-4 pb-4">
+          {p.saved_answers.length ? (
+            p.saved_answers.map((a, i) => (
+              <div key={i} className="grid items-center gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                <span className="text-[13px] text-ink-2">{a.question}</span>
+                <span className="truncate text-[13px] text-ink">{typeof a.answer === "boolean" ? (a.answer ? t("profile.tri.yes") : t("profile.tri.no")) : Array.isArray(a.answer) ? a.answer.join(", ") : a.answer}</span>
+                {removeBtn(() => del("saved_answers", i))}
+              </div>
+            ))
+          ) : (
+            <p className="text-xs text-ink-3">{t("profile.noSavedAnswers")}</p>
+          )}
         </div>
       </Card>
 

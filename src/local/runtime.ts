@@ -14,6 +14,7 @@ import type { LocalD1 } from "./d1-sqlite";
 import { openDatabase, schemaVersion } from "./database";
 import { localFileStore } from "./file-store";
 import { createTaskRunner, type TaskRunner } from "./tasks";
+import { createApplyRunner, type ApplyRunner } from "./apply/runner";
 
 export const DEFAULT_OWNER_EMAIL = "owner@career-atlas.example.test";
 
@@ -22,6 +23,7 @@ export interface LocalRuntime {
   d1: LocalD1;
   env: AppEnv;
   runner: TaskRunner;
+  apply: ApplyRunner;
   claude: ClaudeCodeProvider;
   /** Full HTTP handler (firewall + API + static files). */
   fetch: (req: Request) => Promise<Response>;
@@ -88,7 +90,7 @@ export function staticResponse(clientDir: string, pathname: string): Response {
   });
 }
 
-export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: string[]; serveStatic?: boolean } = {}): Promise<LocalRuntime> {
+export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: string[]; serveStatic?: boolean; apply?: Partial<Parameters<typeof createApplyRunner>[0]> } = {}): Promise<LocalRuntime> {
   // Open + migrate. An existing database is backed up (encrypted, verified) before any schema change.
   const { d1, migrated } = await openDatabase(cfg, {
     beforeMigrate: async (db, pending) => {
@@ -114,6 +116,11 @@ export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: 
   };
   const runner = createTaskRunner(() => env);
   env.EXTRACTION_DISPATCH = (msg) => runner.dispatch(msg);
+  // Application automation: own browser profile and screenshots under <data>/automation (owner-only).
+  // Only test/dev instances may target synthetic forms on 127.0.0.1.
+  const apply = createApplyRunner({ getEnv: () => env, automationDir: join(cfg.dataDir, "automation"), allowLoopback: cfg.kind !== "personal", ...opts.apply });
+  await apply.init();
+  env.APPLY = apply;
 
   const api = createApp((app) => registerLocalRoutes(app, { cfg, d1, env, claude, runner }));
 
@@ -137,17 +144,25 @@ export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: 
   outer.get("*", (c) => (opts.serveStatic === false ? c.text("Not found", 404) : staticResponse(clientDir, c.req.path)));
 
   void runner.recover().then((n) => n && console.log(`↻ Resumed ${n} interrupted extraction(s)`));
+  void apply.recover().then((r) => {
+    if (r.requeued) console.log(`↻ Resumed ${r.requeued} application attempt(s)`);
+    if (r.unconfirmed) console.log(`! ${r.unconfirmed} application attempt(s) were interrupted while submitting — marked "Unconfirmed" (never re-submitted automatically)`);
+  }, () => {
+    /* runtime closed before recovery finished; it runs again at the next start */
+  });
 
   return {
     cfg,
     d1,
     env,
     runner,
+    apply,
     claude,
     allowedHosts,
     fetch: async (req) => outer.fetch(req),
     close() {
       runner.stop();
+      apply.stop();
       d1.close();
     },
   };

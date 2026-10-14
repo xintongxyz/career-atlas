@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { MatchLevelBadge } from "@/components/jobs/match-panel";
+import { AutomationBadge } from "@/components/jobs/apply-panel";
 import { localizedTitle } from "@/lib/job-i18n";
 import { CompanyAvatar, ExtractionBadge, PriorityBadge, SalaryText, StarMark, StatusBadge, displayCompany, displayTitle } from "@/components/jobs/badges";
 import { Button } from "@/components/ui/button";
@@ -149,7 +150,17 @@ export default function PositionsPage() {
           </div>
         ),
       },
-      { id: "status", header: () => t("positions.columns.status"), cell: ({ row }) => <StatusBadge status={row.original.status} /> },
+      {
+        id: "status",
+        header: () => t("positions.columns.status"),
+        // Pipeline status first; a pending automated application is shown beside it, never instead.
+        cell: ({ row }) => (
+          <span className="flex flex-col items-start gap-0.5">
+            <StatusBadge status={row.original.status} />
+            <AutomationBadge automation={row.original.automation} />
+          </span>
+        ),
+      },
       {
         id: "match",
         header: () => t("positions.columns.match"),

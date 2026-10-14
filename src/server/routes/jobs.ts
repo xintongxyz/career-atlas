@@ -38,6 +38,7 @@ import {
 } from "../services/extractions";
 import { bulkAction, confirmField, createJob, deleteImpact, deleteJob, findDuplicates, getJobDetail, updateJob } from "../services/jobs";
 import { applicationToDTO } from "../services/mappers";
+import { attemptSummaries } from "../services/apply";
 import { matchForJob, matchSummaries } from "../services/match";
 import { changeStatus, loadSavedJob } from "../services/pipeline";
 
@@ -57,11 +58,16 @@ export function registerJobRoutes(app: Hono<HonoEnv>) {
     const q = queryParams(c, jobListQuerySchema);
     const res = await listJobs(c.env.DB, userOf(c).id, q);
     const matches = await matchSummaries(dbOf(c), userOf(c).id, res.items.map((i) => i.job_posting_id));
-    const items = res.items.map((i) => ({ ...i, match: matches.get(i.job_posting_id) ?? null }));
+    const auto = await attemptSummaries(dbOf(c), userOf(c).id, res.items.map((i) => i.id));
+    const items = res.items.map((i) => ({ ...i, match: matches.get(i.job_posting_id) ?? null, automation: auto.get(i.id) ?? null }));
     return c.json({ items, total: res.total, page: q.page, page_size: q.page_size, salary_filter: res.salary_filter ?? null });
   });
 
-  app.get("/api/board", async (c) => c.json({ items: await boardJobs(c.env.DB, userOf(c).id) }));
+  app.get("/api/board", async (c) => {
+    const items = await boardJobs(c.env.DB, userOf(c).id);
+    const auto = await attemptSummaries(dbOf(c), userOf(c).id, items.map((i) => i.id));
+    return c.json({ items: items.map((i) => ({ ...i, automation: auto.get(i.id) ?? null })) });
+  });
   app.get("/api/jobs/:id/match", async (c) => c.json(await matchForJob(dbOf(c), userOf(c).id, c.req.param("id"))));
 
   app.get("/api/jobs/compare", async (c) => {
