@@ -57,13 +57,21 @@ export interface PendingQuestion {
   sensitive: boolean;
   /** What the profile says, when it says something that did not fit the options. */
   hint?: string | null;
+  /** Recognised meaning (prior_employment, coop_program, phone_type, identity, …) — lets "Remember" save it by meaning. */
+  meaning?: string | null;
+  /** False for declarations / consents: those are approved each time. */
+  rememberable?: boolean;
 }
 
 export interface FilledField {
   label: string;
-  /** Profile path or "answer" / "saved_answer" / "resume". Values are never stored here. */
+  /** Profile path or "answer" / "saved_answer" / "resume" / "site" (kept as the site filled it). */
   source: string;
   verified: boolean;
+  /** "kept": already right on the page; "corrected": a value the site had filled (e.g. from resume parsing) was replaced from My Profile; "parsed": filled by the site's resume parsing and not confirmed by My Profile. */
+  status?: "filled" | "kept" | "corrected" | "parsed";
+  /** Only for "parsed": the value the site filled, shown for review (stored locally only). */
+  value?: string | null;
 }
 
 export interface AttemptStep {
@@ -83,6 +91,8 @@ export interface AttemptDTO {
   /** The listing the user started from (e.g. Indeed) when the form is elsewhere. */
   source_url: string | null;
   route: AttemptRoute | null;
+  entry_mode: "autofill" | "manual" | null;
+  account_mode: "none" | "sign_in" | "create" | null;
   submit_mode: "auto" | "review";
   resume: { id: string | null; version_name: string; file_name: string; sha256: string; size_bytes: number; still_available: boolean; unchanged: boolean | null };
   visible: boolean;
@@ -94,6 +104,8 @@ export interface AttemptDTO {
   error_message: string | null;
   confirmation: { text: string | null; url: string | null; at: number | null; source: "page" | "user" | null };
   evidence: string[];
+  /** The user's answers for this attempt (question → answer), for Review. Local only. */
+  answered: { key: string; label: string; value: string | string[] | boolean }[];
   submit_clicked_at: number | null;
   created_at: number;
   started_at: number | null;
@@ -140,6 +152,8 @@ export interface ApplyOverview {
   attempts: AttemptDTO[];
   blocked_by: string | null;
   worker: { available: boolean; browser: string | null; reason: string | null };
+  /** Workday only: the candidate account for this employer site (never a password). */
+  account: AccountStatus | null;
 }
 
 export const startApplySchema = z.object({
@@ -149,6 +163,10 @@ export const startApplySchema = z.object({
   target_url: z.string().trim().url().max(2000).optional(),
   /** Indeed: open the listing in a visible window; the user clicks Apply and Career Atlas follows. */
   indeed_window: z.boolean().optional(),
+  /** Workday: Autofill with Resume (default) or Apply Manually. */
+  entry_mode: z.enum(["autofill", "manual"]).optional(),
+  /** Workday account automation for THIS application: none, sign in with a saved credential, or also create an account (explicit, per employer). */
+  account_mode: z.enum(["none", "sign_in", "create"]).optional(),
   /** The user ticked the authorization checkbox in the confirmation dialog. */
   confirm: z.literal(true),
 });
@@ -160,6 +178,9 @@ export const answerSchema = z.object({
 });
 
 export const resolveSchema = z.object({ outcome: z.enum(["submitted", "not_submitted"]) });
+
+export const accountSettingsSchema = z.object({ password_mode: z.enum(["unique", "shared"]).optional(), auto_sign_in: z.boolean().optional() });
+export const sharedPasswordSchema = z.object({ password: z.string().min(8).max(200), confirm: z.string().max(200) });
 
 /** Resume types an application form can receive. */
 export const UPLOADABLE_RESUME_TYPES = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"];
@@ -184,4 +205,20 @@ export function classificationUrl(raw: string, allowLoopback: boolean): string {
   if (u.pathname.startsWith("/indeed/")) return `https://www.indeed.com/${u.pathname.slice("/indeed/".length)}${rest}`;
   if (u.pathname.startsWith("/wd/")) return `https://fixture.wd1.myworkdayjobs.com/${u.pathname.slice("/wd/".length)}${rest}`;
   return raw;
+}
+
+/** Workday candidate-account status for an employer site (never contains a password). */
+export interface AccountStatus {
+  /** A secure store (macOS Keychain) is available. */
+  available: boolean;
+  store: "keychain" | "memory" | null;
+  tenant: string;
+  email: string | null;
+  /** A saved credential exists for this employer site and e-mail. */
+  credential: boolean;
+  /** A recent sign-in failed: not retried automatically. */
+  blocked: boolean;
+  password_mode: "unique" | "shared";
+  shared_configured: boolean;
+  auto_sign_in: boolean;
 }

@@ -29,13 +29,15 @@ import { sha256Hex } from "../../server/lib/util";
 import { readDocumentBytes, syncApplied, updateAttempt, type AttemptRow } from "../../server/services/apply";
 import { getProfileRow } from "../../server/services/profile";
 import { launchBrowser, type BrowserChoice } from "./browser";
+import { tenantOf, type AccountManager } from "./credentials";
+import { questionMeaning } from "@shared/apply-semantic";
 import { PAGE_SIGNALS, SCAN_FIELDS } from "./dom";
 import { classifyIndeedUrl } from "./indeed";
 import { applicationUrl, atsFromSignals, classifyAfterSubmit, stripQuery, type Ats, type PageSignals } from "./outcome";
-import { fieldKey, filledSummary, norm, planForm, question, toAction, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
-import { addButton, declineCookies, degreeOption, deletePanel, enterApplyFlow, nextButton, uploadResume, WD_OPTION_SEL, wdSettle, wdState } from "./workday";
+import { fieldKey, filledSummary, holds, norm, planForm, question, toAction, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
+import { accountTermsLabel, addButton, declineCookies, degreeOption, deletePanel, enterApplyFlow, nextButton, uploadResume, WD_OPTION_SEL, wdSettle, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
 
-const { applicationAttempts, documents, jobPostings } = schema;
+const { applicationAttempts, documents, jobPostings, companies } = schema;
 
 export interface EngineDeps {
   env: AppEnv;
@@ -47,11 +49,20 @@ export interface EngineDeps {
   timeouts?: Partial<{ navigation: number; afterSubmit: number; manual: number }>;
   /** Tests: run the visible-window logic in a headless browser. */
   forceHeadless?: boolean;
+  /** Workday candidate accounts (Keychain-backed). */
+  accounts?: AccountManager;
 }
 
 class Stop extends Error {
   constructor(public code: string) {
     super(code);
+  }
+}
+
+/** The attempt was changed by the user while this run waited (e.g. answered → queued again). */
+class Superseded extends Error {
+  constructor(public state: AttemptState) {
+    super("superseded");
   }
 }
 
@@ -105,6 +116,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     await set({ state: "needs_review", intervention: reason, questions, visible: 0, stage: null, ...extra }, "paused", { reason });
     return "needs_review" as const;
   };
+  const qmOf = (f: FieldDescriptor) => questionMeaning(f.label, planCtx.employer ?? null);
   const reasonFor = (questions: PendingQuestion[]): InterventionReason =>
     questions.some((q) => q.reason === "legal") ? "approval_needed" : questions.every((q) => q.reason === "unsupported") ? "unsupported_field" : "missing_information";
 
@@ -121,7 +133,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     const bytes = await readDocumentBytes(deps.env, doc.r2Key);
     if (!bytes || bytes.byteLength !== row.resumeSizeBytes || (await sha256Hex(bytes.buffer as ArrayBuffer)) !== row.resumeSha256) throw new Stop("resume_changed");
     resumeFile = { name: row.resumeFileName, mimeType: row.resumeMimeType, buffer: Buffer.from(bytes) };
-    planCtx = { profile, jobCountry: posting?.country ?? null, answers: (row.answers as Record<string, unknown> | null) ?? {}, resume: { fileName: resumeFile.name } };
+    const company = posting ? await db.query.companies.findFirst({ where: eq(companies.id, posting.companyId) }) : null;
+    planCtx = { profile, jobCountry: posting?.country ?? null, answers: (row.answers as Record<string, unknown> | null) ?? {}, resume: { fileName: resumeFile.name }, employer: company?.name ?? null };
 
     // ---- open
     await checkCancel();
@@ -132,6 +145,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     if (classifyIndeedUrl(classificationUrl(page.url(), allow)) !== "external") return await indeedFlow(page);
     return await formFlow(page, row.route === "indeed_company_site");
   } catch (e) {
+    if (e instanceof Superseded) return e.state; // a new run takes over; nothing is overwritten
     const code = e instanceof Stop ? e.code : errorCode(e);
     if (code === "cancelled" && !clickedThisRun) {
       const r = await current();
@@ -146,7 +160,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     console.error(JSON.stringify({ level: "warn", where: "apply", attempt: attemptId, code }));
     return "failed";
   } finally {
-    await ctx?.close().catch(() => {});
+    // Closing the browser must never block the queue (a hung close would stall every later attempt).
+    if (ctx) await Promise.race([ctx.close().catch(() => {}), sleep(10_000)]);
   }
 
   // ================================================================ routes
@@ -273,12 +288,15 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     await set({ ats: "workday", stage: "opening" }, "detected_ats", { ats: "workday" });
     await declineCookies(page);
     if (/you(?:'ve| have) already applied/i.test(await page.locator("body").innerText().catch(() => ""))) throw new Stop("already_applied_on_site");
-    const entered = await enterApplyFlow(page);
+    // Autofill with Resume first (Workday parses the exact selected resume), Apply Manually as fallback.
+    const entered = await enterApplyFlow(page, row!.entryMode === "manual" ? "manual" : "autofill");
     if (entered.result === "closed") throw new Stop("posting_gone");
     if (entered.mode) await set({}, "workday_entered", { mode: entered.mode });
-    const parsedMode = entered.mode === "autofill";
+    const parsedMode = entered.mode === "autofill" || entered.mode === null;
     let lastStep = "";
     let resumeHandled = false;
+    let stuck = 0;
+    const accountTried = { signIn: false, create: false };
     for (let i = 0; i < MAX_WORKDAY_STEPS; i++) {
       await checkCancel();
       await declineCookies(page);
@@ -289,8 +307,13 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         if (!(await waitForUser(page, async () => !(await signals(page)).challenge, "captcha"))) return pause("captcha");
         continue;
       }
+      if (st.kind === "auth" && row!.accountMode && row!.accountMode !== "none" && deps.accounts?.available) {
+        const r = await workdayAccount(page, accountTried);
+        if (r === "continue") continue;
+        if (r !== "user") return r;
+      }
       if (st.kind === "auth" || st.kind === "verify_email") {
-        if (!visible) return pause("login_required", [], { stage: "workday_sign_in" });
+        if (!visible) return pause("login_required", [], { stage: st.kind === "verify_email" ? "workday_verify_email" : "workday_sign_in" });
         const ok = await waitForUser(page, async () => {
           const x = await wdState(page);
           return x.kind === "step" || x.kind === "review";
@@ -306,13 +329,19 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       if (name !== lastStep) await set({ stage: "filling" }, "workday_step", { step: st.step ?? st.pageId ?? "?", n: st.index ?? 0, total: st.total ?? 0 });
       lastStep = name;
 
-      // Resume (My Experience): exactly the selected file; any other attached file is removed first.
+      // Resume: exactly the selected file. Files already attached are removed only with the user's OK;
+      // a file with the same name is not assumed to be the same version.
       if (!resumeHandled && (await page.locator('input[type="file"]').count())) {
-        const r = await uploadResume(page, resumeFile);
-        if (r === "failed") throw new Stop("resume_upload_failed");
-        if (r === "other_file_present") return pause("unsupported_field", [], { errorCode: "other_resume_attached" });
-        if (r === "uploaded") await set({}, "uploaded_resume", { file: resumeFile.name });
-        resumeHandled = r !== "no_input";
+        const ours = await uploadedEarlier();
+        const r = await uploadResume(page, resumeFile, { ours, decide: (name) => String(planCtx.answers[`attachment:${norm(name)}`] ?? "") as "Remove" | "Keep" | "" });
+        if (r.result === "failed") throw new Stop("resume_upload_failed");
+        if (r.result === "confirm") {
+          await shot(page, `step-${st.index ?? i + 1}-attachments`);
+          return pause("approval_needed", r.files.map((name) => ({ key: `attachment:${norm(name)}`, label: name === resumeFile.name ? `A file named “${name}” is already attached on the employer's site. It may be an older version of your resume. Replace it with the selected version?` : `The employer's site already has “${name}” attached. Remove it? (Your selected resume “${resumeFile.name}” is attached either way.)`, kind: "radio" as const, required: true, options: ["Remove", "Keep"], reason: "attachment", sensitive: false, hint: null, rememberable: false })));
+        }
+        if (r.result === "uploaded") await set({}, "uploaded_resume", { file: resumeFile.name, sha256: row!.resumeSha256 });
+        resumeHandled = r.result !== "no_input";
+        if (r.result === "uploaded" && parsedMode) await sleep(1500); // let resume parsing finish
       }
       const sections = await fillWorkdaySections(page);
       const generic = await fillPage(page, { uploadInPlan: false, parsedMode });
@@ -326,13 +355,18 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       await sleep(800);
       st = await wdSettle(page);
       const after = `${st.step ?? ""}|${st.pageId ?? ""}`;
-      if (after === name && st.errors.length && st.kind === "step") {
-        const fields = (await scan(page)).filter((f) => f.visible && f.invalid);
-        const qs = fields.map((f) => question(f, f.group ? `${f.group}:${f.groupIndex}:${f.wdField}` : fieldKey(f), "not_accepted", false, st.errors.join(" | ").slice(0, 300)));
-        await shot(page, `step-${st.index ?? i + 1}-errors`);
-        if (qs.length) return pause("missing_information", qs, { errorMessage: st.errors.join(" | ").slice(0, 600) });
-        return pause("validation_errors", [], { errorCode: "step_rejected", errorMessage: st.errors.join(" | ").slice(0, 600) });
-      }
+      if (after === name && st.kind === "step") {
+        const fields = (await scan(page)).filter((f) => f.visible && (f.invalid || (f.required && isEmpty(f.value) && !f.group)));
+        if (st.errors.length || fields.length) {
+          // Exactly the fields the site rejected — the rest of the application is kept as is.
+          const qs = fields.map((f) => question(f, f.group ? `${f.group}:${f.groupIndex}:${f.wdField}` : fieldKey(f), "not_accepted", false, st.errors.find((e) => norm(e).includes(norm(f.label).slice(0, 20))) ?? st.errors.join(" | ").slice(0, 300), qmOf(f)));
+          await shot(page, `step-${st.index ?? i + 1}-errors`);
+          if (qs.length) return pause("missing_information", qs, { errorMessage: st.errors.join(" | ").slice(0, 600) });
+          return pause("validation_errors", [], { errorCode: "step_rejected", errorMessage: st.errors.join(" | ").slice(0, 600) });
+        }
+        // No error shown and still on the same step: the site may be saving; never loop endlessly.
+        if (++stuck >= 2) return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+      } else stuck = 0;
     }
 
     // ---- Review
@@ -360,47 +394,140 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     return visible ? manual(page, "workday", "unexpected_page") : unconfirmed(page, "no_confirmation");
   }
 
+  /**
+   * Workday candidate account, as authorised for THIS application (account_mode):
+   *  - sign_in: a saved credential (Keychain) is used — once; a failure is never retried automatically
+   *  - create: if no credential exists, a new account is registered with the e-mail from My Profile and
+   *    a generated (or the user's shared) password, saved to the Keychain BEFORE submitting. Agreements
+   *    on the registration form need the user's approval. Verification e-mails, CAPTCHAs, SSO, existing
+   *    accounts and unclear results are handed to the user.
+   * Returns "continue" (signed in), "user" (the normal hand-off applies) or a paused state.
+   */
+  async function workdayAccount(page: Page, tried: { signIn: boolean; create: boolean }): Promise<AttemptState | "continue" | "user"> {
+    const acc = deps.accounts!;
+    const email = planCtx.profile.contact.email?.trim();
+    if (!email || visible) return "user"; // in a visible window the user signs in themselves
+    const tenant = tenantOf(page.url());
+    if (acc.blocked(tenant, email)) return pause("login_required", [], { stage: "workday_sign_in", errorCode: "sign_in_failed_recently" });
+    const has = await acc.hasCredential(tenant, email);
+    if (has && !tried.signIn) {
+      tried.signIn = true;
+      const pw = await acc.password(tenant, email);
+      if (!pw) return "user";
+      await set({ stage: "workday_sign_in" }, "workday_sign_in_attempt", { tenant });
+      const r = await workdaySignIn(page, email, pw);
+      if (r === "ok") {
+        acc.mark(tenant, email, { status: "signed_in", last_sign_in_at: Date.now(), last_failure_at: null, last_failure_code: null });
+        await set({ stage: "filling" }, "workday_signed_in_auto", { tenant });
+        return "continue";
+      }
+      if (r === "invalid" || r === "locked") {
+        acc.mark(tenant, email, { last_failure_at: Date.now(), last_failure_code: r });
+        return pause("login_required", [], { stage: "workday_sign_in", errorCode: r === "locked" ? "account_locked" : "sign_in_failed" });
+      }
+      if (r === "verify") return pause("login_required", [], { stage: "workday_verify_email", errorCode: "verification_required" });
+      if (r === "captcha") return pause("captcha");
+      return pause("login_required", [], { stage: "workday_sign_in", errorCode: "sign_in_unclear" });
+    }
+    if (!has && row!.accountMode === "create" && !tried.create) {
+      tried.create = true;
+      const terms = await accountTermsLabel(page);
+      const termsKey = `account_terms:${tenant}`;
+      if (terms && planCtx.answers[termsKey] !== true) {
+        return pause("approval_needed", [{ key: termsKey, label: terms.slice(0, 500), kind: "checkbox", required: true, options: [], reason: "legal", sensitive: true, hint: null, rememberable: false, meaning: "account_terms" }]);
+      }
+      const np = await acc.newPassword();
+      if (!np) return pause("login_required", [], { stage: "workday_sign_in", errorCode: "shared_password_missing" });
+      await acc.save(tenant, email, np.password, np.mode, "pending");
+      await set({ stage: "workday_create_account" }, "workday_account_creating", { tenant });
+      const r = await workdayCreateAccount(page, email, np.password, !!terms);
+      if (r === "ok" || r === "verify") {
+        acc.mark(tenant, email, { status: "created" });
+        await set({}, "workday_account_created", { tenant });
+        if (r === "verify") return pause("login_required", [], { stage: "workday_verify_email", errorCode: "verification_required" });
+        return "continue";
+      }
+      // Not created: the unused generated password is removed again (a shared one stays the user's).
+      if (r === "exists" || r === "policy" || r === "captcha") {
+        if (np.mode === "unique") await acc.forget(tenant, email);
+        if (r === "captcha") return pause("captcha");
+        return pause("login_required", [], { stage: "workday_sign_in", errorCode: r === "exists" ? "account_exists" : "password_policy" });
+      }
+      // Unclear: keep the saved credential — the account may exist.
+      return pause("login_required", [], { stage: "workday_sign_in", errorCode: "account_unclear" });
+    }
+    return "user";
+  }
+
+  /** Did an earlier run of THIS attempt upload the selected resume (same pinned SHA-256)? */
+  async function uploadedEarlier(): Promise<boolean> {
+    const r = await current();
+    return ((r?.steps as { code: string; params?: Record<string, unknown> }[] | null) ?? []).some((x) => x.code === "uploaded_resume" && x.params?.sha256 === row!.resumeSha256);
+  }
+
   // ================================================================ filling
 
-  /** Scan → plan → fill → verify the visible, non-panel fields of the current page. */
+  /**
+   * Scan → plan → fill → verify the visible, non-panel fields of the current page, in passes:
+   * conditional questions that appear after an answer are planned in the next pass. Values the page
+   * already holds correctly are kept (never erased and re-typed); a pre-filled value that My Profile
+   * contradicts is corrected; pre-filled values My Profile can't confirm are kept and listed for Review.
+   */
   async function fillPage(page: Page, opts: { uploadInPlan: boolean; parsedMode?: boolean }): Promise<{ questions: PendingQuestion[] }> {
-    let fields = await scan(page);
-    if (!opts.uploadInPlan) fields = fields.filter((f) => f.control !== "file");
-    let plan = planForm(fields, planCtx);
-    const upload = plan.actions.find((a) => a.kind === "upload");
-    if (upload) {
-      // Resume first: some systems (e.g. Lever) parse it and pre-fill fields, which we then overwrite and verify.
-      await page.locator(`[data-ca-ref="${upload.ref}"]`).setInputFiles(resumeFile);
-      await set({}, "uploaded_resume", { file: resumeFile.name });
-      await sleep(1200);
-      fields = await scan(page);
-    }
-    fields = await enrichOptions(page, fields);
-    plan = planForm(fields, planCtx);
-    for (const a of plan.actions) {
-      await checkCancel();
-      if (a.kind !== "upload") await perform(page, a).catch(() => {});
-    }
-    const after = await scan(page);
-    const ok = verify(plan.actions, after, resumeFile);
-    allFilled = allFilled.concat(filledSummary(plan.actions, ok));
-    await set({ filled: allFilled }, "filled", { count: ok.size, total: plan.actions.length });
-    const questions = [...plan.questions];
-    for (const a of plan.actions.filter((x) => !ok.has(x.ref))) {
-      if (a.kind === "upload") throw new Stop("resume_upload_failed");
-      const f = after.find((x) => fieldKey(x) === a.key) ?? fields.find((x) => x.ref === a.ref);
-      if (f && f.required && !questions.some((q) => q.key === a.key)) questions.push(question(f, a.key, "not_accepted", false));
-    }
-    // Values a site pre-filled by parsing the resume are not trusted: the user confirms them.
-    if (opts.parsedMode) {
-      const planned = new Set([...plan.actions.map((a) => a.key), ...plan.questions.map((q) => q.key), ...plan.skipped.filter((x) => x.reason === "demographic" || x.reason === "legal").map((x) => x.key)]);
-      for (const f of after) {
+    const questions: PendingQuestion[] = [];
+    const handled = new Set<string>();
+    let uploaded = false;
+    for (let pass = 0; pass < 3; pass++) {
+      let fields = await scan(page);
+      if (!opts.uploadInPlan) fields = fields.filter((f) => f.control !== "file");
+      const fresh = fields.filter((f) => f.visible && !handled.has(fieldKey(f)));
+      if (!fresh.length) break;
+      let plan = planForm(fresh, planCtx);
+      const upload = plan.actions.find((a) => a.kind === "upload");
+      if (upload && !uploaded) {
+        // Resume first: some systems (e.g. Lever) parse it and pre-fill fields, which are then checked.
+        await page.locator(`[data-ca-ref="${upload.ref}"]`).setInputFiles(resumeFile);
+        await set({}, "uploaded_resume", { file: resumeFile.name, sha256: row!.resumeSha256 });
+        uploaded = true;
+        await sleep(1200);
+        fields = await scan(page);
+      }
+      const now = await enrichOptions(page, fields.filter((f) => f.visible && !handled.has(fieldKey(f))));
+      plan = planForm(now, planCtx);
+      const before = new Map(now.map((f) => [f.ref, f.value]));
+      for (const a of plan.actions) {
+        await checkCancel();
+        if (a.kind !== "upload") await perform(page, a).catch(() => {});
+      }
+      const after = await scan(page);
+      const ok = verify(plan.actions, after, resumeFile);
+      allFilled = allFilled.concat(
+        plan.actions.map((a) => ({ label: (a.label || a.key).slice(0, 300), source: a.source, verified: ok.has(a.ref), status: (opts.parsedMode && !isEmpty(before.get(a.ref)) ? "corrected" : "filled") as "corrected" | "filled" })),
+        plan.kept.map((k) => ({ label: (k.label || k.key).slice(0, 300), source: k.source, verified: true, status: "kept" as const })),
+      );
+      questions.push(...plan.questions.filter((q) => !questions.some((x) => x.key === q.key)));
+      for (const a of plan.actions.filter((x) => !ok.has(x.ref))) {
+        if (a.kind === "upload") throw new Stop("resume_upload_failed");
+        const f = after.find((x) => fieldKey(x) === a.key) ?? now.find((x) => x.ref === a.ref);
+        if (f && f.required && !questions.some((q) => q.key === a.key)) questions.push(question(f, a.key, "not_accepted", false, null, qmOf(f)));
+      }
+      // Pre-filled by the site (resume parsing) and not confirmed by My Profile: kept, shown at Review.
+      const planned = new Set([...plan.actions.map((a) => a.key), ...plan.kept.map((k) => k.key), ...plan.questions.map((q) => q.key)]);
+      for (const f of now) {
         const key = fieldKey(f);
+        handled.add(key);
         const v = Array.isArray(f.value) ? f.value.join(", ") : typeof f.value === "string" ? f.value : "";
-        if (!f.visible || f.group || f.control === "file" || !v || planned.has(key) || key in planCtx.answers || questions.some((q) => q.key === key)) continue;
-        questions.push(question(f, key, "parsed_unverified", false, v.slice(0, 200)));
+        if (!opts.parsedMode || !v || planned.has(key) || f.control === "file" || f.group || f.demographic) continue;
+        allFilled.push({ label: (f.label || key).slice(0, 300), source: "site", verified: false, status: "parsed", value: v.slice(0, 300) });
       }
     }
+    // Before moving on: every visible required field must have a value (nothing left for the site to reject).
+    for (const f of await scan(page)) {
+      if (!f.visible || !f.required || f.group || f.control === "file" || !isEmpty(f.value)) continue;
+      const key = fieldKey(f);
+      if (!questions.some((q) => q.key === key)) questions.push(question(f, key, "missing", false, null, qmOf(f)));
+    }
+    await set({ filled: allFilled }, "filled", { count: allFilled.filter((x) => x.verified).length, total: allFilled.length });
     return { questions };
   }
 
@@ -449,6 +576,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           used.add(k);
         } else extras.push(pi);
       }
+      const preexisting = new Set(assigned.keys());
       // 2. Entries Workday shows that are not in My Profile (e.g. parsed from the resume): the user decides.
       let removed = false;
       for (const pi of extras.sort((a, b) => b - a)) {
@@ -476,6 +604,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
             used.add(k);
           }
         }
+        preexisting.clear();
+        for (const pi of assigned.keys()) preexisting.add(pi);
       }
       // 3. Profile entries without a panel: reuse empty panels, then "Add".
       for (let k = 0; k < entries.length; k++) {
@@ -522,10 +652,33 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           if (wd === "lastYearAttended" || wd === "endDate") return e.year ? String(e.year) : null;
           return null;
         };
+        // An entry already on the form (saved draft or resume parsing) that differs from My Profile is a
+        // genuine conflict: the user chooses — it is neither silently overwritten nor duplicated.
+        const src = group === "work" ? "experience" : "education";
+        let keepSite = false;
+        if (preexisting.has(pi)) {
+          const diffs: string[] = [];
+          for (const f of (await enrichOptions(page, panelsOf(await scan(page), group).get(pi) ?? []))) {
+            if (!f.visible || !f.wdField || f.control === "file" || f.wdField === "degree") continue;
+            const v = want(f.wdField);
+            if (v === null || v === undefined || v === "" || (isEmpty(f.value) && f.control !== "checkbox")) continue;
+            const a = toAction(f, `${group}:${k}:${f.wdField}`, v, src);
+            const shown = !("misfit" in a) && a.kind === "date" ? [a.value.month, a.value.day, a.value.year].filter(Boolean).join("/") : String(v);
+            if (!("misfit" in a) && !holds(f, a)) diffs.push(`${f.label.replace(/\*\s*$/, "")}: “${Array.isArray(f.value) ? f.value.join(", ") : String(f.value)}” ≠ “${shown}”`);
+          }
+          if (diffs.length) {
+            const decision = String(ans[`${group}_conflict:${k}`] ?? "");
+            if (!decision) {
+              questions.push({ key: `${group}_conflict:${k}`, label: `${group === "work" ? "Work experience" : "Education"} “${label}” on the form differs from My Profile — ${diffs.join("; ")}`.slice(0, 500), kind: "radio", required: true, options: ["Use My Profile", "Keep the form's values"], reason: "conflict", sensitive: false, hint: null, rememberable: false });
+              continue;
+            }
+            keepSite = decision.startsWith("Keep");
+          }
+        }
         // The checkbox first: it shows or hides the end date.
         let ds = panelsOf(await scan(page), group).get(pi) ?? [];
         const cb = ds.find((d) => d.wdField === "currentlyWorkHere" && d.control === "checkbox");
-        const cv = cb ? want("currentlyWorkHere") : null;
+        const cv = cb && !keepSite ? want("currentlyWorkHere") : null;
         if (cb && typeof cv === "boolean" && cb.value !== cv) {
           await perform(page, { ref: cb.ref, key: `${group}:${k}:currentlyWorkHere`, label: cb.label, control: "checkbox", kind: "check", value: cv, source: "experience" }).catch(() => {});
           await sleep(300);
@@ -533,6 +686,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         ds = await enrichOptions(page, panelsOf(await scan(page), group).get(pi) ?? []);
         for (const f of ds) {
           if (!f.visible || !f.wdField || f.control === "file") continue;
+          if (keepSite && !isEmpty(f.value)) continue; // the user kept the form's values
           const key = `${group}:${k}:${f.wdField}`;
           if (f.wdField === "currentlyWorkHere") {
             if (cb && typeof cv === "boolean") actions.push({ ref: f.ref, key, label: f.label, control: "checkbox", kind: "check", value: cv, source: "experience" });
@@ -556,6 +710,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
             if (f.required) questions.push({ ...question(f, key, "no_matching_option", false, String(v)), label: `${label}: ${f.label}`.slice(0, 500) });
             continue;
           }
+          // Already right on the form: keep it (no erase and re-type).
+          if (holds(f, a.kind === "search" ? { ...a, match: [String(v)], value: String(v) } : a)) continue;
           // Searchable school / field-of-study lists: only an exact option is taken.
           if (a.kind === "search") actions.push({ ...a, match: [String(v)], value: String(v) });
           else actions.push(a);
@@ -603,6 +759,13 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   async function submitGate(page: Page, ats: Ats | null): Promise<AttemptState | null> {
     row = (await current())!;
     if (!row.submitAuthorized) return visible ? manual(page, ats, "submit_approval") : pause("submit_approval");
+    // Values only the site's resume parsing provided are shown at Review: automatic submission waits
+    // for the user's explicit approval of them.
+    const approvedByUser = ((row.steps as { code: string }[] | null) ?? []).some((x) => x.code === "submit_approved");
+    if (!approvedByUser && allFilled.some((f) => f.status === "parsed")) {
+      await set({ submitAuthorized: 0 });
+      return visible ? manual(page, ats, "submit_approval") : pause("submit_approval", [], { errorCode: "parsed_values_need_review" });
+    }
     if ((await signals(page)).challenge) return visible ? manual(page, ats, "captcha") : pause("captcha");
     await checkCancel();
     return null;
@@ -628,7 +791,10 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     return "submitted_verified";
   }
 
-  /** Visible window: waits for the user (sign-in, CAPTCHA) until `done()`; false on close / timeout. */
+  /**
+   * Visible window: waits for the user (sign-in, CAPTCHA) until `done()`; false on close / timeout.
+   * If the attempt was changed meanwhile (answered → re-queued), the run ends without overwriting it.
+   */
   async function waitForUser(page: Page, done: () => Promise<boolean>, reason: InterventionReason): Promise<boolean> {
     await set({ state: "needs_review", intervention: reason, stage: "waiting_for_you" }, "waiting_for_you", { reason });
     const until = Date.now() + t.manual;
@@ -636,7 +802,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       if (page.isClosed()) return false;
       if (await cancelled()) throw new Stop("cancelled");
       const r = await current();
-      if (!r || r.state !== "needs_review") return false;
+      if (!r || r.state !== "needs_review") throw new Superseded((r?.state as AttemptState) ?? "failed");
       if (await done().catch(() => false)) {
         await set({ state: "filling", intervention: null, stage: "filling" });
         return true;
@@ -708,6 +874,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
 
 // ---------------------------------------------------------------- page helpers
 
+const isEmpty = (v: unknown) => v === null || v === undefined || v === "" || v === false || (Array.isArray(v) && v.length === 0);
+
 async function goto(page: Page, url: string, timeout: number) {
   const res = await page.goto(url, { waitUntil: "domcontentloaded", timeout }).catch((e) => {
     throw new Stop(errorCode(e));
@@ -745,9 +913,14 @@ async function enrichOptions(page: Page, fields: FieldDescriptor[]): Promise<Fie
     const loc = page.locator(`[data-ca-ref="${f.ref}"]`);
     try {
       await loc.click({ timeout: 3000 });
-      await sleep(300);
+      // Options may load after the menu opens: wait for them (up to 3 s) before reading.
+      let found = await visibleOptions(page);
+      for (let w = 0; w < 12 && !found.length; w++) {
+        await sleep(250);
+        found = await visibleOptions(page);
+      }
       const texts: string[] = [];
-      for (const o of await visibleOptions(page)) {
+      for (const o of found) {
         const tx = ((await o.textContent()) ?? "").replace(/\s+/g, " ").trim();
         if (tx) texts.push(tx);
       }
@@ -807,18 +980,35 @@ async function perform(page: Page, a: PlannedAction) {
   }
 }
 
-/** Workday button dropdown: open, click the option with exactly this text. */
+/**
+ * Workday button dropdown: open, wait for the options, click the one with exactly this text, then
+ * re-read the button until the choice has persisted (React may re-render); one retry.
+ */
 async function chooseListbox(page: Page, loc: Locator, label: string) {
-  await loc.click();
-  await sleep(300);
-  for (const o of await visibleOptions(page)) {
-    if (norm(await o.textContent()) === norm(label)) {
-      await o.click();
-      await sleep(200);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await loc.click();
+    let opts = await visibleOptions(page);
+    for (let w = 0; w < 12 && !opts.length; w++) {
+      await sleep(250);
+      opts = await visibleOptions(page);
+    }
+    let clicked = false;
+    for (const o of opts) {
+      if (norm(await o.textContent()) === norm(label)) {
+        await o.click();
+        clicked = true;
+        break;
+      }
+    }
+    if (!clicked) {
+      await page.keyboard.press("Escape");
       return;
     }
+    for (let w = 0; w < 8; w++) {
+      await sleep(250);
+      if (norm(await loc.textContent().catch(() => "")) === norm(label)) return;
+    }
   }
-  await page.keyboard.press("Escape");
 }
 
 async function pickOption(page: Page, loc: Locator, text: string, fits: (normalizedLabel: string) => boolean, wait: number) {

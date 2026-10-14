@@ -8,9 +8,11 @@ import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { ApplyController, AppEnv } from "../../server/env";
 import { chooseBrowser, type BrowserChoice } from "./browser";
+import { tenantOf, type AccountManager } from "./credentials";
 import { runAttempt, type EngineDeps } from "./engine";
 
 export interface ApplyRunner extends ApplyController {
+  accounts: AccountManager;
   init(): Promise<void>;
   recover(): Promise<{ requeued: number; unconfirmed: number }>;
   idle(): Promise<void>;
@@ -26,6 +28,7 @@ export function createApplyRunner(opts: {
   forceHeadless?: boolean;
   /** Tests may force a choice (e.g. unavailable). */
   choice?: BrowserChoice;
+  accounts: AccountManager;
 }): ApplyRunner {
   const queue: string[] = [];
   const cancelled = new Set<string>();
@@ -50,8 +53,15 @@ export function createApplyRunner(opts: {
     const id = queue.shift()!;
     running = id;
     void (async () => {
+      const t0 = Date.now();
+      if (process.env.CA_APPLY_DEBUG) console.log("RUNNER start", id.slice(0, 8));
       try {
-        await runAttempt(
+        // Watchdog: a run can never hold the queue longer than its longest legitimate wait
+        // (a visible hand-off) plus a margin; the attempt's own state is left as recorded.
+        const limit = (opts.timeouts?.manual ?? 30 * 60_000) + 10 * 60_000;
+        let timer: NodeJS.Timeout | undefined;
+        await Promise.race([
+          runAttempt(
           {
             env: opts.getEnv(),
             choice,
@@ -61,12 +71,22 @@ export function createApplyRunner(opts: {
             isCancelled: (a) => cancelled.has(a),
             timeouts: opts.timeouts,
             forceHeadless: opts.forceHeadless,
+            accounts: opts.accounts,
           },
           id,
-        );
+          ),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(() => {
+              console.error(JSON.stringify({ level: "error", where: "apply", attempt: id, error: "run_watchdog" }));
+              resolve();
+            }, limit);
+            timer.unref?.();
+          }),
+        ]).finally(() => clearTimeout(timer));
       } catch (e) {
         console.error(JSON.stringify({ level: "error", where: "apply", attempt: id, error: (e as Error)?.name }));
       } finally {
+        if (process.env.CA_APPLY_DEBUG) console.log("RUNNER end", id.slice(0, 8), Date.now() - t0);
         cancelled.delete(id);
         running = null;
         if (rerun.delete(id) && !stopped) queue.push(id);
@@ -77,6 +97,23 @@ export function createApplyRunner(opts: {
 
   return {
     allowLoopback: opts.allowLoopback,
+    accounts: opts.accounts,
+    async accountStatus(url, email) {
+      const a = opts.accounts;
+      const tenant = tenantOf(url);
+      const st = a.settings();
+      return {
+        available: a.available,
+        store: a.storeKind,
+        tenant,
+        email,
+        credential: email ? await a.hasCredential(tenant, email) : false,
+        blocked: email ? a.blocked(tenant, email) : false,
+        password_mode: st.mode,
+        shared_configured: await a.sharedConfigured(),
+        auto_sign_in: st.autoSignIn,
+      };
+    },
     async init() {
       if (!opts.choice) choice = await chooseBrowser();
     },

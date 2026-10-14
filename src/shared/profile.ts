@@ -14,6 +14,59 @@ const tags = z.array(txt(120).min(1)).max(200).default([]);
 
 // Plain text (not strictly validated): the profile autosaves while the user is still typing.
 const url = optTxt(500);
+const yn = z.enum(["yes", "no"]).nullable().optional();
+
+export const PHONE_TYPES = ["mobile", "home", "work"] as const;
+export const YES_NO_DEFAULT_KEYS = [
+  "prior_employment",
+  "prior_contractor",
+  "prior_affiliate",
+  "referral",
+  "relocation",
+  "travel",
+  "shift_work",
+  "age_18",
+  "enrolled_student",
+  "full_time_student",
+  "coop_program",
+  "coop_term_required",
+  "internship_mandatory",
+  "return_to_school",
+] as const;
+export type YesNoDefaultKey = (typeof YES_NO_DEFAULT_KEYS)[number];
+
+export const applicationDefaultsSchema = z.object({
+  phone_type: z.enum(PHONE_TYPES).nullable().optional(),
+  phone_country_code: optTxt(10),
+  /** "Have you worked for <this employer> before?" — with per-employer exceptions. */
+  prior_employment: yn,
+  prior_employment_exceptions: z.array(z.object({ employer: txt(200).min(1), answer: z.enum(["yes", "no"]) })).max(100).default([]),
+  prior_contractor: yn,
+  prior_affiliate: yn,
+  referral: yn,
+  relocation: yn,
+  travel: yn,
+  shift_work: yn,
+  age_18: yn,
+  // student status — each a separate fact (a student is not necessarily a co-op student)
+  enrolled_student: yn,
+  full_time_student: yn,
+  coop_program: yn,
+  coop_term_required: yn,
+  internship_mandatory: yn,
+  return_to_school: yn,
+  expected_graduation: z.string().regex(/^\d{4}(-\d{2})?$/, "YYYY or YYYY-MM").nullable().optional(),
+  placement_months: z.array(z.number().int().min(1).max(24)).max(6).default([]),
+  // sponsorship needs, independent of the authorization status (a work permit says nothing about the future)
+  sponsorship_now: yn,
+  sponsorship_future: yn,
+  start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD").nullable().optional(),
+  notice_period: optTxt(100),
+  salary_expectation: optTxt(100),
+  hourly_expectation: optTxt(100),
+  source: optTxt(200),
+});
+export type ApplicationDefaults = z.infer<typeof applicationDefaultsSchema>;
 
 export const profileSchema = z.object({
   /** Contact details used to fill application forms. */
@@ -83,11 +136,17 @@ export const profileSchema = z.object({
   projects: z.array(z.object({ name: txt(200).min(1), description: optTxt(2000), skills: tags })).max(60).default([]),
   notes: optTxt(4000),
   /**
+   * Reusable answers to common application questions. Every value is optional: null / missing
+   * means "not specified" and is NEVER treated as "no". Matched by meaning (src/local/apply/semantic.ts),
+   * not by wording; identity questions are never answered from here.
+   */
+  application_defaults: applicationDefaultsSchema.prefault({}),
+  /**
    * Answers the user explicitly approved for reuse in application forms (e.g. "How did you hear
    * about us?"). Matched only by the exact (normalized) question text.
    */
   saved_answers: z
-    .array(z.object({ question: txt(500).min(1), answer: z.union([txt(4000), z.array(txt(500)).max(50), z.boolean()]), created_at: z.number().int().optional() }))
+    .array(z.object({ question: txt(500).min(1), answer: z.union([txt(4000), z.array(txt(500)).max(50), z.boolean()]), created_at: z.number().int().optional(), employer: optTxt(200) }))
     .max(200)
     .default([]),
 });

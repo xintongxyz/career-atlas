@@ -31,6 +31,10 @@ export interface LocalSettings {
   owner_email?: string;
   /** "claude_code" enables optional AI extraction through the local Claude Code CLI. */
   ai_provider?: "none" | "claude_code";
+  /** Workday accounts: password for NEW accounts — "unique" (generated per employer, default) or "shared" (the user's own, in the Keychain). */
+  workday_password_mode?: "unique" | "shared";
+  /** Workday: sign in automatically when a Keychain credential exists for the employer site (default on). */
+  workday_auto_sign_in?: boolean;
   /** Absolute path to the `claude` executable (auto-detected when unset). */
   claude_path?: string;
   claude_model?: string;

@@ -93,11 +93,17 @@ export function StartApplicationDialog({ job, open, onOpenChange, onStarted }: {
   // Indeed listings: follow the user's click in a window, or use the employer's link directly.
   const [route, setRoute] = React.useState<"window" | "link">("window");
   const [link, setLink] = React.useState("");
+  // Workday: Autofill with Resume first; account automation only as authorised here, per employer.
+  const [entryMode, setEntryMode] = React.useState<"autofill" | "manual">("autofill");
+  const [signIn, setSignIn] = React.useState(false);
+  const [createAccount, setCreateAccount] = React.useState(false);
   React.useEffect(() => {
     if (open && data) {
       // A preselected default still has to be confirmed with the authorization tick below.
       setResumeId((v) => v ?? data.default_resume_id);
       setAuthorized(false);
+      setSignIn(!!data.account?.credential && !!data.account.auto_sign_in && !data.account.blocked);
+      setCreateAccount(false);
       if (data.support.resolved_url) {
         setLink(data.support.resolved_url);
         setRoute("link");
@@ -113,6 +119,7 @@ export function StartApplicationDialog({ job, open, onOpenChange, onStarted }: {
         submit_mode: mode,
         confirm: true,
         ...(isIndeed ? (route === "window" ? { indeed_window: true } : { target_url: link.trim() }) : {}),
+        ...(data?.support.ats === "workday" || isIndeed ? { entry_mode: entryMode, account_mode: createAccount ? "create" : signIn ? "sign_in" : "none" } : {}),
       }),
     onSuccess: () => {
       toast.success(t("apply.started"));
@@ -212,7 +219,54 @@ export function StartApplicationDialog({ job, open, onOpenChange, onStarted }: {
                 </div>
               </section>
             ) : null}
-            {data.support.ats === "workday" ? <Notice tone="info">{t("apply.workdayNote")}</Notice> : null}
+            {data.support.ats === "workday" ? (
+              <section className="space-y-3">
+                <Notice tone="info">{t("apply.workdayNote")}</Notice>
+                <div>
+                  <SectionTitle>{t("apply.workday.entry")}</SectionTitle>
+                  <div role="radiogroup" aria-label={t("apply.workday.entry")} className="mt-2 grid gap-2 sm:grid-cols-2">
+                    {(["autofill", "manual"] as const).map((m) => (
+                      <label key={m} className={cn("cursor-pointer rounded-md border px-3 py-2 text-[13px]", entryMode === m ? "border-accent bg-accent-soft/40" : "border-line hover:bg-subtle")}>
+                        <span className="flex items-center gap-2 font-medium text-ink">
+                          <input type="radio" name="apply-entry" checked={entryMode === m} onChange={() => setEntryMode(m)} className="accent-[var(--color-accent)]" />
+                          {t(`apply.workday.${m}`)}
+                        </span>
+                        <span className="mt-0.5 block text-xs text-ink-3">{t(`apply.workday.${m}Help`)}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                {data.account ? (
+                  <div className="rounded-md border border-line px-3 py-2.5 text-[13px]">
+                    <p className="font-medium text-ink">{t("apply.workday.account", { site: data.account.tenant })}</p>
+                    <p className="mt-0.5 text-xs text-ink-3">
+                      {!data.account.available
+                        ? t("apply.workday.noStore")
+                        : !data.account.email
+                          ? t("apply.workday.noEmail")
+                          : data.account.credential
+                            ? t("apply.workday.credentialSaved", { email: data.account.email })
+                            : t("apply.workday.noCredential", { email: data.account.email })}
+                      {data.account.blocked ? ` ${t("apply.workday.blocked")}` : ""}
+                    </p>
+                    <label className="mt-2 flex items-start gap-2">
+                      <Checkbox checked={signIn} disabled={!data.account.credential || data.account.blocked} onCheckedChange={(v) => setSignIn(v === true)} aria-label={t("apply.workday.signIn")} className="mt-0.5" />
+                      <span>{t("apply.workday.signIn")}</span>
+                    </label>
+                    <label className="mt-1 flex items-start gap-2">
+                      <Checkbox checked={createAccount} disabled={!data.account.available || !data.account.email || data.account.credential || (data.account.password_mode === "shared" && !data.account.shared_configured)} onCheckedChange={(v) => setCreateAccount(v === true)} aria-label={t("apply.workday.create", { site: data.account.tenant })} className="mt-0.5" />
+                      <span>
+                        {t("apply.workday.create", { site: data.account.tenant })}
+                        <span className="block text-xs text-ink-3">{data.account.password_mode === "shared" ? t("apply.workday.createShared") : t("apply.workday.createUnique")}</span>
+                      </span>
+                    </label>
+                    <Link to="/settings#workday-accounts" className="mt-1 inline-block text-xs text-accent underline">
+                      {t("apply.workday.manage")}
+                    </Link>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
 
             <section>
               <SectionTitle>{t("apply.profileCheck")}</SectionTitle>
@@ -546,6 +600,8 @@ function Intervention({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: strin
         {t(`apply.intervention.${reason}`)}
       </p>
       <p className="text-xs text-ink-2">{t(`apply.interventionHelp.${helpKey}`)}</p>
+      {a.error_code && t(`apply.accountError.${a.error_code}`, { defaultValue: "" }) ? <p className="rounded bg-surface px-2 py-1 text-xs text-ink-2">{t(`apply.accountError.${a.error_code}`, { site: hostOf(a.target_url) })}</p> : null}
+      {reason === "submit_approval" ? <ReviewSummary attempt={a} /> : null}
       {USER_COMPLETES.includes(reason) ? <UserCompletes attempt={a} onResolve={(outcome) => act.mutate({ id: a.id, action: "resolve", body: { outcome } })} busy={act.isPending} /> : null}
       {a.error_message && reason === "validation_errors" ? <p className="rounded bg-surface px-2 py-1 text-xs text-ink-2">{a.error_message}</p> : null}
 
@@ -593,6 +649,62 @@ function Intervention({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: strin
           </a>
         </Button>
       </div>
+    </div>
+  );
+}
+
+/** What is about to be submitted: resume, details, answers, and anything only the site's parsing provided. */
+function ReviewSummary({ attempt: a }: { attempt: AttemptDTO }) {
+  const { t } = useTranslation();
+  const profile = useQuery({ queryKey: ["profile"], queryFn: () => api.get<{ profile: import("@shared/profile").Profile }>("/api/profile") });
+  const p = profile.data?.profile;
+  const parsed = a.filled.filter((f) => f.status === "parsed");
+  const corrected = a.filled.filter((f) => f.status === "corrected");
+  const show = (v: string | string[] | boolean) => (typeof v === "boolean" ? (v ? t("profile.tri.yes") : t("profile.tri.no")) : Array.isArray(v) ? v.join(", ") : v);
+  return (
+    <div className="space-y-2 rounded-md bg-surface px-3 py-2.5 text-xs text-ink-2">
+      <p className="text-[13px] font-medium text-ink">{t("apply.review.title")}</p>
+      <dl className="grid grid-cols-[9rem_minmax(0,1fr)] gap-x-3 gap-y-1">
+        <dt className="text-ink-3">{t("apply.resume")}</dt>
+        <dd>
+          {a.resume.version_name} ({a.resume.file_name})
+        </dd>
+        {p ? (
+          <>
+            <dt className="text-ink-3">{t("apply.review.contact")}</dt>
+            <dd>{[`${p.contact.first_name ?? ""} ${p.contact.last_name ?? ""}`.trim(), p.contact.email, p.contact.phone, [p.based_in.city, p.based_in.region].filter(Boolean).join(", ")].filter(Boolean).join(" · ")}</dd>
+            <dt className="text-ink-3">{t("apply.review.experience")}</dt>
+            <dd>{p.experience.map((e) => `${e.title}${e.organization ? ` — ${e.organization}` : ""}`).join("; ") || "—"}</dd>
+            <dt className="text-ink-3">{t("apply.review.education")}</dt>
+            <dd>{p.education.map((e) => [e.institution, e.field].filter(Boolean).join(", ")).join("; ") || "—"}</dd>
+          </>
+        ) : null}
+      </dl>
+      {a.answered.length ? (
+        <div>
+          <p className="font-medium text-ink">{t("apply.review.answers")}</p>
+          <ul className="mt-0.5 space-y-0.5">
+            {a.answered.map((x) => (
+              <li key={x.key}>
+                <span className="text-ink-3">{x.label}</span> → {show(x.value)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {corrected.length ? <p>{t("apply.review.corrected", { fields: corrected.map((f) => f.label.replace(/\*$/, "")).join(", ") })}</p> : null}
+      {parsed.length ? (
+        <div className="rounded border border-warn/30 bg-warn-soft/40 px-2 py-1.5">
+          <p className="font-medium text-warn">{t("apply.review.parsed")}</p>
+          <ul className="mt-0.5 space-y-0.5">
+            {parsed.map((f, i) => (
+              <li key={i}>
+                <span className="text-ink-3">{f.label.replace(/\*$/, "")}</span>: {f.value}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -667,10 +779,10 @@ function QuestionInput({ q, value, onChange, remember, onRemember }: { q: Pendin
       <Field label={<span>{q.label}{q.sensitive ? <Badge tone="violet" className="ml-1.5">{t("apply.sensitive")}</Badge> : null}</span>} htmlFor={id} hint={hint || undefined}>
         {input}
       </Field>
-      {q.reason !== "unsupported" ? (
+      {q.reason !== "unsupported" && q.rememberable !== false ? (
         <label className="mt-1.5 flex items-center gap-1.5 text-xs text-ink-3">
           <Checkbox checked={remember} onCheckedChange={(v) => onRemember(v === true)} aria-label={t("apply.remember")} />
-          {t("apply.remember")}
+          {q.meaning === "identity" ? t("apply.rememberExact") : q.meaning === "prior_employment" ? t("apply.rememberEmployer") : q.meaning ? t("apply.rememberDefault") : t("apply.remember")}
         </label>
       ) : null}
     </div>

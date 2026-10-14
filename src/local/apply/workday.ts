@@ -39,8 +39,12 @@ export async function declineCookies(page: Page) {
 
 export type EnterResult = { result: "entered" | "already" | "no_apply" | "closed"; mode: "manual" | "autofill" | null };
 
-/** From the job page into the application wizard. Prefers "Apply Manually" (no resume parsing). */
-export async function enterApplyFlow(page: Page): Promise<EnterResult> {
+/**
+ * From the job page into the application wizard. Prefers "Autofill with Resume" (Workday parses the
+ * exact resume the user selected), falls back to "Apply Manually"; never "Use My Last Application"
+ * (it would reuse answers from another application without review).
+ */
+export async function enterApplyFlow(page: Page, prefer: "autofill" | "manual" = "autofill"): Promise<EnterResult> {
   if (/\/apply(\/|$|\?)/.test(new URL(page.url()).pathname) || (await page.locator(aid("applyFlowPage")).count())) return { result: "already", mode: null };
   const err = page.locator(aid("errorMessage")).first();
   const closed = (await err.count()) ? await err.textContent({ timeout: 2000 }).catch(() => null) : null;
@@ -50,11 +54,12 @@ export async function enterApplyFlow(page: Page): Promise<EnterResult> {
   await apply.click();
   // The options popup (autofill with resume / apply manually / use my last application).
   for (let i = 0; i < 20; i++) {
-    if (await page.locator(aid("applyManually")).first().isVisible().catch(() => false)) break;
+    if (await page.locator(`${aid("applyManually")}, ${aid("autofillWithResume")}`).first().isVisible().catch(() => false)) break;
     if (await page.locator(aid("applyFlowPage")).count()) return { result: "entered", mode: null };
     await sleep(250);
   }
-  for (const [id, mode] of [["applyManually", "manual"], ["autofillWithResume", "autofill"]] as const) {
+  const order = prefer === "manual" ? ([["applyManually", "manual"], ["autofillWithResume", "autofill"]] as const) : ([["autofillWithResume", "autofill"], ["applyManually", "manual"]] as const);
+  for (const [id, mode] of order) {
     const opt = page.locator(aid(id)).first();
     if (await opt.isVisible().catch(() => false)) {
       // A synthetic click is sometimes ignored by Workday: follow the link when it has one.
@@ -96,10 +101,19 @@ export const WD_STATE = String.raw`(() => {
   const thank = q('[data-automation-id="thankYouMessage"], [data-automation-id="applicationSubmittedMessage"]');
   const conf = /application (has been )?submitted|you have (successfully )?(submitted|applied)|thank you for applying|successfully (submitted|applied)/i.exec(text);
   const flow = vis(q('[data-automation-id="applyFlowPage"]'));
-  const errors = qa('[data-automation-id="errorHeading"], [data-automation-id="inputAlert"], [data-automation-id="errorMessage"], [data-automation-id="alertMessage"]').filter(vis).map((e) => e.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 10);
+  const errors = qa('[data-automation-id="errorHeading"], [data-automation-id="inputAlert"], [data-automation-id="errorMessage"], [data-automation-id="alertMessage"]').filter(vis).map((e) => e.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  // Live Workday field errors read "Error: The field … is required and must have a value."
+  const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(), n = 0; node && n < 400; node = walker.nextNode(), n++) {
+    const t = (node.textContent || '').trim();
+    if (!/^error\b/i.test(t)) continue;
+    const el = node.parentElement && (node.parentElement.closest('p, div, span, li') || node.parentElement);
+    if (el && vis(el)) { const msg = el.innerText.replace(/\s+/g, ' ').trim(); if (msg && !errors.includes(msg)) errors.push(msg); }
+  }
+  errors.splice(20);
   let kind = 'unknown';
-  if (auth) kind = 'auth';
-  else if (verify) kind = 'verify_email';
+  if (verify) kind = 'verify_email';
+  else if (auth) kind = 'auth';
   else if ((vis(thank) || conf) && !pageId && !nextText) kind = 'confirmation';
   else if (pageId === 'applyFlowReviewPage' || /^submit$/i.test(nextText)) kind = 'review';
   else if (pageId || (flow && nextText)) kind = 'step';
@@ -129,37 +143,139 @@ export function nextButton(page: Page): Locator {
 // ---------------------------------------------------------------- resume
 
 /**
- * Attaches exactly the selected resume. If a different file is already attached (e.g. from a saved
- * draft or another resume), it is removed first; if it can't be removed, nothing is uploaded and
- * the caller pauses — another resume is never left in place silently.
+ * Attaches exactly the selected resume.
+ *  - Files already attached (a saved draft, Workday's own parsing upload, an older version with the
+ *    same name) are never removed without the user's decision: `decide(name)` returns "Remove" /
+ *    "Keep" from the user's answers, or "" (not decided yet → "confirm").
+ *  - A file with the selected resume's name counts as ours only when this attempt uploaded it
+ *    earlier (`ours`) or the user said "Keep"; names alone are not proof of identical content.
  */
-export async function uploadResume(page: Page, file: { name: string; mimeType: string; buffer: Buffer }): Promise<"uploaded" | "already" | "other_file_present" | "no_input" | "failed"> {
-  const items = () => page.locator(aid("file-upload-item")).allInnerTexts().catch(() => [] as string[]);
-  const has = (list: string[]) => list.some((t) => norm(t).includes(norm(file.name)));
-  let present = await items();
-  if (has(present) && present.length === 1) return "already";
-  for (let i = 0; i < 5 && present.length && !(has(present) && present.length === 1); i++) {
-    // Remove whatever else is attached (never keep another resume alongside or instead).
-    const others = page.locator(aid("file-upload-item")).filter({ hasNotText: file.name });
-    if (!(await others.count())) break;
-    const del = others.first().locator(`${aid("delete-file")}, button[aria-label*="delete" i], button[aria-label*="remove" i]`).first();
-    if (!(await del.isVisible().catch(() => false))) return "other_file_present";
+export async function uploadResume(
+  page: Page,
+  file: { name: string; mimeType: string; buffer: Buffer },
+  opts: { ours: boolean; decide: (name: string) => "Remove" | "Keep" | "" } = { ours: false, decide: () => "" },
+): Promise<{ result: "uploaded" | "already" | "confirm" | "no_input" | "failed"; files: string[] }> {
+  const itemSel = aid("file-upload-item");
+  const names = async () => (await page.locator(itemSel).allInnerTexts().catch(() => [] as string[])).map((t) => t.split("\n")[0].trim()).filter(Boolean);
+  const isOurs = (n: string) => norm(n).includes(norm(file.name));
+  let present = await names();
+  const pending = present.filter((n) => (!isOurs(n) || !opts.ours) && opts.decide(n) === "");
+  if (pending.length) return { result: "confirm", files: [...new Set(pending)] };
+  // Apply the user's decisions.
+  for (const n of present) {
+    if (isOurs(n) && opts.ours) continue;
+    if (opts.decide(n) !== "Remove") continue;
+    const item = page.locator(itemSel).filter({ hasText: n }).first();
+    const del = item.locator(`${aid("delete-file")}, button[aria-label*="delete" i], button[aria-label*="remove" i]`).first();
+    if (!(await del.isVisible().catch(() => false))) return { result: "failed", files: [n] };
     await del.click();
     await sleep(600);
-    present = await items();
   }
-  if (present.some((t) => !norm(t).includes(norm(file.name)))) return "other_file_present";
-  if (has(present)) return "already";
+  present = await names();
+  const already = present.some((n) => isOurs(n) && (opts.ours || opts.decide(n) === "Keep"));
+  if (already) return { result: "already", files: [] };
   const input = page.locator(`input[type="file"]${aid("file-upload-input-ref")}, ${aid("attachments-FileUpload")} input[type="file"]`).first();
   const any = page.locator('input[type="file"]').first();
   const target = (await input.count()) ? input : (await any.count()) ? any : null;
-  if (!target) return "no_input";
+  if (!target) return { result: "no_input", files: [] };
+  const before = present.filter(isOurs).length;
   await target.setInputFiles(file);
-  for (let i = 0; i < 40; i++) {
-    if (has(await items())) return "uploaded";
+  for (let i = 0; i < 60; i++) {
+    const now = await names();
+    if (now.filter(isOurs).length > before || (before === 0 && now.some(isOurs))) return { result: "uploaded", files: [] };
+    // Autofill with Resume: Workday moves on to the parsed form after the upload.
+    if (!(await page.locator(itemSel).count()) && !(await page.locator('input[type="file"]').count())) return { result: "uploaded", files: [] };
     await sleep(250);
   }
-  return "failed";
+  return { result: "failed", files: [] };
+}
+
+// ---------------------------------------------------------------- accounts
+
+const AUTH_ERR = String.raw`(() => {
+  const vis = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const root = document.querySelector('[data-automation-id="signInContent"]') || document.body;
+  const out = [...root.querySelectorAll('[data-automation-id="errorMessage"], [data-automation-id*="rror"], [role="alert"], [aria-live="assertive"]')].filter(vis).map((e) => e.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  return out.join(' | ').slice(0, 600);
+})()`;
+
+export type AccountOutcome = "ok" | "invalid" | "locked" | "verify" | "captcha" | "exists" | "policy" | "unknown";
+
+async function authOutcome(page: Page, kind: "sign_in" | "create", timeout = 20_000): Promise<AccountOutcome> {
+  const until = Date.now() + timeout;
+  await sleep(600);
+  while (Date.now() < until) {
+    const st = await wdState(page).catch(() => null);
+    if (st && (st.kind === "step" || st.kind === "review")) return "ok";
+    if (st?.kind === "verify_email") return "verify";
+    const challenge = await page.locator('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[title*="challenge" i], .g-recaptcha, .h-captcha').filter({ visible: true }).count().catch(() => 0);
+    if (challenge) return "captcha";
+    const err = String(await page.evaluate(AUTH_ERR).catch(() => ""));
+    if (err) {
+      if (/already (exists|registered|in use|associated|have an account)|account (already )?exists/i.test(err)) return "exists";
+      if (/locked|too many (attempts|tries)|temporarily (blocked|disabled)/i.test(err)) return "locked";
+      if (kind === "create" && /password/i.test(err) && /(must|require|least|contain|strong|invalid|match)/i.test(err)) return "policy";
+      if (/invalid|incorrect|wrong|not recogni[sz]ed|doesn'?t match|does not match/i.test(err)) return kind === "create" ? "policy" : "invalid";
+    }
+    await sleep(500);
+  }
+  return "unknown";
+}
+
+const inAuth = (page: Page, id: string) => page.locator(`${aid("signInContent")} ${aid(id)}, ${aid(id)}`).first();
+
+async function press(page: Page, id: string) {
+  const b = inAuth(page, id);
+  // Workday overlays some auth buttons with a "click_filter" element that receives the click.
+  const filter = page.locator(`${aid("click_filter")}`).filter({ visible: true }).first();
+  if (await filter.isVisible().catch(() => false)) await filter.click().catch(() => b.click({ force: true }));
+  else await b.click({ force: true });
+}
+
+/** Signs in with a saved credential (one try; the caller never retries a failure automatically). */
+export async function workdaySignIn(page: Page, email: string, password: string): Promise<AccountOutcome> {
+  if (!(await inAuth(page, "signInSubmitButton").isVisible().catch(() => false))) {
+    const link = page.locator(`${aid("signInLink")}, button:has-text("Sign In"), a:has-text("Sign In")`).first();
+    if (await link.isVisible().catch(() => false)) await link.click();
+    await sleep(500);
+  }
+  await inAuth(page, "email").fill(email);
+  await inAuth(page, "password").fill(password);
+  await press(page, "signInSubmitButton");
+  return authOutcome(page, "sign_in");
+}
+
+/** The agreement text on the registration form, if it has a checkbox (needs the user's approval). */
+export async function accountTermsLabel(page: Page): Promise<string | null> {
+  const cb = page.locator(`${aid("signInContent")} input[type="checkbox"], ${aid("createAccountCheckbox")}`).first();
+  if (!(await cb.count())) return null;
+  const label = await cb.evaluate((e) => {
+    const id = (e as unknown as { id: string }).id;
+    const doc = (e as unknown as { ownerDocument: { querySelector(s: string): { textContent: string | null } | null } }).ownerDocument;
+    const l = id ? doc.querySelector(`label[for="${id}"]`) : null;
+    const wrap = (e as unknown as { closest(s: string): { textContent: string | null } | null }).closest("label, div");
+    return ((l?.textContent || wrap?.textContent) ?? "").replace(/\s+/g, " ").trim();
+  });
+  return label || "I agree to the terms of this employer's candidate account";
+}
+
+/** Creates a candidate account with the given password (e-mail from My Profile). */
+export async function workdayCreateAccount(page: Page, email: string, password: string, agreeTerms: boolean): Promise<AccountOutcome> {
+  if (!(await inAuth(page, "createAccountSubmitButton").isVisible().catch(() => false))) {
+    const link = page.locator(`${aid("createAccountLink")}, button:has-text("Create Account"), a:has-text("Create Account")`).first();
+    if (await link.isVisible().catch(() => false)) await link.click();
+    await sleep(500);
+  }
+  await inAuth(page, "email").fill(email);
+  await inAuth(page, "password").fill(password);
+  const verify = inAuth(page, "verifyPassword");
+  if (await verify.count()) await verify.fill(password);
+  if (agreeTerms) {
+    const cb = page.locator(`${aid("signInContent")} input[type="checkbox"], ${aid("createAccountCheckbox")}`).first();
+    if (!(await cb.isChecked().catch(() => true))) await cb.click({ force: true });
+  }
+  await press(page, "createAccountSubmitButton");
+  return authOutcome(page, "create");
 }
 
 // ---------------------------------------------------------------- repeating panels

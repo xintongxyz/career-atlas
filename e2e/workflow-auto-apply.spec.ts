@@ -90,7 +90,7 @@ test("Workday: sign-in is handed to the user with clear guidance (never automate
   await page.goto(`/jobs/${id}`);
   await page.getByRole("button", { name: "Start application" }).first().click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText(/most employers ask you to create an account or sign in first/)).toBeVisible();
+  await expect(dialog.getByText(/most employers ask you to sign in or create an account first/)).toBeVisible();
   await dialog.getByRole("radio", { name: "General resume" }).check();
   await dialog.getByRole("checkbox", { name: "Authorize this application" }).click();
   await dialog.getByRole("button", { name: "Start", exact: true }).click();

@@ -289,6 +289,8 @@ function ProfileEditor({ dto }: { dto: ProfileDTO }) {
         </div>
       </Card>
 
+      <ApplicationDefaultsCard value={p.application_defaults} onChange={(v) => set("application_defaults", v)} />
+
       <Card>
         <CardHeader title={t("profile.sections.savedAnswers")} description={t("profile.savedAnswersHelp")} />
         <div className="space-y-2 px-4 pb-4">
@@ -413,6 +415,142 @@ function ProfileDraftPanel({ dto }: { dto: ProfileDTO }) {
             {t("profile.draft.addSelected", { count: chosen.size })}
           </Button>
         </div>
+      </div>
+    </Card>
+  );
+}
+
+type Defaults = Profile["application_defaults"];
+type YN = "yes" | "no" | null | undefined;
+
+/** Reusable answers to common application questions (matched by meaning; "Not specified" is never "No"). */
+function ApplicationDefaultsCard({ value: d, onChange }: { value: Defaults; onChange: (v: Defaults) => void }) {
+  const { t } = useTranslation();
+  const up = (patch: Partial<Defaults>) => onChange({ ...d, ...patch });
+  const tri = (k: keyof Defaults) => (
+    <Field key={k} label={t(`profile.defaults.${k}`)} htmlFor={`pd-${k}`}>
+      <NativeSelect id={`pd-${k}`} value={(d[k] as YN) ?? "unknown"} onChange={(e) => up({ [k]: e.target.value === "unknown" ? null : e.target.value } as Partial<Defaults>)}>
+        {(["unknown", "yes", "no"] as const).map((o) => (
+          <option key={o} value={o}>
+            {t(`profile.tri.${o}`)}
+          </option>
+        ))}
+      </NativeSelect>
+    </Field>
+  );
+  const text = (k: "phone_country_code" | "notice_period" | "salary_expectation" | "hourly_expectation" | "source", placeholder = "") => (
+    <Field key={k} label={t(`profile.defaults.${k}`)} htmlFor={`pd-${k}`}>
+      <Input id={`pd-${k}`} value={d[k] ?? ""} placeholder={placeholder} onChange={(e) => up({ [k]: e.target.value.trim() ? e.target.value : null } as Partial<Defaults>)} />
+    </Field>
+  );
+  const group = (title: string, children: React.ReactNode) => (
+    <div>
+      <p className="mb-1 text-xs font-medium text-ink-3">{title}</p>
+      <div className="grid gap-3 sm:grid-cols-3">{children}</div>
+    </div>
+  );
+  return (
+    <Card>
+      <CardHeader title={t("profile.sections.defaults")} description={t("profile.defaultsHelp")} />
+      <div className="space-y-4 px-4 pb-4">
+        {group(
+          t("profile.defaults.groups.contact"),
+          <>
+            <Field label={t("profile.defaults.phone_type")} htmlFor="pd-phone_type">
+              <NativeSelect id="pd-phone_type" value={d.phone_type ?? "unknown"} onChange={(e) => up({ phone_type: e.target.value === "unknown" ? null : (e.target.value as Defaults["phone_type"]) })}>
+                {(["unknown", "mobile", "home", "work"] as const).map((o) => (
+                  <option key={o} value={o}>
+                    {o === "unknown" ? t("profile.tri.unknown") : t(`profile.defaults.phoneTypes.${o}`)}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
+            {text("phone_country_code", "+1")}
+            {text("source")}
+          </>,
+        )}
+        {group(
+          t("profile.defaults.groups.employer"),
+          <>
+            {tri("prior_employment")}
+            {tri("prior_contractor")}
+            {tri("prior_affiliate")}
+            {tri("referral")}
+          </>,
+        )}
+        <div>
+          <p className="mb-1 text-xs text-ink-3">{t("profile.defaults.exceptionsHelp")}</p>
+          <div className="space-y-2">
+            {d.prior_employment_exceptions.map((x, i) => (
+              <div key={i} className="grid items-end gap-2 sm:grid-cols-[1fr_10rem_auto]">
+                <Input aria-label={t("profile.defaults.employer")} placeholder={t("profile.defaults.employer")} value={x.employer} onChange={(e) => up({ prior_employment_exceptions: d.prior_employment_exceptions.map((y, j) => (j === i ? { ...y, employer: e.target.value } : y)) })} />
+                <NativeSelect aria-label={t("profile.defaults.prior_employment")} value={x.answer} onChange={(e) => up({ prior_employment_exceptions: d.prior_employment_exceptions.map((y, j) => (j === i ? { ...y, answer: e.target.value as "yes" | "no" } : y)) })}>
+                  <option value="yes">{t("profile.tri.yes")}</option>
+                  <option value="no">{t("profile.tri.no")}</option>
+                </NativeSelect>
+                <Button variant="ghost" size="icon-sm" aria-label={t("actions.delete")} onClick={() => up({ prior_employment_exceptions: d.prior_employment_exceptions.filter((_, j) => j !== i) })}>
+                  <Trash2 />
+                </Button>
+              </div>
+            ))}
+            <Button variant="secondary" size="sm" onClick={() => up({ prior_employment_exceptions: [...d.prior_employment_exceptions, { employer: "", answer: "yes" }] })}>
+              <Plus />
+              {t("profile.defaults.addException")}
+            </Button>
+          </div>
+        </div>
+        {group(
+          t("profile.defaults.groups.availability"),
+          <>
+            <Field label={t("profile.defaults.start_date")} htmlFor="pd-start">
+              <Input id="pd-start" type="date" value={d.start_date ?? ""} onChange={(e) => up({ start_date: e.target.value || null })} />
+            </Field>
+            {text("notice_period")}
+            {tri("relocation")}
+            {tri("travel")}
+            {tri("shift_work")}
+            {tri("age_18")}
+          </>,
+        )}
+        {group(
+          t("profile.defaults.groups.student"),
+          <>
+            {tri("enrolled_student")}
+            {tri("full_time_student")}
+            {tri("coop_program")}
+            {tri("coop_term_required")}
+            {tri("internship_mandatory")}
+            {tri("return_to_school")}
+            <Field label={t("profile.defaults.expected_graduation")} htmlFor="pd-grad">
+              <Input id="pd-grad" type="month" value={d.expected_graduation ?? ""} onChange={(e) => up({ expected_graduation: e.target.value || null })} />
+            </Field>
+            <Field label={t("profile.defaults.placement_months")} htmlFor="pd-months">
+              <div id="pd-months" className="flex flex-wrap gap-3 pt-1">
+                {[4, 8, 12, 16].map((m) => (
+                  <label key={m} className="flex items-center gap-1 text-[13px]">
+                    <Checkbox checked={d.placement_months.includes(m)} onCheckedChange={(v) => up({ placement_months: v === true ? [...d.placement_months, m].sort((a, b) => a - b) : d.placement_months.filter((x) => x !== m) })} />
+                    {t("profile.defaults.months", { count: m })}
+                  </label>
+                ))}
+              </div>
+            </Field>
+          </>,
+        )}
+        {group(
+          t("profile.defaults.groups.eligibility"),
+          <>
+            {tri("sponsorship_now")}
+            {tri("sponsorship_future")}
+          </>,
+        )}
+        {group(
+          t("profile.defaults.groups.compensation"),
+          <>
+            {text("salary_expectation")}
+            {text("hourly_expectation")}
+          </>,
+        )}
+        <p className="text-xs text-ink-3">{t("profile.defaults.identityNote")}</p>
       </div>
     </Card>
   );

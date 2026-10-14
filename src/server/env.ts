@@ -1,3 +1,4 @@
+import type { AccountStatus } from "@shared/apply";
 import type { AiProvider } from "./ai/provider";
 
 /** Private file storage for documents (implemented by src/local/file-store.ts). */
@@ -54,4 +55,7 @@ export interface ApplyController {
   readEvidence(attemptId: string, name: string): Uint8Array | null;
   /** Test/dev instances may target synthetic forms on 127.0.0.1; the personal instance never does. */
   allowLoopback: boolean;
+  /** Workday candidate-account status for an employer site (no secrets). */
+  accountStatus(url: string, email: string | null): Promise<AccountStatus>;
 }
+

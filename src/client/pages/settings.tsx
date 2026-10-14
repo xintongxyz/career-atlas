@@ -20,6 +20,7 @@ import { useLocaleContext } from "@/hooks/useMe";
 import { api } from "@/lib/api";
 import { downloadBlob } from "@/lib/utils";
 import { LocalDataSection } from "./settings-local";
+import { WorkdayAccountsSection } from "@/components/settings/workday-accounts";
 import { PageHeader } from "./system";
 
 function timeZones(): string[] {
@@ -37,8 +38,8 @@ export default function SettingsPage() {
     <div className="max-w-4xl">
       <PageHeader title={t("settings.title")} />
       <nav className="mb-4 flex flex-wrap gap-3 text-xs text-ink-3">
-        {(["general", "preferences", "tags", "contacts", "local", "data", "system"] as const).map((s) => (
-          <a key={s} href={s === "local" ? "#local-data" : `#${s}`} className="hover:text-ink">
+        {(["general", "preferences", "tags", "contacts", "local", "accounts", "data", "system"] as const).map((s) => (
+          <a key={s} href={s === "local" ? "#local-data" : s === "accounts" ? "#workday-accounts" : `#${s}`} className="hover:text-ink">
             {t(`settings.sections.${s}`)}
           </a>
         ))}
@@ -49,6 +50,7 @@ export default function SettingsPage() {
         <TagsSection />
         <ContactsSection />
         <LocalDataSection />
+        <WorkdayAccountsSection />
         <DataSection />
         <SystemSection />
       </div>

@@ -11,6 +11,7 @@
 // Ideas (not code) from the MIT-licensed projects devdattatalele/auto-apply,
 // andrewmillercode/Autofill-Jobs and Br1an67/OpenJobAutofill; see docs/AUTO_APPLY.md.
 import type { FilledField, PendingQuestion } from "@shared/apply";
+import { domainForLabel, matchOptionSemantic, questionMeaning, type QuestionMeaning } from "@shared/apply-semantic";
 import type { Profile } from "@shared/profile";
 
 export type Control = "text" | "textarea" | "select" | "radio" | "checkbox" | "checkboxes" | "file" | "combobox" | "listbox" | "date";
@@ -68,6 +69,7 @@ export type Semantic =
   | "country"
   | "address"
   | "postal_code"
+  | "phone_type"
   | "linkedin"
   | "github"
   | "portfolio"
@@ -95,6 +97,8 @@ export interface PlanContext {
   jobCountry: string | null;
   answers: Record<string, unknown>;
   resume: { fileName: string };
+  /** The employer (for employer-scoped answers such as "Have you worked for us before?"). */
+  employer?: string | null;
 }
 
 export type PlannedAction =
@@ -110,6 +114,8 @@ export interface Plan {
   actions: PlannedAction[];
   questions: PendingQuestion[];
   skipped: { key: string; label: string; reason: string }[];
+  /** Fields that already hold the right value (e.g. from resume parsing): left untouched. */
+  kept: { ref: string; key: string; label: string; source: string }[];
 }
 
 // ---------------------------------------------------------------- text helpers
@@ -134,7 +140,7 @@ export function fieldKey(f: Pick<FieldDescriptor, "name" | "id" | "label"> & { w
 }
 
 const LEGAL_RE = /\b(i (hereby )?(agree|consent|acknowledge|certify|confirm|attest|declare|understand)|terms (and|&) conditions|privacy (policy|notice)|consent|acknowledg|certif(y|ication that)|attest|true,? (accurate|correct) and complete|signature|e-?sign|electronic(ally)? sign|background check|drug (test|screen))/;
-const DEMOGRAPHIC_RE = /\b(gender|sex|race|racial|ethnic|ethnicity|hispanic|latin[oax]|veteran|disabilit|disabled|sexual orientation|lgbt|transgender|pronoun|indigenous|aboriginal|first nations|visible minority|self[- ]identif|demographic|eeo|equal employment)/;
+const DEMOGRAPHIC_RE = /\b(gender|sex|race|racial|racialized|ethnic|ethnicity|hispanic|latin[oax]|veteran|disabilit|disabled|sexual orientation|lgbt|two spirit|transgender|pronoun|indigenous|aboriginal|first nations|m[eé]tis|inuit|visible minority|self[- ]identif|demographic|eeo|equal employment)/;
 const OPEN_RE = /\b(why|describe|tell us|explain|cover letter|what interests|motivat|salary|compensation|expected pay|pay expectation|notice period|start date|available to start|availability|how did you hear|where did you hear|referr|previously (worked|employed|applied)|former employee|years of (experience|professional)|how many years|relocat|willing to|commut|travel|anything else|additional information|comments)/;
 
 const LANGS = ["english", "french", "spanish", "mandarin", "chinese", "cantonese", "german", "portuguese", "japanese", "korean", "arabic", "hindi", "punjabi", "italian", "russian", "tagalog", "vietnamese", "dutch", "polish"];
@@ -166,6 +172,7 @@ function classifyStandard(f: FieldDescriptor, name: string, id: string, ac: stri
   if (/preferred_?name/.test(keys) || /^preferred (first )?name/.test(label)) return "preferred_name";
   if (ac === "name" || name === "name" || /^(full |legal )?name$/.test(label)) return "full_name";
   if (ac === "email" || f.inputType === "email" || /(^|[^a-z])e?-?mail/.test(keys) || /^e ?mail/.test(label)) return "email";
+  if (/phone (device )?type|type of phone|phone device/.test(label)) return "phone_type";
   if (f.control !== "combobox" && f.control !== "select" && f.control !== "listbox" && (ac.startsWith("tel") || f.inputType === "tel" || /phone|mobile/.test(keys) || /^(phone|mobile|telephone|cell)/.test(label))) return "phone";
   if (/linkedin/.test(all)) return "linkedin";
   if (/github/.test(all)) return "github";
@@ -240,6 +247,10 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
       return has(c.email) ? { ok: true, value: c.email!, source: "contact.email" } : { ok: false, reason: "missing" };
     case "phone":
       return has(c.phone) ? { ok: true, value: c.phone!, source: "contact.phone" } : { ok: false, reason: "missing" };
+    case "phone_type": {
+      const t = p.application_defaults.phone_type;
+      return t ? { ok: true, value: t === "mobile" ? "Mobile" : t === "home" ? "Home" : "Work", source: "defaults.phone_type" } : { ok: false, reason: "missing" };
+    }
     case "linkedin":
       return has(c.linkedin_url) ? { ok: true, value: c.linkedin_url!, source: "contact.linkedin_url" } : { ok: false, reason: "missing" };
     case "github":
@@ -257,8 +268,10 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
     case "region":
       return has(p.based_in.region) ? { ok: true, value: p.based_in.region!, source: "based_in.region" } : { ok: false, reason: "missing" };
     case "country":
-    case "phone_country":
       return has(p.based_in.country) ? { ok: true, value: p.based_in.country!, source: "based_in.country" } : { ok: false, reason: "missing" };
+    case "phone_country":
+      if (has(p.based_in.country)) return { ok: true, value: p.based_in.country!, source: "based_in.country" };
+      return has(p.application_defaults.phone_country_code) ? { ok: true, value: p.application_defaults.phone_country_code!, source: "defaults.phone_country_code" } : { ok: false, reason: "missing" };
     case "location": {
       const parts = [p.based_in.city, p.based_in.region, p.based_in.country].filter(has) as string[];
       if (!has(p.based_in.city)) return { ok: false, reason: "missing" };
@@ -299,7 +312,9 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
       if (!entry) return { ok: false, reason: "sensitive" };
       if (entry.status === "citizen" || entry.status === "permanent_resident") return no(`work_authorization.${entry.status}`);
       if (entry.status === "needs_sponsorship") return yes("work_authorization.needs_sponsorship");
-      // A work permit may or may not need future sponsorship: only the user can say.
+      // A work permit may or may not need future sponsorship: only the user's own answer says.
+      const own = /\bfuture\b/.test(label) || !/\b(now|currently)\b/.test(label) ? p.application_defaults.sponsorship_future : p.application_defaults.sponsorship_now;
+      if (own) return { ok: true, value: own, source: "defaults.sponsorship" };
       return { ok: false, reason: "sensitive", hint: entry.status };
     }
     case "driver_licence": {
@@ -349,35 +364,87 @@ function latestEducation(p: Profile) {
 const YES_RE = /^(yes|y|true|oui|是)\b/;
 const NO_RE = /^(no|n|false|non|否)\b/;
 
-/** Maps an answer onto one of the field's options. Never guesses between several candidates. */
+/** Maps an answer onto one of the field's options (semantic, never guessing between candidates). */
 export function matchOption(options: FieldOption[], answer: string): FieldOption | null {
-  const a = norm(answer);
-  if (!a) return null;
-  const labels = options.map((o) => ({ o, l: norm(o.label), v: norm(o.value) }));
-  const exact = labels.filter((x) => x.l === a || x.v === a);
-  if (exact.length === 1) return exact[0].o;
-  if (a === "yes" || a === "no") {
-    const re = a === "yes" ? YES_RE : NO_RE;
-    const hits = labels.filter((x) => re.test(x.l));
-    return hits.length === 1 ? hits[0].o : null;
-  }
-  const starts = labels.filter((x) => x.l.startsWith(a) || (x.l.length > 2 && a.startsWith(x.l)));
-  if (starts.length === 1) return starts[0].o;
-  const contains = labels.filter((x) => x.l.includes(a));
-  return contains.length === 1 ? contains[0].o : null;
+  return matchOptionSemantic(options, answer) as FieldOption | null;
 }
 
 const isPlaceholderOption = (o: FieldOption) => !o.value || /^(select|choose|please select|--)/.test(norm(o.label)) || norm(o.label) === "";
 
 // ---------------------------------------------------------------- plan
 
-export function savedAnswerFor(profile: Profile, label: string): unknown {
+export function savedAnswerFor(profile: Profile, label: string, employer: string | null = null): unknown {
   const n = norm(label);
   if (!n) return undefined;
-  return profile.saved_answers.find((s) => norm(s.question) === n)?.answer;
+  const fits = (e: string | null | undefined) => !e || (!!employer && sameEmployer(e, employer));
+  return profile.saved_answers.find((s) => norm(s.question) === n && fits(s.employer))?.answer;
 }
 
-export function question(f: FieldDescriptor, key: string, reason: string, sensitive: boolean, hint?: string | null): PendingQuestion {
+export function sameEmployer(a: string, b: string) {
+  const strip = (x: string) => norm(x).replace(/\b(inc|ltd|llc|corp|corporation|limited|group|company|co|plc|the|synthetic)\b/g, "").replace(/\s+/g, " ").trim();
+  const x = strip(a);
+  const y = strip(b);
+  return !!x && !!y && (x === y || x.startsWith(`${y} `) || y.startsWith(`${x} `));
+}
+
+const DEFAULT_KEY: Partial<Record<QuestionMeaning["meaning"], keyof Profile["application_defaults"]>> = {
+  prior_contractor: "prior_contractor",
+  prior_affiliate: "prior_affiliate",
+  referral: "referral",
+  relocation: "relocation",
+  travel: "travel",
+  shift_work: "shift_work",
+  age_18: "age_18",
+  enrolled_student: "enrolled_student",
+  full_time_student: "full_time_student",
+  coop_program: "coop_program",
+  coop_term_required: "coop_term_required",
+  internship_mandatory: "internship_mandatory",
+  return_to_school: "return_to_school",
+  start_date: "start_date",
+  notice_period: "notice_period",
+  salary: "salary_expectation",
+  hourly_rate: "hourly_expectation",
+  source: "source",
+  graduation_date: "expected_graduation",
+};
+
+/**
+ * Answers to common screening questions from Application Defaults (by meaning, not wording).
+ * null = this meaning is not handled here; { ok: false } = handled, but not specified → ask.
+ */
+export function screeningValue(qm: QuestionMeaning, ctx: PlanContext, label = ""): Resolved | null {
+  const d = ctx.profile.application_defaults;
+  const ok = (value: string, source: string): Resolved => ({ ok: true, value, source });
+  if (qm.meaning === "prior_employment") {
+    const exc = ctx.employer ? d.prior_employment_exceptions.find((e) => sameEmployer(e.employer, ctx.employer!)) : undefined;
+    if (exc) return ok(exc.answer, "defaults.prior_employment_exception");
+    return d.prior_employment ? ok(d.prior_employment, "defaults.prior_employment") : { ok: false, reason: "missing" };
+  }
+  if (qm.meaning === "enrolled_student") {
+    if (d.enrolled_student) return ok(d.enrolled_student, "defaults.enrolled_student");
+    // A degree recorded as "in progress" establishes current enrolment — and nothing more (not co-op).
+    return ctx.profile.education.some((e) => e.completed === false) ? ok("yes", "education.in_progress") : { ok: false, reason: "missing" };
+  }
+  if (qm.meaning === "graduation_date") {
+    if (d.expected_graduation) return ok(d.expected_graduation, "defaults.expected_graduation");
+    const e = ctx.profile.education.find((x) => x.completed === false && x.year);
+    return e ? ok(String(e.year), "education.in_progress") : { ok: false, reason: "missing" };
+  }
+  if (qm.meaning === "placement_duration") {
+    // "Available for a four-month placement?" — yes only when every length asked is one the user listed.
+    const words: Record<string, number> = { four: 4, eight: 8, twelve: 12, sixteen: 16, six: 6 };
+    const asked = [...norm(label).matchAll(/\b(\d{1,2}|four|eight|twelve|sixteen|six) ?months?\b/g)].map((m) => words[m[1]] ?? Number(m[1]));
+    if (asked.length && d.placement_months.length && asked.every((n) => d.placement_months.includes(n))) return ok("yes", "defaults.placement_months");
+    return { ok: false, reason: "missing" };
+  }
+  const key = DEFAULT_KEY[qm.meaning];
+  if (!key) return null;
+  const v = d[key];
+  return typeof v === "string" && v ? ok(v, `defaults.${key}`) : { ok: false, reason: qm.meaning === "salary" || qm.meaning === "hourly_rate" ? "open_ended" : "missing" };
+}
+
+export function question(f: FieldDescriptor, key: string, reason: string, sensitive: boolean, hint?: string | null, qm?: QuestionMeaning | null): PendingQuestion {
   const kind: PendingQuestion["kind"] =
     f.control === "textarea" ? "textarea" : f.control === "select" || f.control === "combobox" || f.control === "listbox" ? "select" : f.control === "date" ? "date" : f.control === "radio" ? "radio" : f.control === "checkbox" ? "checkbox" : f.control === "checkboxes" ? "multi" : f.inputType === "date" ? "date" : f.inputType === "number" ? "number" : "text";
   return {
@@ -389,6 +456,8 @@ export function question(f: FieldDescriptor, key: string, reason: string, sensit
     reason,
     sensitive,
     hint: hint ?? null,
+    meaning: qm && qm.meaning !== "unknown" ? qm.meaning : f.wdField === "phoneType" || /phone (device )?type/.test(norm(f.label)) ? "phone_type" : null,
+    rememberable: !(qm?.approval || reason === "legal" || reason === "unsupported"),
   };
 }
 
@@ -418,7 +487,7 @@ export function toAction(f: FieldDescriptor, key: string, value: unknown, source
     case "listbox":
     case "select":
     case "radio": {
-      const opt = matchOption(f.options.filter((o) => !isPlaceholderOption(o)), typeof value === "boolean" ? (value ? "yes" : "no") : String(value));
+      const opt = matchOptionSemantic(f.options.filter((o) => !isPlaceholderOption(o)), typeof value === "boolean" ? (value ? "yes" : "no") : String(value), domainForLabel(f.label, classify(f))) as FieldOption | null;
       if (!opt) return { misfit: String(value) };
       return { ...base, kind: "choose", values: [opt.label], optionRefs: opt.ref ? [opt.ref] : undefined, source };
     }
@@ -428,13 +497,13 @@ export function toAction(f: FieldDescriptor, key: string, value: unknown, source
         const parts = answer.split(",").map((x) => x.trim()).filter(Boolean);
         return { ...base, kind: "search", value: parts[0] ?? answer, match: parts.length ? parts : [answer], source };
       }
-      const opt = matchOption(f.options.filter((o) => !isPlaceholderOption(o)), answer);
+      const opt = matchOptionSemantic(f.options.filter((o) => !isPlaceholderOption(o)), answer, domainForLabel(f.label, classify(f))) as FieldOption | null;
       if (!opt) return { misfit: answer };
       return { ...base, kind: "choose", values: [opt.label], source };
     }
     case "checkboxes": {
       const list = Array.isArray(value) ? value.map(String) : [String(value)];
-      const opts = list.map((v) => matchOption(f.options, v));
+      const opts = list.map((v) => matchOptionSemantic(f.options, v) as FieldOption | null);
       if (opts.some((o) => !o)) return { misfit: list.join(", ") };
       return { ...base, kind: "choose", values: opts.map((o) => o!.label), optionRefs: opts.map((o) => o!.ref!).filter(Boolean), source };
     }
@@ -443,14 +512,16 @@ export function toAction(f: FieldDescriptor, key: string, value: unknown, source
   }
 }
 
+const CLOSED: Control[] = ["select", "radio", "listbox", "checkbox", "combobox"];
+
 export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
-  const plan: Plan = { actions: [], questions: [], skipped: [] };
+  const plan: Plan = { actions: [], questions: [], skipped: [], kept: [] };
   let resumeDone = false;
   for (const f of fields) {
     if (!f.visible && f.control !== "file") continue;
     if (f.group) continue; // Workday work / education / skills panels: filled by the adapter
     const key = fieldKey(f);
-    const sem = classify(f);
+    let sem = classify(f);
     if (sem === "resume") {
       if (resumeDone) continue;
       resumeDone = true;
@@ -462,44 +533,78 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
       else plan.skipped.push({ key, label: f.label, reason: "file" });
       continue;
     }
+    // Meaning of a screening question (Workday's "previous worker" field is prior employment by definition).
+    const qm: QuestionMeaning = f.wdField === "candidateIsPreviousWorker" ? { ...questionMeaning("", ctx.employer ?? null), meaning: "prior_employment", employerScoped: true, reusable: true } : questionMeaning(f.label || f.placeholder, ctx.employer ?? null);
+    if (qm.meaning === "identity") sem = "demographic";
+    else if (qm.approval && (CLOSED.includes(f.control) || sem === "legal")) sem = "legal";
+    const sensitive = SENSITIVE_SEMANTICS.has(sem) || qm.sensitivity !== "normal";
+    const use = (value: unknown, source: string) => {
+      const a = toAction(f, key, value, source);
+      if ("misfit" in a) return a;
+      // Already right on the page (e.g. filled by Workday's resume parsing): keep it, don't re-type it.
+      // The user's own answer must be there exactly as given (it may correct a rejected format).
+      const same = source === "answer" && a.kind === "fill" ? norm(String(f.value ?? "")) === norm(a.value) && String(f.value ?? "").trim() === a.value.trim() : holds(f, a);
+      if (same) plan.kept.push({ ref: f.ref, key, label: f.label, source });
+      else plan.actions.push(a);
+      return null;
+    };
 
     // 1. this attempt's answers (the user typed or approved them)
     if (key in ctx.answers && ctx.answers[key] !== null && ctx.answers[key] !== "") {
-      const a = toAction(f, key, ctx.answers[key], "answer");
-      if (!("misfit" in a)) {
-        plan.actions.push(a);
-        continue;
-      }
-      plan.questions.push(question(f, key, "no_matching_option", SENSITIVE_SEMANTICS.has(sem), a.misfit));
+      const m = use(ctx.answers[key], "answer");
+      if (m) plan.questions.push(question(f, key, "no_matching_option", sensitive, m.misfit, qm));
       continue;
     }
-    // 2. explicitly approved reusable answers (exact question text)
-    const saved = savedAnswerFor(ctx.profile, f.label);
-    if (saved !== undefined) {
-      const a = toAction(f, key, saved, "saved_answer");
-      if (!("misfit" in a)) {
-        plan.actions.push(a);
-        continue;
-      }
+    // 2. explicitly approved reusable answers (exact question text; employer-scoped where saved so)
+    const saved = savedAnswerFor(ctx.profile, f.label, ctx.employer ?? null);
+    if (saved !== undefined && !use(saved, "saved_answer")) continue;
+    // Identity and declarations: only the user's own answers above — never defaults or inference.
+    if (sem === "demographic" || sem === "legal") {
+      if (f.required) plan.questions.push(question(f, key, sem, true, null, qm));
+      else plan.skipped.push({ key, label: f.label, reason: sem });
+      continue;
     }
-    // 3. the profile
-    const r = profileValue(sem, f, ctx);
+    // 3. Application Defaults, by meaning (prior employment, co-op, start date, …)
+    let sv = qm.meaning !== "unknown" ? screeningValue(qm, ctx, f.label) : null;
+    // A yes/no default only answers a closed question (never typed into a free-text box).
+    if (sv?.ok && (sv.value === "yes" || sv.value === "no") && !CLOSED.includes(f.control)) sv = { ok: false, reason: "open_ended" };
+    const r = sv ?? profileValue(sem, f, ctx);
     if (r.ok) {
-      const a = toAction(f, key, r.value, r.source);
-      if (!("misfit" in a)) {
-        // Do not overwrite what the site already has with the same value.
-        plan.actions.push(a);
-        continue;
-      }
-      if (f.required) plan.questions.push(question(f, key, "no_matching_option", SENSITIVE_SEMANTICS.has(sem), a.misfit));
+      const m = use(r.value, r.source);
+      if (!m) continue;
+      if (f.required) plan.questions.push(question(f, key, "no_matching_option", sensitive, m.misfit, qm));
       else plan.skipped.push({ key, label: f.label, reason: "no_matching_option" });
       continue;
     }
-    // Unknown: ask only when the form requires it. Optional demographic/legal fields stay empty.
-    if (f.required) plan.questions.push(question(f, key, r.reason, SENSITIVE_SEMANTICS.has(sem) || r.reason === "sensitive", r.hint));
+    // Unknown: ask only when the form requires it. Optional questions stay empty.
+    if (f.required) plan.questions.push(question(f, key, r.reason, sensitive || r.reason === "sensitive", r.hint, qm));
     else plan.skipped.push({ key, label: f.label, reason: r.reason });
   }
   return plan;
+}
+
+/** Does the field already hold exactly what the action would put there? */
+export function holds(f: FieldDescriptor, a: PlannedAction): boolean {
+  const v = f.value;
+  const list = (Array.isArray(v) ? v : [String(v ?? "")]).map(norm).filter(Boolean);
+  const digits = (x: string) => x.replace(/\D+/g, "");
+  switch (a.kind) {
+    case "fill":
+      if (/phone|tel/.test(`${f.name} ${f.id} ${f.inputType} ${f.wdField ?? ""}`.toLowerCase())) return !!digits(String(v ?? "")) && digits(String(v)).endsWith(digits(a.value).slice(-7));
+      return norm(String(v ?? "")) === norm(a.value) && !!norm(a.value);
+    case "check":
+      return v === a.value;
+    case "choose":
+      return list.length === a.values.length && a.values.every((x) => list.includes(norm(x)));
+    case "search":
+      return list.length > 0 && list.some((x) => a.match.every((m) => x.includes(norm(m))));
+    case "date": {
+      const want = [a.value.month, a.value.day, a.value.year].filter(Boolean).map((x) => String(Number(x))).join("/");
+      return String(v ?? "").split("/").filter(Boolean).map((x) => String(Number(x))).join("/") === want;
+    }
+    default:
+      return false;
+  }
 }
 
 export function filledSummary(actions: PlannedAction[], verified: Set<string>): FilledField[] {

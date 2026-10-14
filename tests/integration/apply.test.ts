@@ -47,7 +47,17 @@ async function job(url: string, title: string) {
 
 const start = (jobId: string, resume: string, mode: "auto" | "review" = "auto") => api<AttemptDTO & { error?: { code: string } }>(`/api/jobs/${jobId}/apply`, { method: "POST", json: { resume_document_id: resume, submit_mode: mode, confirm: true } });
 const attempt = async (id: string) => (await api<AttemptDTO>(`/api/apply/attempts/${id}`)).body;
-const settled = (id: string, states = ["needs_review", "submitted_verified", "submission_unconfirmed", "failed", "cancelled"]) =>
+// Declarations are approved each time (never remembered): when the certification is the only open
+// question, the "user" approves it again.
+const settled = async (id: string, states?: string[]): Promise<AttemptDTO> => {
+  let a = await settledRaw(id, states);
+  while (a.state === "needs_review" && a.intervention === "approval_needed" && a.questions.length && a.questions.every((q) => q.key === "name:question_108")) {
+    await api(`/api/apply/attempts/${a.id}/answers`, { method: "POST", json: { answers: { "name:question_108": true }, remember: [] } });
+    a = await settledRaw(id, states);
+  }
+  return a;
+};
+const settledRaw = (id: string, states = ["needs_review", "submitted_verified", "submission_unconfirmed", "failed", "cancelled"]) =>
   waitFor(async () => {
     const a = await attempt(id);
     return states.includes(a.state) ? a : null;
@@ -168,8 +178,10 @@ describe.skipIf(!ready)("automated applications (synthetic forms, headless brows
     expect(submitted[0].metadata).toMatchObject({ via: "automation", attempt_id: a.id, resume_sha256: sha(bytesB) });
 
     // Remembered answers were saved to the profile only because they were ticked.
+    // "How did you hear" is remembered by meaning (Application Defaults); the declaration is never remembered.
     const prof = (await api<ProfileDTO>("/api/profile")).body.profile;
-    expect(prof.saved_answers.map((x) => x.question)).toEqual(expect.arrayContaining(["How did you hear about this job? *"]));
+    expect(prof.application_defaults.source).toBe("Company website");
+    expect(prof.saved_answers.some((x) => /certify/i.test(x.question))).toBe(false);
 
     // A verified job can't be applied to again.
     expect((await start(gh, resumeA)).body).toMatchObject({ error: { code: "already_applied" } });
@@ -210,7 +222,7 @@ describe.skipIf(!ready)("automated applications (synthetic forms, headless brows
     expect(a.state).toBe("submitted_verified");
     expect(a.steps.map((s) => s.code)).toContain("next_step");
     expect(fx.submissions.at(-1)?.fields.question_105).toBe("Company website");
-    expect(a.filled.find((f) => f.label.startsWith("How did you hear"))?.source).toBe("saved_answer");
+    expect(a.filled.find((f) => f.label.startsWith("How did you hear"))?.source).toBe("defaults.source");
   }, T);
 
   it("ambiguous result → Unconfirmed, never re-submitted; the user resolves it", async () => {

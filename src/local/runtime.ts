@@ -15,6 +15,8 @@ import { openDatabase, schemaVersion } from "./database";
 import { localFileStore } from "./file-store";
 import { createTaskRunner, type TaskRunner } from "./tasks";
 import { createApplyRunner, type ApplyRunner } from "./apply/runner";
+import { accountManager, keychainStore, memoryStore, passwordProblems } from "./apply/credentials";
+import { accountSettingsSchema, sharedPasswordSchema } from "@shared/apply";
 
 export const DEFAULT_OWNER_EMAIL = "owner@career-atlas.example.test";
 
@@ -118,11 +120,17 @@ export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: 
   env.EXTRACTION_DISPATCH = (msg) => runner.dispatch(msg);
   // Application automation: own browser profile and screenshots under <data>/automation (owner-only).
   // Only test/dev instances may target synthetic forms on 127.0.0.1.
-  const apply = createApplyRunner({ getEnv: () => env, automationDir: join(cfg.dataDir, "automation"), allowLoopback: cfg.kind !== "personal", ...opts.apply });
+  // Workday account passwords: macOS Keychain on the personal instance; memory for test/dev instances.
+  const accounts = accountManager({
+    store: cfg.kind === "personal" ? keychainStore() : memoryStore(),
+    dir: join(cfg.dataDir, "automation"),
+    settings: () => ({ mode: cfg.settings.workday_password_mode === "shared" ? "shared" : "unique", autoSignIn: cfg.settings.workday_auto_sign_in !== false }),
+  });
+  const apply = createApplyRunner({ getEnv: () => env, automationDir: join(cfg.dataDir, "automation"), allowLoopback: cfg.kind !== "personal", accounts, ...opts.apply });
   await apply.init();
   env.APPLY = apply;
 
-  const api = createApp((app) => registerLocalRoutes(app, { cfg, d1, env, claude, runner }));
+  const api = createApp((app) => registerLocalRoutes(app, { cfg, d1, env, claude, runner, apply }));
 
   const allowedHosts = new Set([`127.0.0.1:${cfg.port}`, `localhost:${cfg.port}`, ...(opts.extraHosts ?? [])]);
   const clientDir = join(cfg.appRoot, "dist", "client");
@@ -190,7 +198,7 @@ export function scheduleBackups(rt: LocalRuntime, log = console.log) {
   };
 }
 
-function registerLocalRoutes(app: Hono<HonoEnv>, rt: { cfg: LocalConfig; d1: LocalD1; env: AppEnv; claude: ClaudeCodeProvider; runner: TaskRunner }) {
+function registerLocalRoutes(app: Hono<HonoEnv>, rt: { cfg: LocalConfig; d1: LocalD1; env: AppEnv; claude: ClaudeCodeProvider; runner: TaskRunner; apply: ApplyRunner }) {
   const { cfg } = rt;
   app.get("/api/local/status", async (c) => {
     userOf(c);
@@ -226,6 +234,42 @@ function registerLocalRoutes(app: Hono<HonoEnv>, rt: { cfg: LocalConfig; d1: Loc
     }
   });
   app.post("/api/local/ai/check", async (c) => c.json(await rt.claude.status(true)));
+
+  // ---------- Workday candidate accounts (passwords stay in the Keychain; never returned) ----------
+  const accounts = rt.apply.accounts;
+  const accountView = async () => ({
+    available: accounts.available,
+    store: accounts.storeKind,
+    password_mode: accounts.settings().mode,
+    auto_sign_in: accounts.settings().autoSignIn,
+    shared_configured: await accounts.sharedConfigured(),
+    accounts: accounts.list().map((a) => ({ tenant: a.tenant, email: a.email, mode: a.mode, status: a.status, created_at: a.created_at, last_sign_in_at: a.last_sign_in_at ?? null, last_failure_at: a.last_failure_at ?? null })),
+  });
+  app.get("/api/local/accounts", async (c) => c.json(await accountView()));
+  app.patch("/api/local/accounts", async (c) => {
+    const body = await jsonBody(c, accountSettingsSchema);
+    if (body.password_mode) writeSettings(cfg, { workday_password_mode: body.password_mode });
+    if (body.auto_sign_in !== undefined) writeSettings(cfg, { workday_auto_sign_in: body.auto_sign_in });
+    return c.json(await accountView());
+  });
+  app.put("/api/local/accounts/shared-password", async (c) => {
+    const body = await jsonBody(c, sharedPasswordSchema);
+    if (body.password !== body.confirm) throw new ApiError(422, "password_mismatch", "The passwords do not match");
+    const problems = passwordProblems(body.password);
+    if (problems.length) throw new ApiError(422, "password_weak", "Use at least 8 characters with upper and lower case, a digit and a symbol", { problems });
+    if (!accounts.available) throw new ApiError(503, "keychain_unavailable", "No secure store available");
+    await accounts.setShared(body.password);
+    return c.json(await accountView());
+  });
+  app.delete("/api/local/accounts/shared-password", async (c) => {
+    await accounts.deleteShared();
+    return c.json(await accountView());
+  });
+  app.delete("/api/local/accounts/:tenant", async (c) => {
+    const email = c.req.query("email") ?? "";
+    await accounts.forget(c.req.param("tenant"), email);
+    return c.json(await accountView());
+  });
   app.patch("/api/local/settings", async (c) => {
     const body = await jsonBody(c, z.object({ ai_provider: z.enum(["none", "claude_code"]).optional() }));
     if (body.ai_provider) {

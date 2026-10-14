@@ -582,6 +582,10 @@ export const applicationAttempts = sqliteTable(
     sourceUrl: text("source_url"),
     /** adapter | indeed_company_site | indeed_apply | employer_manual. Added in 0006. */
     route: text("route"),
+    /** Workday: "autofill" (Autofill with Resume, default) | "manual" (Apply Manually). Added in 0007. */
+    entryMode: text("entry_mode"),
+    /** Workday account automation for this attempt: "none" | "sign_in" | "create" (create implies sign-in). Added in 0007. */
+    accountMode: text("account_mode"),
     ats: text("ats"),
     state: text("state").notNull().default("queued"),
     stage: text("stage"),

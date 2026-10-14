@@ -38,42 +38,88 @@ copy and a link to the form. Mark the job applied yourself afterwards.
 Workday career sites (`*.myworkdayjobs.com`, `*.myworkdaysite.com`, and company-branded portals
 recognised by Workday's own page markup) are a multi-step wizard. Career Atlas:
 
-1. opens the posting, declines non-essential cookies, clicks **Apply** and chooses **Apply
-   Manually** (no resume parsing). If an employer only offers *Autofill with Resume*, it uses that
-   and treats everything Workday pre-filled as unverified (see below);
-2. **Create Account / Sign In** — most employers require it. In the background the attempt pauses
-   (*Needs review*). Click **Continue in a visible browser**: a window opens on the sign-in page;
-   **you** sign in or create the account (and confirm the e-mail if asked). Career Atlas never
-   creates accounts, generates or types passwords, reads your e-mail or ticks agreements. As soon
-   as the application steps appear, filling continues in that window. The session is kept in
-   Career Atlas's own browser profile, so later attempts usually skip the sign-in;
-3. recognises each step from the page (steps differ between employers) and fills it:
-   - **My Information** — name, address, city, province (dropdown), postal code, e-mail, country
-     and phone code (searchable lists), phone number. Phone *device type*, "How did you hear about
-     us?" and "Have you worked here before?" are asked (tick *Remember* to reuse your answer);
-   - **My Experience** — attaches exactly the selected resume (any other file already attached is
-     removed first); adds and fills one **Work Experience** panel per My Profile entry (title,
-     company, "I currently work here", From/To month and year — typed as real keystrokes, which
-     Workday requires) and one **Education** panel (school and field of study from the searchable
-     lists — only an exact option is taken; degree by level, never by equivalence; final year);
-     adds your skills that the employer's list offers exactly; LinkedIn. Entries already on the
-     form (a saved draft from an earlier attempt) are matched, not duplicated;
-   - **Application Questions** — answered from My Profile when it states the fact (work
-     authorization, sponsorship, driver's licence, languages); dates, open questions and anything
-     else are asked. Conditional questions that appear after an answer are handled on the next pass;
-   - **Voluntary Disclosures / Self Identify** — gender, ethnicity, veteran and disability are
-     never answered automatically; if Workday makes them required you choose (e.g. "I do not wish
-     to answer"). Terms and consents are ticked only with your approval;
-   - after **Save and Continue**, errors Workday reports on the step are turned into the exact
-     questions to fix;
-4. **Review** — a screenshot is saved. With *Review before submitting* (the default, and
-   recommended until Workday has been validated on a real submission) it waits for your
-   approval; then it clicks Submit and records the application only when Workday shows its
-   confirmation ("Application Submitted" / "You have submitted…"). Anything else is *Unconfirmed*.
+1. opens the posting, declines non-essential cookies, clicks **Apply** and chooses **Autofill with
+   Resume** (the default; *Apply Manually* is the fallback or your choice in the start dialog;
+   *Use My Last Application* is never chosen);
+2. **Create Account / Sign In** (see *Workday accounts* below) — signs in with a saved account,
+   creates one only when you authorised it for this employer, or hands the window to you;
+3. **Autofill with Resume** — uploads exactly the selected resume (SHA-256 pinned), waits for
+   Workday's parsing, then **reconciles** instead of overwriting:
+   - values that already match My Profile are **kept** (not erased and re-typed);
+   - values My Profile contradicts are **corrected** (e.g. a mis-parsed e-mail) and listed at Review;
+   - values My Profile can't confirm (e.g. a parsed street address) are **kept and flagged** at
+     Review; automatic submission waits for your approval when there are any;
+   - work / education entries are matched to My Profile by employer/school and title — never
+     duplicated. An entry whose dates or details differ asks *Use My Profile / Keep the form's
+     values*; an entry not in My Profile asks *Keep / Remove*;
+   - files already attached on the employer's site are removed only with your OK, and a file with
+     the same name is not assumed to be the same version;
+4. recognises each step from the page and fills it: My Information, My Experience (panels, dates
+   typed as keystrokes, searchable school / field-of-study / skills lists — exact options only),
+   Application Questions, Voluntary Disclosures / Self Identify. Before *Save and Continue* every
+   visible required field is checked; conditional questions that appear after an answer are
+   filled in a second pass; after *Save and Continue*, the exact fields Workday rejects (live
+   "Error: The field … is required" messages) become the questions — the rest stays as it is;
+5. **Review** — the review panel shows the resume, your details, experience, education, your
+   answers, corrected values and anything only the site's parsing provided. With *Review before
+   submitting* (the default) it waits for your approval; *Applied* only after Workday's confirmation.
 
-*Autofill with Resume*: Workday's parsing is not trusted. Values it pre-filled that My Profile
-doesn't confirm are shown to you (pre-filled with Workday's value) to confirm or correct, and work
-or education entries that aren't in My Profile are listed with **Keep / Remove**.
+### Option and question matching (deterministic, no AI)
+
+`src/shared/apply-semantic.ts` decides what an option or a question **means**:
+
+- **Options**: exact → known aliases for the field's domain → context (yes/no wording) → a single
+  unambiguous equivalent → otherwise you are asked. Domains: phone type (*Mobile* = *Mobile Phone*,
+  *Cellular*, *Cell Phone*, *Personal Mobile*; never *Home / Work / Fax / VoIP*, never an option
+  that means two things such as *Work Mobile*), country (*Canada* = *CA*, *Canada (+1)*), province
+  (*Ontario* = *ON* — only in a province field), degree (*Bachelor* = *Bachelor's Degree*,
+  *Undergraduate Bachelor's*), yes/no (*Yes, I am*, *Affirmative*; two options starting with "Yes"
+  are ambiguous). Short codes never match by prefix.
+- **Questions**: prior employment with **this** employer (*"Please indicate if you have worked
+  with us before."*, *"Have you previously been employed by us?"*, *"Are you a former employee…"*,
+  the employer's own name) is distinct from prior application, interview, contractor, affiliate,
+  referral, *worked with our employees / clients*; work authorization (with country) is distinct
+  from citizenship; sponsorship now vs. in the future; student enrolment, co-op program,
+  required co-op work term, internship requirement, return to school, placement length and
+  graduation date are all separate; identity questions (Indigenous identity — First Nations,
+  Métis, Inuit —, visible minority, race/ethnicity, gender, sexual orientation, disability,
+  veteran status) are never answered automatically; declarations, consents, background checks,
+  criminal-record and conflict-of-interest questions always need your approval.
+
+### Application Defaults (My Profile)
+
+Reusable answers by **meaning** (every field can stay *Not specified* — never treated as "No"):
+phone type, country calling code, how you usually hear about jobs; worked for the employer before
+(general default plus **per-employer exceptions**), as a contractor, for an affiliate, referred by
+an employee; start date, notice period, relocation, travel, shift work, 18 or older; currently
+enrolled, full-time student, co-op program, required co-op term, internship mandatory, returning
+to school, expected graduation, available placement lengths; sponsorship now / in the future;
+salary and hourly expectations. An in-progress degree in My Profile establishes current enrolment
+— nothing more (never co-op status). *Remember this answer* on a question saves it here by meaning
+(employer-scoped answers for that employer only); identity answers are remembered only as an exact
+question you opt into (deletable under *Saved application answers*).
+
+### Workday accounts (Keychain)
+
+Optional, per application, authorised in the start dialog:
+
+- **Sign in automatically with the saved account** (preselected when one exists and *Settings →
+  Workday accounts → Sign in automatically* is on). One try; a failure is recorded and never
+  retried automatically (no account lock-outs) — you sign in or reset the password yourself.
+- **Create a candidate account on <employer site> if I don't have one** (off by default, per
+  employer). Uses the e-mail in *My Profile → Contact details* and either a **new strong password
+  for each employer** (default) or **your shared password** (opt-in in Settings; typed once into a
+  password field, never shown again). Agreements on the registration form are shown to you first
+  and ticked only with your approval. "Account already exists" → no duplicate; you sign in or use
+  *Forgot your password?*. E-mail verification, CAPTCHA, MFA/one-time codes and SSO are yours.
+- Passwords are stored only in the **macOS Keychain** (service "Career Atlas – Workday account";
+  the shared one under "Career Atlas – Workday shared password"), written through `security`'s
+  standard input (never a process argument), read back and compared before use, and saved
+  *before* a registration is submitted so a created account always has its password. They are
+  never in the repository, `.env`, SQLite, attempt records, logs, screenshots or the browser UI
+  (the API only reports whether one exists). The non-secret index (which employer site has an
+  account for which e-mail, last sign-in, last failure) is `…/CareerAtlas/automation/accounts.json`
+  (owner-only). *Settings → Workday accounts* lists them and can forget one (deletes the Keychain item).
 
 ## Indeed
 
@@ -158,7 +204,7 @@ it becomes *Unconfirmed*. The window stays open for up to 30 minutes.
 
 | | Synthetic tests (fixtures on 127.0.0.1) | Real website, non-submitting | Real submission |
 |---|---|---|---|
-| Workday | ✅ multi-step wizard: sign-in pause (no typing into account forms or the honeypot), continuing after the user signs in in the window, My Information, resume upload (exact file, SHA-256 checked by the fixture), work and education panels (added once, matched later), dates by keystroke, searchable lists, listboxes, conditional question, step validation errors → exact question, voluntary disclosures and terms → your decision, review → approval → Submit → confirmation → Applied; Autofill-with-Resume values and extra entries confirmed by you, a different attached resume removed; ambiguous result → Unconfirmed (no retry); closed posting; duplicate prevention | ✅ 2026-10-14 on four public tenants (NVIDIA, Mastercard, Salesforce, and one more public posting): Workday recognised, Apply → Apply Manually opened, step 1 "Create Account/Sign In" recognised (of 6–7 steps), nothing fillable on it (sign-in fields and honeypot excluded), no request sent. Steps **after** sign-in could not be checked without an account | ❌ none |
+| Workday | ✅ resume-first (Autofill with Resume, parsed values kept / corrected / flagged, entry conflicts and extra entries asked, no duplicates), semantic options (Mobile Phone, ON), screening by meaning (prior employment default No vs. prior application; co-op never inferred; Indigenous identity asked), attachments removed only with OK (same name ≠ same file), accounts (registration with generated password, session reuse, sign-in from secure storage, wrong password never retried, existing account, terms approval, password policy, verification e-mail, CAPTCHA, no secrets in logs/DB), sign-in pause (no typing into account forms or the honeypot without authorization), continuing after the user signs in in the window, My Information, resume upload (exact file, SHA-256 checked by the fixture), work and education panels (added once, matched later), dates by keystroke, searchable lists, listboxes, conditional question, step validation errors → exact question, voluntary disclosures and terms → your decision, review → approval → Submit → confirmation → Applied; Autofill-with-Resume values and extra entries confirmed by you, a different attached resume removed; ambiguous result → Unconfirmed (no retry); closed posting; duplicate prevention | ✅ 2026-10-14 on four public tenants (NVIDIA, Mastercard, Salesforce, and one more public posting): Workday recognised, Apply → Apply Manually opened, step 1 "Create Account/Sign In" recognised (of 6–7 steps), nothing fillable on it (sign-in fields and honeypot excluded), no request sent. Steps **after** sign-in could not be checked without an account | ❌ none |
 | Indeed | ✅ listing recognition; "Apply on company site" followed from the user's click (pop-up tab, `applystart` redirect) to a Workday form and submitted, recorded on the original saved job; pasted employer link → Lever; Indeed Apply completed by the user → post-apply recorded; Indeed Apply without confirmation → you record it; no request from Career Atlas to Indeed | ❌ not performed — Indeed's terms forbid automated access, so no automated test touches indeed.com | ❌ none |
 | Greenhouse | ✅ (see earlier scenarios) | ❌ | ❌ |
 | Lever | ✅ | ❌ | ❌ |
@@ -178,6 +224,8 @@ a Workday-style wizard and Indeed-style listings) and fictional applicants.
 ```bash
 npx vitest run tests/integration/apply.test.ts                  # Greenhouse / Lever, 9 scenarios
 npx vitest run tests/integration/apply-workday-indeed.test.ts   # Workday wizard + Indeed routing, 12 scenarios
+npx vitest run tests/integration/apply-workday-accounts.test.ts # Workday accounts (in-memory secret store), 5 scenarios
+npx vitest run tests/unit/apply-semantic.test.ts                # option / question meaning, positive and negative
 npx vitest run tests/unit/apply-plan.test.ts                    # planning, outcome and URL rules
 npx playwright test workflow-auto-apply                         # UI flows (production build)
 LIVE=1 npx vitest run tests/local/workday-live.test.ts          # real Workday sites, stops at sign-in, never types
@@ -191,9 +239,10 @@ by any test.
 - Node.js 22.16+, `npm install` (adds `playwright-core`, Apache-2.0; no browser download).
 - A browser: Playwright's Chromium if installed (`npx playwright install chromium`, optional),
   otherwise the installed **Google Chrome** application is used with a separate profile.
-- No API keys or paid services. Workday accounts are created / signed into **by you** in the
-  visible window (one per employer, Workday's rule); the session stays in Career Atlas's isolated
-  browser profile (`…/CareerAtlas/automation/browser-profile`), never in Git or logs.
+- No API keys or paid services. Workday accounts: signed into / created by Career Atlas only as you
+  authorise per application (passwords in the macOS Keychain), otherwise by you in the visible
+  window; the session stays in Career Atlas's isolated browser profile
+  (`…/CareerAtlas/automation/browser-profile`), never in Git or logs.
 
 ## Reused open-source code
 

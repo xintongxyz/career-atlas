@@ -20,6 +20,7 @@ import {
   type PendingQuestion,
   type ProfileCheckItem,
 } from "@shared/apply";
+import { conceptsOf, norm, yesNoOf } from "@shared/apply-semantic";
 import { emptyProfile, profileSchema, type Profile } from "@shared/profile";
 import { and, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import { schema, type Db } from "../db/client";
@@ -30,7 +31,57 @@ import { chunk, newId, now, sha256Hex } from "../lib/util";
 import { changeStatus, loadSavedJob } from "./pipeline";
 import { getProfileRow, profileForMatching } from "./profile";
 
-const { applicationAttempts, documents, applicationDocuments, userProfiles } = schema;
+const { applicationAttempts, documents, applicationDocuments, userProfiles, jobPostings, companies } = schema;
+
+const EMPLOYER_SCOPED = new Set(["prior_employment", "prior_application", "prior_interview", "prior_contractor", "prior_affiliate", "referral", "current_employee", "relative_employee"]);
+const YES_NO_KEYS: Record<string, keyof Profile["application_defaults"]> = {
+  prior_contractor: "prior_contractor",
+  prior_affiliate: "prior_affiliate",
+  referral: "referral",
+  relocation: "relocation",
+  travel: "travel",
+  shift_work: "shift_work",
+  age_18: "age_18",
+  enrolled_student: "enrolled_student",
+  full_time_student: "full_time_student",
+  coop_program: "coop_program",
+  coop_term_required: "coop_term_required",
+  internship_mandatory: "internship_mandatory",
+  return_to_school: "return_to_school",
+  sponsorship_now: "sponsorship_now",
+  sponsorship_future: "sponsorship_future",
+};
+const TEXT_KEYS: Record<string, keyof Profile["application_defaults"]> = { notice_period: "notice_period", salary: "salary_expectation", hourly_rate: "hourly_expectation", source: "source" };
+
+/** Saves a remembered answer as a structured Application Default when its meaning is one. */
+function rememberByMeaning(profile: Profile, q: PendingQuestion, answer: unknown, employer: string | null): boolean {
+  const d = profile.application_defaults as Record<string, unknown> & Profile["application_defaults"];
+  const m = q.meaning ?? "";
+  if (m === "identity") return false; // exact-question only (opt-in, deletable)
+  if (m === "phone_type") {
+    const c = conceptsOf("phone_type", String(answer))[0];
+    if (c !== "mobile" && c !== "home" && c !== "work") return false;
+    d.phone_type = c;
+    return true;
+  }
+  if (m === "prior_employment") {
+    const yn = yesNoOf(answer);
+    if (!yn || !employer) return false;
+    // Per employer: the general default stays as set in My Profile.
+    d.prior_employment_exceptions = [...d.prior_employment_exceptions.filter((e) => norm(e.employer) !== norm(employer)), { employer, answer: yn }];
+    return true;
+  }
+  if (YES_NO_KEYS[m]) {
+    const yn = yesNoOf(answer);
+    if (!yn) return false;
+    d[YES_NO_KEYS[m]] = yn as never;
+    return true;
+  }
+  if (m === "start_date" && typeof answer === "string" && /^\d{4}-\d{2}-\d{2}$/.test(answer)) return (d.start_date = answer), true;
+  if (m === "graduation_date" && typeof answer === "string" && /^\d{4}(-\d{2})?$/.test(answer)) return (d.expected_graduation = answer), true;
+  if (TEXT_KEYS[m] && typeof answer === "string" && answer.trim()) return (d[TEXT_KEYS[m]] = answer.trim().slice(0, 200) as never), true;
+  return false;
+}
 export type AttemptRow = typeof applicationAttempts.$inferSelect;
 
 const MANUAL_PLATFORMS = new Set(["linkedin", "ashby", "smartrecruiters"]);
@@ -93,6 +144,8 @@ export function toDTO(r: AttemptRow, doc?: { deletedAt: number | null; sha256: s
     target_url: r.targetUrl,
     source_url: r.sourceUrl,
     route: (r.route as AttemptDTO["route"]) ?? null,
+    entry_mode: (r.entryMode as AttemptDTO["entry_mode"]) ?? null,
+    account_mode: (r.accountMode as AttemptDTO["account_mode"]) ?? null,
     submit_mode: r.submitMode === "auto" ? "auto" : "review",
     resume: {
       id: r.resumeDocumentId,
@@ -112,6 +165,9 @@ export function toDTO(r: AttemptRow, doc?: { deletedAt: number | null; sha256: s
     error_message: r.errorMessage,
     confirmation: { text: r.confirmationText, url: r.confirmationUrl, at: r.confirmedAt, source: (r.confirmationSource as "page" | "user" | null) ?? null },
     evidence: (r.evidence as string[] | null) ?? [],
+    answered: Object.entries((r.answers as Record<string, unknown> | null) ?? {})
+      .filter(([k]) => k !== "__labels")
+      .map(([key, value]) => ({ key, label: ((r.answers as Record<string, unknown>).__labels as Record<string, string> | undefined)?.[key] ?? key, value: value as string | string[] | boolean })),
     submit_clicked_at: r.submitClickedAt,
     created_at: r.createdAt,
     started_at: r.startedAt,
@@ -174,6 +230,7 @@ export async function applyOverview(db: Db, env: AppEnv, userId: string, savedJo
     attempts,
     blocked_by: blocking ? blocking.state : application ? "already_applied" : null,
     worker: env.APPLY ? env.APPLY.status() : { available: false, browser: null, reason: "not_configured" },
+    account: support.ats === "workday" && env.APPLY && support.url ? await env.APPLY.accountStatus(support.url, profile?.profile.contact.email ?? null) : null,
   };
 }
 
@@ -194,7 +251,7 @@ export async function attemptSummaries(db: Db, userId: string, savedJobIds: stri
 
 // ---------------------------------------------------------------- start
 
-export async function startAttempt(db: Db, env: AppEnv, userId: string, savedJobId: string, body: { resume_document_id: string; submit_mode: "auto" | "review"; target_url?: string; indeed_window?: boolean }) {
+export async function startAttempt(db: Db, env: AppEnv, userId: string, savedJobId: string, body: { resume_document_id: string; submit_mode: "auto" | "review"; target_url?: string; indeed_window?: boolean; entry_mode?: "autofill" | "manual"; account_mode?: "none" | "sign_in" | "create" }) {
   if (!env.APPLY) throw new ApiError(503, "automation_unavailable", "Application automation is not available");
   const worker = env.APPLY.status();
   if (!worker.available) throw new ApiError(503, "automation_unavailable", worker.reason ?? "No browser available");
@@ -262,6 +319,8 @@ export async function startAttempt(db: Db, env: AppEnv, userId: string, savedJob
     sourceUrl,
     route,
     visible,
+    entryMode: body.entry_mode ?? "autofill",
+    accountMode: body.account_mode ?? "none",
     ats: support.ats === "indeed" ? null : support.ats,
     state: "queued",
     submitMode: body.submit_mode,
@@ -287,20 +346,33 @@ export async function answerAttempt(db: Db, env: AppEnv, userId: string, id: str
   const questions = (r.questions as PendingQuestion[] | null) ?? [];
   const known = new Map(questions.map((q) => [q.key, q]));
   const answers: Record<string, unknown> = { ...((r.answers as Record<string, unknown> | null) ?? {}) };
-  for (const [k, v] of Object.entries(body.answers)) if (known.has(k) && v !== "" && v !== null) answers[k] = v;
+  // Labels are kept with the answers (local only) so Review can list "question → your answer".
+  const labels = { ...((answers.__labels as Record<string, string> | undefined) ?? {}) };
+  for (const [k, v] of Object.entries(body.answers)) {
+    if (!known.has(k) || v === "" || v === null) continue;
+    answers[k] = v;
+    labels[k] = known.get(k)!.label.slice(0, 300);
+  }
+  answers.__labels = labels;
   // Remember only what the user explicitly ticked, keyed by the exact question text.
   if (body.remember.length) {
     const row = await getProfileRow(db, userId);
     const parsed = profileSchema.safeParse(row?.data ?? {});
     const profile = parsed.success ? parsed.data : emptyProfile();
+    const posting = await db.query.jobPostings.findFirst({ where: eq(jobPostings.id, r.jobPostingId) });
+    const company = posting ? await db.query.companies.findFirst({ where: eq(companies.id, posting.companyId) }) : null;
     for (const k of body.remember) {
       const q = known.get(k);
-      if (!q || answers[k] === undefined) continue;
-      const list = profile.saved_answers.filter((s) => s.question.trim().toLowerCase() !== q.label.trim().toLowerCase());
-      list.push({ question: q.label, answer: answers[k] as string, created_at: now() });
-      profile.saved_answers = list;
+      if (!q || answers[k] === undefined || q.rememberable === false) continue;
+      // By meaning where it is a structured Application Default; otherwise the exact question text.
+      if (!rememberByMeaning(profile, q, answers[k], company?.name ?? null)) {
+        const employerScoped = !!q.meaning && EMPLOYER_SCOPED.has(q.meaning);
+        const list = profile.saved_answers.filter((s) => !(s.question.trim().toLowerCase() === q.label.trim().toLowerCase() && (s.employer ?? null) === (employerScoped ? company?.name ?? null : null)));
+        list.push({ question: q.label, answer: answers[k] as string, created_at: now(), employer: employerScoped ? company?.name ?? null : null });
+        profile.saved_answers = list;
+      }
     }
-    const clean = profileSchema.parse(profile);
+    const clean = profileSchema.safeParse(profile).success ? profileSchema.parse(profile) : profileSchema.parse({ ...profile, application_defaults: (parsed.success ? parsed.data : emptyProfile()).application_defaults });
     if (row) await db.update(userProfiles).set({ data: clean as unknown as Record<string, unknown>, updatedAt: now() }).where(eq(userProfiles.userId, userId));
     else await db.insert(userProfiles).values({ userId, data: clean as unknown as Record<string, unknown>, createdAt: now(), updatedAt: now() });
   }
