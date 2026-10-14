@@ -1,0 +1,53 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# local secrets & env — NEVER commit
+.env
+.env.*
+!.env.example
+
+# local data, backups, exports, uploads (personal data never enters git)
+*.enc
+*.sql
+!migrations/*.sql
+CareerAtlasBackups/
+data.sql
+backup.key
+*.sqlite
+*.sqlite3
+*.db
+backups/
+exports/
+career-atlas-export-*.json
+career-atlas-*.csv
+uploads/
+*.pdf
+*.docx
+!tests/fixtures/**/*.pdf
+
+# test artifacts
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+coverage/
+
+# logs
+*.log
+npm-debug.log*
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# local runtime data (dev / e2e instances; the personal database lives in ~/Library/Application Support/CareerAtlas)
+.dev-data/
+.e2e-data/
+.preview-data/

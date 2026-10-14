@@ -1,0 +1,6 @@
+#!/bin/sh
+# Career Atlas pre-commit guard: blocks secrets, personal data, backups, deploy values and
+# edits to applied migrations from ever entering git. Enabled by `npm install` (prepare script).
+set -e
+node scripts/check-secrets.mjs --staged
+node scripts/check-migrations.mjs

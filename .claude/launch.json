@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "career-atlas", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev", "--", "--port", "5173", "--strictPort"], "port": 5173 },
+    {
+      "name": "career-atlas-preview-build",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["CAREER_ATLAS_INSTANCE=test", "CAREER_ATLAS_DATA_DIR=.preview-data", "CAREER_ATLAS_PORT=4320", "node", "dist/server/main.mjs"],
+      "port": 4320
+    }
+  ]
+}

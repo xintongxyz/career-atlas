@@ -1,0 +1,35 @@
+name: Bug report / 问题反馈
+description: Something doesn't work as expected. 功能异常。
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never include personal data, job application records, resumes, tokens or secrets.**
+        **请勿包含个人数据、求职记录、简历、令牌或任何密钥。** Security issues → see SECURITY.md (do not open a public issue).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened? / 发生了什么？
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      placeholder: 1. … 2. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour / 期望结果
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit / 版本或提交
+  - type: dropdown
+    id: env
+    attributes:
+      label: Environment / 环境
+      options: [Mac (npm run start:local), Linux, Development (npm run dev)]

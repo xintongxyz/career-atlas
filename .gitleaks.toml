@@ -1,0 +1,22 @@
+# gitleaks configuration (CI scans the full history; see .github/workflows/ci.yml)
+title = "Career Atlas"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "cloudflare-api-token"
+description = "Cloudflare API token"
+regex = '''\bcfut_[A-Za-z0-9_-]{30,}\b'''
+tags = ["cloudflare", "token"]
+
+[[rules]]
+id = "career-atlas-backup-key"
+description = "Career Atlas backup encryption key file content"
+regex = '''(?i)backup\.key'''
+path = '''(^|/)backup\.key$'''
+
+[allowlist]
+description = "Synthetic fixtures and docs"
+paths = ['''package-lock\.json''', '''src/worker/worker-configuration\.d\.ts''']
+regexes = ['''@example\.(com|org|net|test)''']

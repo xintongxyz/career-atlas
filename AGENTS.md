@@ -1,0 +1,33 @@
+# Career Atlas — agent rules
+
+Private, local-first, bilingual job tracker that runs on the owner's computer: React SPA + Hono API on Node (`src/server` = app core, `src/local` = runtime), SQLite (`node:sqlite`) behind a small D1-style adapter, local document storage, in-process background extraction, weekly encrypted backups, optional Claude Code AI.
+Read HANDOFF.md for current status, docs/LOCAL_FIRST.md for operations and ARCHITECTURE.md for design.
+
+## How this project is worked on (owner workflow — follow every session)
+- ONE project: the folder `~/Innovation/job_tracking` is the only working copy; it is a clone of the public repository `github.com/xintongxyz/career-atlas` (branch `main`). The owner's personal data never lives in it.
+- The owner uses the app daily through `~/Applications/Career Atlas.app` (runs `scripts/start-local.mjs`): it rebuilds after code changes and keeps using the same personal database. Everyone who clones the repo gets the same app with their own empty database.
+- For every requested change (design, layout, features, bug fixes): edit this codebase → keep EN/中文 strings in sync → run `npm run typecheck && npm test && npm run build` and `npm run test:e2e` → commit → `git push origin main` (public). Commits must contain only source code; the pre-commit secret scan must pass. Then restart the local app (`npm run stop:local`, open the launcher) so the owner sees the change.
+- Changes must never require resetting, re-creating or hand-editing the personal database. If a change needs new data fields, add an additive migration (rules below); the app backs up and migrates the personal database automatically at the next start. Existing records, IDs, URLs, notes and histories must keep working.
+- Test only with synthetic data in dev/test instances. Never open, seed or test against the personal database; at most run read-only `npm run local -- status`.
+- Do not introduce new frameworks, services, cloud/deployment platforms, paid APIs or extra infrastructure unless the owner explicitly asks.
+- At the end, tell the owner in plain language what changed, that it is live locally, and the commit pushed to GitHub.
+
+## Mandatory data-protection rules (full policy: docs/DATA_PROTECTION.md — it wins on conflict)
+- The owner's data is REAL. The personal database lives OUTSIDE the repo: `~/Library/Application Support/CareerAtlas/` (database, documents, config). Backups: `~/CareerAtlasBackups/`. Key: `~/.config/career-atlas/backup.key` (never print, log or copy it).
+- Never delete, move, reset, recreate, reseed, restore over, hand-edit or run tests against the personal database without the owner's explicit approval in chat. Otherwise only read-only checks (`npm run local -- status`). No `DROP`, unscoped `DELETE`/`UPDATE`, `restore --replace-live` without approval.
+- Develop and reproduce bugs with `npm run dev` (`.dev-data/`) or test instances, synthetic data only. Never copy real rows into code, fixtures, issues, prompts, screenshots or logs. Never start the personal instance (`start:local`, launcher) for testing; use `CAREER_ATLAS_INSTANCE=test` + a temp `CAREER_ATLAS_DATA_DIR` (dev/test instances refuse the personal folder).
+- UI changes must never reset or migrate data. Keep IDs, `/jobs/:id` URLs, notes, histories (application_events is append-only) and confirmed/overridden fields intact. Map old values explicitly.
+- Schema: edit `src/server/db/schema.ts` → `npm run db:generate` → review → `npm run db:test-upgrade` → `npm run db:lock` in the same commit. Never edit a locked migration. Additive first; expand → backfill → switch → contract; never drop in the same release. The app backs up (verified) before migrating and refuses modified history.
+- Destructive or high-risk database changes need a verified encrypted backup (`npm run local -- backup`) and the owner's approval. If a backup or check fails, stop.
+- Saving a job never creates a Git commit. Only source code goes to GitHub: no databases, `*.sqlite*`, documents, backups, dumps, exports, keys, real emails, screenshots of real data or deployment identifiers. The pre-commit hook and `npm run check:secrets` must pass.
+- Logs never contain request bodies, JD text, notes or SQL parameters (use `scrubLogText`). AI only sees the posting being extracted, only when the owner ticks "Use Claude AI"; Claude Code runs with no tools and subscription auth only. Never add API-key billing, paid services, Ollama, Tauri/Electron or extra infrastructure without approval.
+
+## Engineering
+- Verify with `npm run typecheck && npm test && npm run build`; UI flows with `npm run test:e2e` (production build on a throwaway DB).
+- Status changes only via `src/server/services/pipeline.ts › changeStatus`.
+- Never auto-write extracted data: extraction → review → `applyExtraction`. Unknown stays unknown.
+- Every UI string goes in both `src/client/i18n/locales/en.ts` and `zh-CN.ts` (no spaces between Chinese and Latin/digits).
+- Writes go through TanStack mutations (they drive the Saving/Saved/Failed indicator); free-text fields use `useAutosaveText`.
+- Keep queries portable: chunk `IN (…)` lists (≤100 params), avoid very wide joins, `GROUP BY 1` instead of aliases.
+- Deleting cloud resources, connecting accounts, new billing, making the repo public or rewriting Git history require the owner's explicit approval. Never touch unrelated Cloudflare projects (e.g. orbit, outreach).
+- Keep HANDOFF.md accurate: distinguish Implemented / Tested / In use.

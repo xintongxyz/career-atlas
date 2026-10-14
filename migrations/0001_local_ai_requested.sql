@@ -1,0 +1,1 @@
+ALTER TABLE `job_extraction_jobs` ADD `ai_requested` integer DEFAULT 0 NOT NULL;
