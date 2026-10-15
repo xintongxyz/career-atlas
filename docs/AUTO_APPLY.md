@@ -132,6 +132,29 @@ read of the page (React re-renders replace elements; controls are found again be
 - A section that can't be completed leaves a local diagnostic snapshot (`attempts/<id>/diag-*.json`:
   labels, control kinds, whether a value is present, option counts — never values) and a screenshot.
 
+### Other employer sites (Dayforce and unfamiliar forms)
+
+Handled by behaviour, not by a list of sites (`src/local/apply/rows.ts`, `interact.ts`):
+
+- **Dropdowns of any component library** (Ant Design, react-select, MUI, plain selects): the chosen
+  value is read where the library shows it (next to an empty search box); options are read in one
+  page call (long lists such as 250 countries); duplicate accessibility copies of an option count as
+  one; read-only and disabled dropdowns are opened without typing (State waits for Country); a
+  shortened display after the choice ("🇨🇦 +1" for "🇨🇦 +1 Canada") counts as kept.
+- **Repeated rows** (employment, education): each entry from My Profile is recognised by meaning
+  (title, employer, dates, school, degree, major, country, completed), saved with the row's own
+  Update / Save button, verified as a summary, and the next one opened with that section's Add
+  button. Each school keeps its own degree and major. Dates: a month becomes the 1st of that month on
+  a calendar-date input (noted at Review); a year alone is never turned into a date — a required
+  start date the profile doesn't hold is asked.
+- **Sections with their own Update / Save** are saved before Next.
+- **Pop-ups**: routine notices ("Got it", "I understand", "Close", resume-upload confirmations) are
+  acknowledged; "leave this page / unsaved changes" → stay; consent and declarations are never clicked
+  automatically — the application pauses with the text, unless it is a plain recruitment privacy
+  notice and My Profile → Application Defaults allows acknowledging those.
+- **Preferred contact method** comes from My Profile → Application Defaults (Email / Phone / Text),
+  never from the phone type.
+
 ### Application Defaults (My Profile)
 
 Reusable answers by **meaning** (every field can stay *Not specified* — never treated as "No"):

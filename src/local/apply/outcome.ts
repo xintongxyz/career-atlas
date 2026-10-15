@@ -55,7 +55,9 @@ export function applicationUrl(ats: Ats, raw: string): string {
 }
 
 const SUCCESS_TEXT = [
-  /thank you for (applying|your application|your interest)/i,
+  // Not "thank you for your interest": sites print it on postings and review pages (seen live on a
+  // Dayforce Submit step) — it confirms nothing.
+  /thank you for (applying|your application|submitting)/i,
   /thanks for applying/i,
   /application (has been |was )?(successfully )?(submitted|received|sent)/i,
   /(we('ve| have)|we) received your application/i,

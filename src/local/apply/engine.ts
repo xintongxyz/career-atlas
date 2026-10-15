@@ -35,12 +35,13 @@ import { tenantOf, type AccountManager } from "./credentials";
 import { questionMeaning } from "@shared/apply-semantic";
 import type { PublicFacts } from "./codex-agent";
 import { PAGE_SIGNALS } from "./dom";
-import { PAGE_CONTROLS, addPanelButton, decideAdvance, decideNavigation, panelCount, safeClickName, type PageObservation } from "./generic";
-import { enrichOptions, perform, readMenu, scan, verify } from "./interact";
+import { PAGE_CONTROLS, decideAdvance, decideNavigation, safeClickName, type PageObservation } from "./generic";
+import { commitOpenSections, enrichOptions, frameView, handleNotices, navigationSafe, perform, readMenu, scan, verify } from "./interact";
 import { classifyIndeedUrl } from "./indeed";
-import { applicationUrl, atsFromSignals, classifyAfterSubmit, stripQuery, type Ats, type PageSignals } from "./outcome";
+import { applicationUrl, atsFromSignals, classifyAfterSubmit, stripQuery, successSentence, type Ats, type PageSignals } from "./outcome";
 import { fieldKey, norm, planForm, question, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
 import { fillSections } from "./wd-sections";
+import { fillRows } from "./rows";
 import { jobSourceOf, type JobSource } from "@shared/apply-match";
 import type { MailVerifier } from "./mail";
 import { accountTermsLabel, activeStep, clickNext, codeInput, declineCookies, enterApplyFlow, isAutofillUpload, nextButton, submitVerificationCode, uploadResume, wdReady, wdSettle, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
@@ -116,6 +117,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   let resumeFile = { name: "", mimeType: "", buffer: Buffer.alloc(0) };
   let planCtx: PlanContext = { profile: emptyProfile(), jobCountry: null, answers: {}, resume: { fileName: "" } };
   let jobSource: JobSource = null;
+  let genericSignInTried = false;
   const allow = deps.allowLoopback;
 
   const set = (patch: Partial<typeof applicationAttempts.$inferInsert>, code?: string, params?: Record<string, string | number>) => updateAttempt(db, attemptId, patch, code ? { code, params } : undefined);
@@ -174,14 +176,21 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     // ---- open
     await checkCancel();
     ctx = await launchBrowser({ profileDir: deps.profileDir, headless: !visible || !!deps.forceHeadless, choice: deps.choice, allowLoopback: allow });
-    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    const page = navigationSafe(ctx.pages()[0] ?? (await ctx.newPage()));
     page.setDefaultTimeout(15_000);
+    ctx.on("page", (p) => void navigationSafe(p)); // tabs a site opens (Apply in a new tab)
+    // Browser dialogs: "leave this page?" → stay; alerts → OK; confirmations → never accepted blindly.
+    page.on("dialog", (d) => {
+      void (d.type() === "alert" ? d.accept() : d.dismiss()).catch(() => {});
+    });
     await goto(page, row.targetUrl, t.navigation);
     if (classifyIndeedUrl(classificationUrl(page.url(), allow)) !== "external") return await indeedFlow(page);
     return await formFlow(page, row.route === "indeed_company_site");
   } catch (e) {
     if (e instanceof Superseded) return e.state; // a new run takes over; nothing is overwritten
     const code = e instanceof Stop ? e.code : errorCode(e);
+    // Developer diagnostics only (never on by default): the error's first line, no field values.
+    if (process.env.CA_APPLY_DEBUG && !(e instanceof Stop)) process.stderr.write(`ENGINE_ERROR ${String((e as Error)?.stack ?? e).split("\n").slice(0, 5).join(" | ")}\n`);
     if (code === "cancelled" && !clickedThisRun) {
       const r = await current();
       if (r?.state !== "cancelled") await set({ state: "cancelled", stage: null, finishedAt: Date.now(), intervention: null }, "cancelled");
@@ -243,15 +252,127 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     return indeedApply ? pause("confirm_result", [], { route: "indeed_apply" }) : pause("unexpected_page", [], { errorCode: "indeed_no_destination" });
   }
 
+  /** Which control is being worked on (field label only — never a value); readable through the API. */
+  async function progress(label: string) {
+    await set({ stage: `filling: ${label.replace(/\s+/g, " ").slice(0, 80)}` });
+  }
+
+  function rowsCtx(page: Page) {
+    return {
+    page,
+    profile: planCtx.profile,
+    answers: planCtx.answers,
+    guard: checkCancel,
+    record: (f: FilledField) => {
+      allFilled.push(f);
+    },
+    event: async (code: string, params?: Record<string, string | number>) => {
+      await set({ filled: allFilled }, code, params);
+    },
+    progress,
+    };
+  }
+
+  /**
+   * Pop-ups read from the page: routine notices are acknowledged; a consent / declaration dialog is
+   * accepted only with the user's approval for it (or, for a plain recruitment privacy notice, the
+   * standing preference in Application Defaults) — otherwise the application pauses with it.
+   */
+  async function notices(page: Page): Promise<AttemptState | null> {
+    const seen = await handleNotices(page);
+    for (const n of seen) if (n.kind === "dismissed") await set({}, "notice_acknowledged", { button: n.button.slice(0, 40) });
+    const consent = seen.find((n) => n.kind === "consent") as { kind: "consent"; text: string; checkbox: boolean } | undefined;
+    if (!consent) return null;
+    const key = `notice:${norm(consent.text).slice(0, 120)}`;
+    const privacyOnly = /privacy|personal information|data protection/i.test(consent.text) && !/certif|attest|background|drug|criminal|signature|arbitration|non-?compete|true,? (accurate|correct)|authori[sz]e .*(contact|verify|release)/i.test(consent.text);
+    const approved = planCtx.answers[key] === true || (privacyOnly && planCtx.profile.application_defaults.accept_privacy_notices === "yes");
+    if (approved && (await acceptConsentDialog(page))) {
+      await set({}, "consent_given", { kind: privacyOnly ? "privacy_notice" : "approved" });
+      return null;
+    }
+    const q: PendingQuestion = { key, label: consent.text.slice(0, 500), kind: "checkbox", required: true, options: [], reason: "legal", sensitive: true, hint: null, rememberable: false, meaning: privacyOnly ? "privacy_notice" : "declaration" };
+    await shot(page, "consent");
+    return visible ? manual(page, null, "approval_needed", [q]) : pause("approval_needed", [q]);
+  }
+
+  async function acceptConsentDialog(page: Page): Promise<boolean> {
+    const dlg = page.locator('[role="dialog"], [role="alertdialog"], [aria-modal="true"], .ant-modal, .modal.show').filter({ visible: true }).last();
+    if (!(await dlg.count())) return false;
+    for (const cb of await dlg.locator('input[type="checkbox"]').all()) if (!(await cb.isChecked().catch(() => true))) await cb.check({ force: true }).catch(() => {});
+    const btn = dlg.getByRole("button", { name: /^(i agree|agree|accept|i accept|continue|ok|confirm|i acknowledge|acknowledge)$/i }).first();
+    if (!(await btn.isVisible().catch(() => false))) return false;
+    await btn.click({ timeout: 5000 }).catch(() => {});
+    await sleep(500);
+    return true;
+  }
+
+  /**
+   * Sign-in with a saved password on any site (the Workday account store is per host, so it works
+   * for every employer site). One try per run; a rejected password is recorded and never retried.
+   */
+  async function genericSignIn(page: Page): Promise<"ok" | "failed" | "none"> {
+    const acc = deps.accounts;
+    const email = planCtx.profile.contact.email?.trim();
+    if (!acc?.available || !email || !row!.accountMode || row!.accountMode === "none" || genericSignInTried) return "none";
+    const site = tenantOf(page.url());
+    if (acc.blocked(site, email) || !(await acc.hasCredential(site, email))) return "none";
+    const pw = await acc.password(site, email);
+    const user = page.locator('input[type="email"], input[autocomplete="username"], input[name*="mail" i], input[id*="mail" i], input[name*="user" i], input[id*="user" i]').filter({ visible: true }).first();
+    const pass = page.locator('input[type="password"]').filter({ visible: true }).first();
+    if (!pw || !(await user.count()) || !(await pass.count())) return "none";
+    genericSignInTried = true;
+    await set({ stage: "sign_in" }, "sign_in_attempt", { site });
+    await user.fill(email).catch(() => {});
+    await pass.fill(pw).catch(() => {});
+    const btn = page.getByRole("button", { name: /^(sign in|log in|login|continue|next)$/i }).filter({ visible: true }).first();
+    if (await btn.count()) await btn.click({ timeout: 8000 }).catch(() => {});
+    else await pass.press("Enter").catch(() => {});
+    await page.waitForLoadState("domcontentloaded").catch(() => {});
+    // Signed in only when the password field stays gone on a page that has drawn its content (a
+    // redirect shows a blank page for a moment — that is not success).
+    let clear = 0;
+    for (let w = 0; w < 40; w++) {
+      await sleep(500);
+      const sig = await signals(page);
+      const drawn = (await observe(page)).names.length > 0;
+      clear = !sig.password && drawn ? clear + 1 : 0;
+      if (clear >= 4) {
+        acc.mark(site, email, { status: "signed_in", last_sign_in_at: Date.now(), last_failure_at: null, last_failure_code: null });
+        await set({ state: "filling", intervention: null, stage: "filling" }, "signed_in_auto", { site });
+        return "ok";
+      }
+    }
+    acc.mark(site, email, { last_failure_at: Date.now(), last_failure_code: "invalid" });
+    return "failed";
+  }
+
+  /** A click that opened the application in a new tab: continue in that tab (the old one stays open). */
+  async function adoptNewTab(current: Page, before: number): Promise<Page> {
+    await sleep(300);
+    const pages = ctx!.pages();
+    if (pages.length <= before) return current;
+    const fresh = pages[pages.length - 1];
+    await fresh.waitForLoadState("domcontentloaded", { timeout: 20_000 }).catch(() => {});
+    if (fresh.url() === "about:blank") return current;
+    await fresh.bringToFront().catch(() => {});
+    await set({}, "followed_new_tab");
+    return navigationSafe(fresh);
+  }
+
   async function observe(page: Page): Promise<PageObservation> {
     return (await page.evaluate(PAGE_CONTROLS)) as PageObservation;
   }
 
   async function clickNamed(page: Page, name: string): Promise<boolean> {
     const re = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+    // Sites often render the same control twice (a hidden mobile copy first): click the first VISIBLE one.
     for (const role of ["button", "link"] as const) {
-      const loc = page.getByRole(role, { name: re }).first();
-      if (await loc.isVisible().catch(() => false)) {
+      const all = page.getByRole(role, { name: re });
+      const n = Math.min(await all.count().catch(() => 0), 10);
+      for (let i = 0; i < n; i++) {
+        const loc = all.nth(i);
+        if (!(await loc.isVisible().catch(() => false))) continue;
+        await loc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
         await loc.click({ timeout: 8000 });
         await page.waitForLoadState("domcontentloaded").catch(() => {});
         await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
@@ -276,6 +397,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   async function genericFlow(page: Page, fromIndeed: boolean): Promise<AttemptState> {
     await set({ ats: null, stage: "opening" }, "opened_form");
     let cookieDismissed = false;
+    const framesOpened = new Set<string>();
+    const appliesClicked = new Set<string>();
     let lastSig = "";
     let repeats = 0;
     for (let step = 0; step < 16; step++) {
@@ -286,21 +409,54 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         s = await signals(page);
       }
       if (atsFromSignals(s, allow)) return formFlow(page, fromIndeed);
-      const obs = await observe(page);
-      const decision = decideNavigation(obs, { password: s.password, challenge: s.challenge, cookieDismissed });
+      const consent = await notices(page);
+      if (consent) return consent;
+      let obs = await observe(page);
+      // A page that has not drawn its controls yet (scripts still rendering after a redirect): wait until
+      // it shows something and stops changing, instead of judging an empty page.
+      for (let w = 0, last = -1; w < 30; w++) {
+        const n = obs.names.length + obs.applicationFields;
+        if (n > 0 && n === last) break;
+        last = n;
+        await sleep(n > 0 ? 500 : 700);
+        obs = await observe(page);
+      }
+      s = await signals(page);
+      // A sign-in / registration step (an e-mail box on ".../login" before any application fields) is the
+      // candidate's account step: never filled with the profile here.
+      const loginPage = /\/(log-?in|sign-?in|signin|logon|register|registration|account\/(login|create|signin))(\/|$|\?)/i.test(new URL(page.url()).pathname) && (obs.applicantFields ?? 0) <= 2;
+      const decision = decideNavigation(obs, { password: s.password || loginPage, challenge: s.challenge, cookieDismissed });
+      if (process.env.CA_APPLY_DEBUG) process.stderr.write(`GENERIC step=${step} url=${page.url().slice(0, 90)} pages=${ctx?.pages().length} fields=${obs.applicationFields} pw=${s.password} decision=${JSON.stringify(decision)} names=${JSON.stringify(obs.names.slice(0, 12))}\n`);
       const sig = `${decision.action}:${"name" in decision ? decision.name : ""}:${page.url()}`;
       repeats = sig === lastSig ? repeats + 1 : 0;
       lastSig = sig;
       if (decision.action === "captcha") return visible ? manual(page, null, "captcha") : pause("captcha");
-      if (decision.action === "login") return visible ? manual(page, null, "login_required") : pause("login_required");
+      if (decision.action === "login") {
+        // A sign-in page on any site: with a password saved for this site (Keychain) and sign-in
+        // allowed for this application, sign in once; otherwise the user signs in (or registers) in
+        // the visible window and filling continues. In the background it pauses for that.
+        const r = await genericSignIn(page);
+        if (r === "ok") continue;
+        if (r === "failed") return visible ? manual(page, null, "login_required") : pause("login_required", [], { stage: "sign_in", errorCode: "sign_in_failed" });
+        if (!visible) return pause("login_required", [], { stage: "sign_in" });
+        const ok = await waitForUser(page, async () => !(await signals(page)).password, "login_required");
+        if (!ok) return pause("login_required", [], { stage: "sign_in" });
+        await set({ state: "filling", intervention: null, stage: "filling" }, "signed_in_by_user");
+        continue;
+      }
       if (decision.action === "click" && repeats < 2) {
         if (decision.why === "cookie") cookieDismissed = true;
+        const tabs = ctx!.pages().length;
         if (await clickNamed(page, decision.name)) {
+          page = await adoptNewTab(page, tabs);
           await set({ stage: "opening" }, "opened_form");
           continue;
         }
       } else if (decision.action === "fill") {
+        // Repeated rows (employment / education) entry by entry, then the rest of the page.
+        const rows = await fillRows(rowsCtx(page));
         let { questions } = await fillPage(page, { uploadInPlan: true });
+        questions = [...rows.questions, ...questions.filter((q) => !rows.questions.some((r) => r.key === q.key))];
         if (questions.some((q) => q.required && q.options.length) && deps.chooseOption) {
           let changed = false;
           let asked = 0;
@@ -315,28 +471,29 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           }
           if (changed) questions = (await fillPage(page, { uploadInPlan: true })).questions;
         }
-        const names = (await observe(page)).names;
-        const fields = await scan(page);
+        // Inline section editors keep edits only after their own Update / Save button.
+        if (await commitOpenSections(page)) await set({}, "sections_saved");
         if (!questions.some((q) => q.required)) {
-          const workHave = panelCount(fields, "work");
-          const eduHave = panelCount(fields, "education");
-          const addWork = workHave > 0 && workHave < planCtx.profile.experience.length ? addPanelButton(names, "work") : null;
-          const addEdu = !addWork && eduHave > 0 && eduHave < planCtx.profile.education.length ? addPanelButton(names, "education") : null;
-          const add = addWork ?? addEdu;
-          if (add) {
-            const group = addWork ? "work" : "education";
-            const before = addWork ? workHave : eduHave;
-            await clickNamed(page, add);
-            const after = panelCount(await scan(page), group);
-            if (after > before) {
-              await set({}, group === "work" ? "work_entry_added" : "education_entry_added", { n: after });
-              continue;
+          const adv = decideAdvance((await observe(page)).names);
+          // Nothing to advance with yet, but an Apply control is still on the page (a tab or button
+          // that reveals the form, e.g. "Apply" next to "Job details"): open it once.
+          if (adv.action === "stuck") {
+            const apply = (await observe(page)).names.find((n) => /^apply\b|^apply (now|online|for this job)$/i.test(n) && !appliesClicked.has(n));
+            if (apply) {
+              appliesClicked.add(apply);
+              const tabs = ctx!.pages().length;
+              if (await clickNamed(page, apply)) {
+                page = await adoptNewTab(page, tabs);
+                await set({ stage: "opening" }, "opened_form");
+                continue;
+              }
             }
           }
-          const adv = decideAdvance((await observe(page)).names);
           if (adv.action === "click") {
             const beforeUrl = page.url();
+            const tabs = ctx!.pages().length;
             await clickNamed(page, adv.name);
+            page = await adoptNewTab(page, tabs);
             if (page.url() === beforeUrl && repeats >= 2) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
             await set({}, "next_step", { step: step + 2 });
             continue;
@@ -366,10 +523,26 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           return visible ? manual(page, null, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
         }
       }
+      // The application may live inside a large embedded frame (iCIMS and many company sites):
+      // open that document directly — once per frame — and work on it.
+      const frame = (obs.frames ?? []).sort((a, b) => b.area - a.area).find((f) => !framesOpened.has(f.src) && !/captcha|datadome|recaptcha|hcaptcha|turnstile|youtube|vimeo|maps\.google|googletagmanager|doubleclick/i.test(f.src));
+      if (frame && (obs.applicantFields ?? 0) === 0) {
+        framesOpened.add(frame.src);
+        // Work inside the frame (reloading its address on its own often just reloads the wrapper).
+        const real = page;
+        const f = real.frames().find((x) => x.url() === frame.src) ?? real.frames().find((x) => x !== real.mainFrame() && frame.src.startsWith(x.url().split("?")[0]));
+        if (f) {
+          page = frameView(real, f);
+          await set({ stage: "opening" }, "opened_embedded_form");
+          continue;
+        }
+      }
       if (deps.pageAgent && repeats < 3) {
         const suggestion = await deps.pageAgent({ buttons: obs.names, labels: obs.labels }).catch(() => null);
         const name = suggestion ? safeClickName(suggestion, obs.names) : null;
+        const tabs = ctx!.pages().length;
         if (name && (await clickNamed(page, name))) {
+          page = await adoptNewTab(page, tabs);
           await set({}, "opened_form");
           continue;
         }
@@ -413,7 +586,10 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
 
     for (let step = 0; step < MAX_FORM_STEPS; step++) {
       await checkCancel();
-      const { questions } = await fillPage(page, { uploadInPlan: true });
+      // Repeated employment / education blocks first (entry by entry), then the rest of the form.
+      const rows = await fillRows(rowsCtx(page));
+      const page1 = await fillPage(page, { uploadInPlan: true });
+      const questions = [...rows.questions, ...page1.questions.filter((q) => !rows.questions.some((r) => r.key === q.key))];
       if (questions.length) {
         await shot(page, `step-${step + 1}`);
         return visible ? manual(page, ats, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
@@ -813,6 +989,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           await checkCancel();
           await checkStep();
           if (list[i].kind === "upload") continue;
+          await progress(list[i].label || list[i].key);
           list[i] = (await refreshAction(page, list[i])) ?? list[i];
           await perform(page, list[i]).catch(() => {});
         }
@@ -1030,7 +1207,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   /** Followed from Indeed to a site Career Atlas can't fill: the user applies; we watch for a confirmation. */
   async function employerManual(page: Page): Promise<AttemptState> {
     await set({ state: "needs_review", intervention: "employer_site_manual", route: "employer_manual", stage: "manual" }, "employer_site_manual", { host: hostOf(page.url()) });
-    const posts = trackSubmissions(page);
+    const posts = await trackUserSubmission(page);
     const until = Date.now() + t.manual;
     while (Date.now() < until) {
       if (page.isClosed()) break;
@@ -1053,7 +1230,10 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
    */
   async function manual(page: Page, ats: Ats | null, reason: InterventionReason, questions: PendingQuestion[] = []): Promise<AttemptState> {
     await set({ state: "needs_review", intervention: "manual_in_browser", questions, stage: "manual" }, "manual_handoff", { reason });
-    const posts = trackSubmissions(page);
+    const posts = await trackUserSubmission(page);
+    // What the page already says at hand-off is not a confirmation of anything the user did next.
+    const baseline = await signals(page).then((x) => ({ text: successSentence(x.text), url: stripQuery(x.url) })).catch(() => ({ text: null as string | null, url: "" }));
+    const fresh = (text: string | null, url: string) => !!text && (text !== baseline.text || url !== baseline.url);
     const until = Date.now() + t.manual;
     while (Date.now() < until) {
       if (page.isClosed()) break; // the user closed the window
@@ -1074,7 +1254,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         const s = await signals(page).catch(() => null);
         if (s) {
           const o = classifyAfterSubmit(ats, s, posts.posted());
-          if (o.kind === "verified") return verified(page, o.text, o.url, "page");
+          if (o.kind === "verified" && fresh(o.text, o.url)) return verified(page, o.text, o.url, "page");
         }
       }
       await sleep(1000);
@@ -1111,6 +1291,36 @@ function submitButton(page: Page, ats: Ats | null) {
 }
 
 /** Watches for a form submission request (POST/PUT to the site itself, not analytics). */
+/**
+ * In a window the USER operates: a submission counts only after the user clicked a Submit-type
+ * control AND the site then received a request. Sites keep sending background requests (analytics,
+ * autosave) — on their own those never mean "submitted".
+ */
+async function trackUserSubmission(page: Page) {
+  let clickedAt = 0;
+  let postAfterClick = false;
+  await page.exposeBinding("__caSubmitClick", () => {
+    clickedAt = Date.now();
+  }).catch(() => {});
+  const install = String.raw`(() => { if (window.__caSubmitWatch) return; window.__caSubmitWatch = true;
+    document.addEventListener('click', (e) => {
+      const b = e.target && e.target.closest && e.target.closest('button, input[type=submit], input[type=button], [role=button], a');
+      if (!b) return;
+      const t = (b.innerText || b.value || b.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      if (/^(submit|submit (my |your )?application|send( my)? application|complete( my)? application|finish( and submit)?|confirm and submit)$/i.test(t) && window.__caSubmitClick) window.__caSubmitClick();
+    }, true); })()`;
+  await page.addInitScript(install).catch(() => {});
+  await page.evaluate(install).catch(() => {});
+  const host = hostOf(page.url());
+  const onReq = (req: { method(): string; url(): string }) => {
+    if (!clickedAt || !["POST", "PUT"].includes(req.method())) return;
+    const h = hostOf(req.url());
+    if (h && (h === host || /(^|\.)greenhouse\.io$|(^|\.)lever\.co$|\.myworkdayjobs\.com$|\.myworkday\.com$|\.dayforcehcm\.com$/.test(h))) postAfterClick = true;
+  };
+  page.on("request", onReq);
+  return { posted: () => postAfterClick, stop: () => page.off("request", onReq) };
+}
+
 function trackSubmissions(page: Page) {
   let seen = false;
   const host = hostOf(page.url());

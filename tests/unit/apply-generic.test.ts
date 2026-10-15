@@ -1,7 +1,8 @@
 import { emptyProfile } from "@shared/profile";
 import { describe, expect, it } from "vitest";
 import { addPanelButton, decideAdvance, decideNavigation, safeClickName } from "../../src/local/apply/generic";
-import { planForm, repeatingValue, type FieldDescriptor } from "../../src/local/apply/plan";
+import { planForm, type FieldDescriptor } from "../../src/local/apply/plan";
+import { rowRole } from "../../src/local/apply/rows";
 
 const field = (over: Partial<FieldDescriptor>): FieldDescriptor => ({
   ref: "f1",
@@ -34,21 +35,27 @@ describe("unfamiliar application pages", () => {
     expect(safeClickName("Next", ["Next"])).toBe("Next");
   });
 
-  it("fills a repeating work and education block from the profile, including a date the site stores as a calendar day", () => {
+  it("repeated rows are recognised by meaning (not by one site's field names) and left to the rows handler", () => {
     const profile = emptyProfile();
-    profile.contact = { ...profile.contact, first_name: "Alex", last_name: "Rivera", email: "alex.rivera@example.test" };
-    profile.experience = [{ title: "Data Analyst", organization: "Fabrikam", start: "2024-06", current: true, areas: [], description: "Built reports" }];
-    profile.education = [{ level: "master", field: "Statistics", institution: "Example University", country: "Canada", completed: true, year: 2024 }];
+    profile.contact = { ...profile.contact, email: "alex.rivera@example.test" };
     const ctx = { profile, jobCountry: "Canada", answers: {}, resume: { fileName: "Resume.pdf" } };
-    const title = field({ id: "jobPostingApplication_workHistory_0_title", label: "Position Title", group: "work", groupIndex: 0 });
-    const start = field({ id: "jobPostingApplication_workHistory_0_effectiveStart", label: "Start Date", inputType: "date", group: "work", groupIndex: 0 });
-    const school = field({ id: "jobPostingApplication_educationHistory_0_schoolName", label: "School", group: "education", groupIndex: 0 });
-    expect(repeatingValue(title, ctx)).toMatchObject({ ok: true, value: "Data Analyst" });
-    expect(repeatingValue(start, ctx)).toMatchObject({ ok: true, value: "2024-06-01" });
-    expect(repeatingValue(school, ctx)).toMatchObject({ ok: true, value: "Example University" });
-    const plan = planForm([title, start, school, field({ id: "confirmEmail", label: "Confirm Email Address" })], ctx);
-    expect(plan.actions.map((a) => a.kind === "fill" && a.value)).toEqual(["Data Analyst", "2024-06-01", "Example University", "alex.rivera@example.test"]);
-    expect(plan.questions).toEqual([]);
+    const w = (label: string, extra: Partial<FieldDescriptor> = {}) => field({ label, group: "work", groupIndex: 0, ...extra });
+    const e = (label: string, extra: Partial<FieldDescriptor> = {}) => field({ label, group: "education", groupIndex: 1, ...extra });
+    expect(rowRole("work", w("Position Title"))).toBe("title");
+    expect(rowRole("work", w("Employer Name"))).toBe("company");
+    expect(rowRole("work", w("Current Job", { control: "checkbox" }))).toBe("current");
+    expect(rowRole("work", w("Start Date", { inputType: "date" }))).toBe("start");
+    expect(rowRole("work", w("Duties and Responsibilities", { control: "textarea" }))).toBe("description");
+    expect(rowRole("work", w("Country", { control: "combobox" }))).toBe("country");
+    expect(rowRole("education", e("School"))).toBe("school");
+    expect(rowRole("education", e("Degree"))).toBe("degree");
+    expect(rowRole("education", e("Major"))).toBe("major");
+    expect(rowRole("education", e("Minor"))).toBe("minor");
+    expect(rowRole("education", e("Not Completed", { control: "checkbox" }))).toBe("notCompleted");
+    expect(rowRole("education", e("End Date", { inputType: "date" }))).toBe("end");
+    // The generic planner does not fill rows field by field.
+    const plan = planForm([w("Position Title"), e("School"), field({ id: "confirmEmail", label: "Confirm Email Address" })], ctx);
+    expect(plan.actions.map((a) => a.kind === "fill" && a.value)).toEqual(["alex.rivera@example.test"]);
     expect(addPanelButton(["Add Employment History", "Add Cover Letter"], "work")).toBe("Add Employment History");
   });
 });

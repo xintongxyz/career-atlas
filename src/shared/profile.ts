@@ -17,6 +17,8 @@ const url = optTxt(500);
 const yn = z.enum(["yes", "no"]).nullable().optional();
 
 export const PHONE_TYPES = ["mobile", "home", "work"] as const;
+/** How the applicant wants employers to contact them — independent of the phone type. */
+export const CONTACT_METHODS = ["email", "phone", "text"] as const;
 export const YES_NO_DEFAULT_KEYS = [
   "prior_employment",
   "prior_contractor",
@@ -32,11 +34,16 @@ export const YES_NO_DEFAULT_KEYS = [
   "coop_term_required",
   "internship_mandatory",
   "return_to_school",
+  "accept_privacy_notices",
 ] as const;
 export type YesNoDefaultKey = (typeof YES_NO_DEFAULT_KEYS)[number];
 
 export const applicationDefaultsSchema = z.object({
   phone_type: z.enum(PHONE_TYPES).nullable().optional(),
+  /** "Preferred contact method" questions (Email / Phone / Text). Never inferred from the phone type. */
+  preferred_contact_method: z.enum(CONTACT_METHODS).nullable().optional(),
+  /** Standing permission to acknowledge plain recruitment privacy notices (never declarations or background checks). */
+  accept_privacy_notices: yn,
   phone_country_code: optTxt(10),
   /** "Have you worked for <this employer> before?" — with per-employer exceptions. */
   prior_employment: yn,
@@ -110,6 +117,9 @@ export const profileSchema = z.object({
         /** false = in progress; null = not specified. */
         completed: z.boolean().nullable().default(true),
         year: z.number().int().min(1950).max(2100).nullable().optional(),
+        /** Optional exact months (YYYY or YYYY-MM); `year` stays the graduation / expected year. */
+        start: month,
+        end: month,
       }),
     )
     .max(20)

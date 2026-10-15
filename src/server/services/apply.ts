@@ -84,7 +84,9 @@ function rememberByMeaning(profile: Profile, q: PendingQuestion, answer: unknown
 }
 export type AttemptRow = typeof applicationAttempts.$inferSelect;
 
-const MANUAL_PLATFORMS = new Set(["linkedin", "ashby", "smartrecruiters"]);
+// Sites whose terms rule out automation stay manual. Everything else is tried by the generic flow
+// (Ashby, SmartRecruiters, iCIMS, Dayforce, custom sites): it works from what the page shows.
+const MANUAL_PLATFORMS = new Set(["linkedin"]);
 const MAX_STEPS = 80;
 
 // ---------------------------------------------------------------- helpers

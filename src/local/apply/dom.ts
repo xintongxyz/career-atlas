@@ -80,6 +80,23 @@ export const SCAN_FIELDS = String.raw`(() => {
     }
     const idm = (el.id || '').match(/^([A-Za-z]+)-(\d+)--/);
     if (idm && GROUP_OF[idm[1].toLowerCase()]) return { group: GROUP_OF[idm[1].toLowerCase()], groupIndex: idOrder(idm[1], idm[2]) };
+    // Other systems number repeated rows inside the field name: "…_workHistory_0_title",
+    // "education[1][school]", "employment-2-employer". The number is the row's position.
+    const rowm = ((el.id || '') + ' ' + (el.name || '')).match(/(?:^|[_.\[\s-])(work_?history|employment_?history|employment|experience|work_?experience|education_?history|education|schools?|websites?|languages?)[_.\[-]+(\d+)[\]_.-]/i);
+    if (rowm) {
+      const k = rowm[1].toLowerCase().replace(/_/g, '');
+      const g = /work|employ|experience/.test(k) ? 'work' : /educ|school/.test(k) ? 'education' : /web/.test(k) ? 'websites' : 'languages';
+      return { group: g, groupIndex: Number(rowm[2]) };
+    }
+    // Repeated blocks marked by their container ("employment-form", "education--form", …) with the
+    // entry number at the end of the field id ("company-name-0", "school--1", "current-role-0_1").
+    const blk = el.closest('[class*="employment" i], [id*="employment" i], [class*="education" i], [id*="education" i], [class*="experience" i], [id*="experience" i]');
+    const tail = ((el.id || '') + ' ' + (el.name || '')).match(/(?:-|_|--)(\d+)(?:_\d+)?(?:\]|\s|$)/);
+    if (blk && blk !== document.body && tail && Number(tail[1]) < 50 && !blk.matches('form#application-form, form#application_form, form')) {
+      const k = String(blk.className || '') + ' ' + (blk.id || '');
+      const g = /educ/i.test(k) ? 'education' : 'work';
+      return { group: g, groupIndex: Number(tail[1]) };
+    }
     if (wdName(el) === 'skills') return { group: 'skills', groupIndex: 0 };
     const g = groupOfHeading(headingOf(el));
     if (g === 'skills') return { group: 'skills', groupIndex: 0 };
@@ -230,10 +247,15 @@ export const SCAN_FIELDS = String.raw`(() => {
       continue;
     }
     if (el.getAttribute('role') === 'combobox' || el.closest('.select__control, [class*="select__control"]')) {
-      const ctl = el.closest('.select__control, [class*="-control"], [class*="select__control"]') || el.parentElement;
-      const single = ctl && ctl.querySelector('.select__single-value, [class*="singleValue"], [class*="single-value"]');
-      const multi = ctl ? [...ctl.querySelectorAll('.select__multi-value__label, [class*="multiValue"] [class*="label"]')].map(textOf) : [];
-      out.push({ ...base, ref: ref(el), control: 'combobox', label, required: requiredOf(el, label), value: single ? [textOf(single)] : multi, visible: visible(ctl || el) });
+      // Component-library selects show the chosen value NEXT TO the search input (whose own value stays
+      // empty): react-select (single-value), Ant Design (selection-item), MUI, Headless/Radix-style.
+      const ctl = el.closest('.select__control, [class*="-control"], [class*="select__control"], .ant-select, .ant-select-selector, [class*="MuiAutocomplete"], [class*="MuiSelect"]') || el.parentElement;
+      const holder = (ctl && ctl.closest('.ant-select')) || ctl;
+      const single = holder && holder.querySelector('.select__single-value, [class*="singleValue"], [class*="single-value"], .ant-select-single .ant-select-selection-item, .MuiSelect-select');
+      const multi = holder ? [...holder.querySelectorAll('.select__multi-value__label, [class*="multiValue"] [class*="label"], .ant-select-selection-item-content, .MuiChip-label')].map(textOf).filter(Boolean) : [];
+      const typed = (el.value || '').trim();
+      const shownValue = single ? [clean(single.getAttribute('title') || textOf(single))] : multi.length ? multi : (el.getAttribute('aria-autocomplete') === 'none' && typed ? [typed] : []);
+      out.push({ ...base, ref: ref(el), control: 'combobox', label, required: requiredOf(el, label), value: shownValue, visible: visible(ctl || el) });
       continue;
     }
     if (type === 'checkbox') {
@@ -250,7 +272,8 @@ export const SCAN_FIELDS = String.raw`(() => {
 export const PAGE_SIGNALS = String.raw`(() => {
   const vis = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 40 && r.height > 40 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0'; };
   const frames = [...document.querySelectorAll('iframe')];
-  const challenge = frames.some((f) => /recaptcha\/(api2|enterprise)\/bframe|hcaptcha\.com.*(challenge|frame=challenge)|challenges\.cloudflare\.com/i.test(f.src || '') && vis(f))
+  // Bot checks: reCAPTCHA / hCaptcha challenges, Cloudflare, DataDome (captcha-delivery.com) — never bypassed.
+  const challenge = frames.some((f) => /recaptcha\/(api2|enterprise)\/bframe|hcaptcha\.com.*(challenge|frame=challenge)|challenges\.cloudflare\.com|captcha-delivery\.com|datadome/i.test(f.src || '') && vis(f))
     || [...document.querySelectorAll('.g-recaptcha, .h-captcha, .cf-turnstile, iframe[title*="challenge" i]')].some((e) => vis(e) && e.getBoundingClientRect().height > 60);
   const form = document.querySelector('form#application-form, form#application_form, form.application-form, form[data-qa="application-form"]');
   const shown = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };

@@ -411,7 +411,11 @@ const ADD_BUTTON = String.raw`((src) => {
   const btns = [...document.querySelectorAll('button, [role="button"], [data-automation-id="add-button"]')].filter((b) => vis(b) && (b.getAttribute('data-automation-id') === 'add-button' || /^add( another)?\b/i.test(clean(b.textContent)) || /^add\b/i.test(clean(b.getAttribute('aria-label')))));
   for (const b of btns) {
     const own = clean(b.getAttribute('aria-label') || b.textContent).replace(/^add( another)?\s*/i, '');
-    const owner = own && own.length > 2 ? own : headingOf(b);
+    // The section a bare "Add another" belongs to: its own label, the nearest heading above it, or the
+    // repeated block it sits in ("employment-form").
+    const blockOf = (x) => { const k = x.closest('[class*="employment" i], [id*="employment" i], [class*="education" i], [id*="education" i], [class*="experience" i], [class*="website" i], [class*="language" i]'); return k ? String(k.className || '') + ' ' + (k.id || '') : ''; };
+    const near = b.previousElementSibling ? blockOf(b.previousElementSibling.querySelector('*') || b.previousElementSibling) || blockOf(b.previousElementSibling) : '';
+    const owner = own && own.length > 2 ? own : [headingOf(b), blockOf(b), near].join(' ');
     if (re.test(owner)) { b.setAttribute('data-ca-add', '1'); return true; }
   }
   return false;

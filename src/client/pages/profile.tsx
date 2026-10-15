@@ -203,6 +203,8 @@ function ProfileEditor({ dto }: { dto: ProfileDTO }) {
               <Input aria-label={t("profile.institution")} placeholder={t("profile.institution")} value={e.institution ?? ""} onChange={(x) => upd("education", i, { institution: x.target.value || null })} />
               <Input aria-label={t("profile.country")} placeholder={t("profile.country")} value={e.country ?? ""} onChange={(x) => upd("education", i, { country: x.target.value || null })} />
               {sel(`pf-edu-done-${i}`, e.completed === false ? "no" : e.completed == null ? "unknown" : "yes", (v) => upd("education", i, { completed: fromTri(v) }), ["yes", "no", "unknown"], "profile.completed", t("profile.completedLabel"))}
+              <Input aria-label={t("profile.eduStart")} placeholder={t("profile.eduStart")} value={e.start ?? ""} onChange={(x) => upd("education", i, { start: x.target.value || null })} />
+              <Input aria-label={t("profile.eduEnd")} placeholder={t("profile.eduEnd")} value={e.end ?? ""} onChange={(x) => upd("education", i, { end: x.target.value || null })} />
               <div className="flex items-center gap-2">
                 <Input aria-label={t("profile.year")} placeholder={t("profile.year")} inputMode="numeric" value={e.year ?? ""} onChange={(x) => upd("education", i, { year: x.target.value ? Number(x.target.value) || null : null })} />
                 {removeBtn(() => del("education", i))}
@@ -465,7 +467,17 @@ function ApplicationDefaultsCard({ value: d, onChange }: { value: Defaults; onCh
                 ))}
               </NativeSelect>
             </Field>
+            <Field label={t("profile.defaults.preferred_contact_method")} htmlFor="pd-preferred_contact_method" hint={t("profile.defaults.preferredContactHelp")}>
+              <NativeSelect id="pd-preferred_contact_method" value={d.preferred_contact_method ?? "unknown"} onChange={(e) => up({ preferred_contact_method: e.target.value === "unknown" ? null : (e.target.value as Defaults["preferred_contact_method"]) })}>
+                {(["unknown", "email", "phone", "text"] as const).map((o) => (
+                  <option key={o} value={o}>
+                    {o === "unknown" ? t("profile.tri.unknown") : t(`profile.defaults.contactMethods.${o}`)}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
             {text("phone_country_code", "+1")}
+            {tri("accept_privacy_notices")}
             {text("source")}
           </>,
         )}

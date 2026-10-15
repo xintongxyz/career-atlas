@@ -8,6 +8,8 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { indeedRoute, newIndeedState, type IndeedFixtureState } from "./indeed-fixture";
 import { newWorkdayState, workdayRoute, type WorkdayFixtureState } from "./workday-fixture";
+import { dayforceRoute, newDayforceState, type DayforceFixtureState } from "./dayforce-fixture";
+import { patternsRoute } from "./patterns-fixture";
 
 export interface Submission {
   path: string;
@@ -23,6 +25,9 @@ export interface AtsFixture {
   hits: string[];
   workday: WorkdayFixtureState;
   indeed: IndeedFixtureState;
+  dayforce: DayforceFixtureState;
+  /** Sign-in outcomes on the SuccessFactors-like site ("ok" / "rejected"). */
+  sfSignIns: string[];
   close(): Promise<void>;
 }
 
@@ -237,11 +242,15 @@ export async function startAtsFixture(): Promise<AtsFixture> {
   const echoes: string[] = [];
   const hits: string[] = [];
   const workday = newWorkdayState();
+  const sfSignIns: string[] = [];
+  const dayforce = newDayforceState();
   const indeed = newIndeedState();
   const server: Server = createServer(async (req, res) => {
     const u = new URL(req.url ?? "/", "http://127.0.0.1");
     hits.push(`${req.method} ${u.pathname}`);
     if (await workdayRoute(req, res, u, workday)) return;
+    if (await dayforceRoute(req, res, u, dayforce)) return;
+    if (req.method !== "POST" && (await patternsRoute(req, res, u))) return;
     if (await indeedRoute(req, res, u, indeed)) return;
     const variant = u.searchParams.get("variant") ?? "";
     const html = (s: string, status = 200) => {
@@ -250,6 +259,22 @@ export async function startAtsFixture(): Promise<AtsFixture> {
     };
     const delay = Number(u.searchParams.get("delay") ?? 0);
     if (delay) await new Promise((r) => setTimeout(r, delay));
+
+    // SuccessFactors-like sign-in (before the generic form-post handler).
+
+    if (u.pathname === "/sf/api/signin" && req.method === "POST") {
+
+      const body = new URLSearchParams((await readBody(req)).toString("utf8"));
+
+      const ok = body.get("email") === "alex.rivera@example.test" && body.get("password") === "Synthetic-Pass-9!";
+
+      sfSignIns.push(ok ? "ok" : "rejected");
+
+      res.writeHead(303, { location: ok ? "/sf/form" : "/sf/careers?company=NORTHWIND&error=1", ...(ok ? { "set-cookie": "sf=1; Path=/" } : {}) });
+
+      return res.end();
+
+    }
 
     if (req.method === "POST") {
       const raw = await readBody(req);
@@ -276,6 +301,30 @@ export async function startAtsFixture(): Promise<AtsFixture> {
     if (/^\/lever\/[^/]+\/[0-9a-f-]{36}\/thanks$/.test(u.pathname)) return html(page("Thanks", "<h3>Application submitted!</h3><p>Thanks for applying to Northwind Analytics.</p>"));
     if (/^\/lever\/[^/]+\/[0-9a-f-]{36}\/apply$/.test(u.pathname)) return html(lever(u.pathname, variant));
     if (u.pathname === "/other/careers") return html(page("Careers", "<h1>Careers</h1><form><input name=q></form>"));
+    // SuccessFactors-like career site (pattern seen live on a 2026-10-15 posting): two "Apply now"
+    // controls (a hidden copy first), a redirect to a separate sign-in host page whose form is drawn
+    // by script a moment later, a candidate account required (no guest), then the application form.
+    if (u.pathname.startsWith("/sf/")) {
+      if (u.pathname === "/sf/job/1")
+        return html(page("Pricing Analyst", `<h1>Pricing Analyst (synthetic)</h1><div style="display:none"><a href="/sf/apply/1" role="button">Apply now</a></div><p>Fictional posting.</p><a href="/sf/apply/1" role="button">Apply now</a>`));
+      if (u.pathname === "/sf/apply/1") {
+        res.writeHead(302, { location: "/sf/careers?company=NORTHWIND" });
+        return res.end();
+      }
+      if (u.pathname === "/sf/careers")
+        return html(page("Career Opportunities: Sign In", `<div id="app"></div>`, `setTimeout(() => { document.getElementById('app').innerHTML = '<div role="dialog"><h2>Career Opportunities: Sign In</h2>' + (location.search.includes('error') ? '<p role="alert">Invalid email or password.</p>' : '') + '<form method="post" action="/sf/api/signin"><label for="e">Email Address:*</label><input id="e" name="email" type="text"><label for="p">Password:*</label><input id="p" name="password" type="password"><button type="submit">Sign In</button><a href="#create">Create an account</a></form></div>'; }, 1500);`));
+      if (u.pathname === "/sf/form") {
+        if (!/sf=1/.test(String(req.headers.cookie ?? ""))) {
+          res.writeHead(302, { location: "/sf/careers?company=NORTHWIND" });
+          return res.end();
+        }
+        return html(page("Application", `<form id="application-form" method="post" action="/sf/submit" enctype="multipart/form-data"><h1>Apply: Pricing Analyst</h1><div class="field"><label for="fn">First Name *</label><input id="fn" name="first_name" autocomplete="given-name" required></div><div class="field"><label for="ln">Last Name *</label><input id="ln" name="last_name" autocomplete="family-name" required></div><div class="field"><label for="em">Email *</label><input id="em" name="email" type="email" required></div><div class="field"><label for="cv">Resume *</label><input id="cv" name="resume" type="file" required></div><button type="submit">Submit</button></form>`));
+      }
+      if (u.pathname === "/sf/submit") {
+        submissions.push({ path: u.pathname, fields: {}, files: [] });
+        return html(page("Thank you", "<h1>Thank you for applying.</h1>"));
+      }
+    }
     if (u.pathname.startsWith("/custom/jobs/42")) {
       if (u.pathname.endsWith("/review")) echoes.push(u.search);
       return html(customApplication(u.pathname));
@@ -291,6 +340,8 @@ export async function startAtsFixture(): Promise<AtsFixture> {
     hits,
     workday,
     indeed,
+    dayforce,
+    sfSignIns,
     close: () => new Promise((r) => server.close(() => r())),
   };
 }

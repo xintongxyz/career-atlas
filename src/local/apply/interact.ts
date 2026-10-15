@@ -13,18 +13,65 @@ export async function scan(page: Page): Promise<FieldDescriptor[]> {
   return (await page.evaluate(SCAN_FIELDS)) as FieldDescriptor[];
 }
 
-export const OPTION_SEL = `.select__option, [role="option"], [id*="-option-"], ${WD_OPTION_SEL}`;
+export const OPTION_SEL = `.select__option, [role="option"], [id*="-option-"], .ant-select-item-option, .MuiAutocomplete-option, ${WD_OPTION_SEL}`;
+
+/**
+ * The clickable option among duplicates: component libraries often render each option twice (a
+ * visible item plus a hidden accessibility copy). Same text = same option; the visible item with the
+ * library's option class wins.
+ */
+async function bestOption(cands: Locator[]): Promise<Locator | null> {
+  if (!cands.length) return null;
+  for (const o of cands) {
+    const cls = String((await o.getAttribute("class", { timeout: 500 }).catch(() => "")) ?? "");
+    if (/ant-select-item-option|select__option|MuiAutocomplete-option|promptOption/.test(cls)) return o;
+  }
+  for (const o of cands) {
+    const box = await o.boundingBox().catch(() => null);
+    if (box && box.width > 4 && box.height > 4) return o;
+  }
+  return cands[0];
+}
 
 /** Visible options of an open menu (never the Workday "selectedItemList" chips). */
-export async function visibleOptions(page: Page): Promise<Locator[]> {
-  const loc = page.locator(OPTION_SEL).filter({ visible: true });
-  const out: Locator[] = [];
-  const n = await loc.count();
-  for (let i = 0; i < n; i++) {
-    const o = loc.nth(i);
-    if (await o.evaluate((e) => !e.closest('[data-automation-id="selectedItemList"]'), undefined, { timeout: 1000 }).catch(() => false)) out.push(o);
+/**
+ * The options currently shown, read in ONE page call (long lists — 250 countries — used to cost
+ * hundreds of round trips per read). Each option is tagged data-ca-opt="<n>" for clicking; chips of
+ * already-selected values are excluded. Options of closed (display:none) menus have no size and are
+ * skipped; options scrolled out of view inside an open list are kept.
+ */
+const READ_OPTIONS = (sel: string) => String.raw`(() => {
+  document.querySelectorAll('[data-ca-opt]').forEach((x) => x.removeAttribute('data-ca-opt'));
+  const out = [];
+  let i = 0;
+  for (const o of document.querySelectorAll(${JSON.stringify(sel)})) {
+    const r = o.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    const st = getComputedStyle(o);
+    if (st.visibility === 'hidden' || st.display === 'none') continue;
+    if (o.closest('[data-automation-id="selectedItemList"]')) continue;
+    const t = (o.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!t) continue;
+    o.setAttribute('data-ca-opt', String(i));
+    out.push({ i, t, cls: String(o.className || '') });
+    i++;
+    if (i >= 600) break;
   }
   return out;
+})()`;
+
+export interface ShownOption {
+  i: number;
+  t: string;
+  cls: string;
+}
+
+export async function readOptions(page: Page): Promise<ShownOption[]> {
+  return ((await page.evaluate(READ_OPTIONS(OPTION_SEL)).catch(() => [])) as ShownOption[]) ?? [];
+}
+
+export async function visibleOptions(page: Page): Promise<Locator[]> {
+  return (await readOptions(page)).map((o) => page.locator(`[data-ca-opt="${o.i}"]`));
 }
 
 /** Reads the options of comboboxes / listboxes (they exist only while the menu is open). */
@@ -106,12 +153,44 @@ export async function perform(page: Page, a: PlannedAction) {
         return;
       }
       if (a.control === "listbox") return chooseListbox(page, loc, a.values[0]);
-      if (a.control === "combobox") return pickOption(page, loc, a.values[0], (l) => l === norm(a.values[0]), 250);
+      if (a.control === "combobox") return comboPick(page, a, a.values[0], (labels) => labels.find((l) => norm(l) === norm(a.values[0])) ?? null);
       return;
-    case "search":
+    case "search": {
       // Only an unambiguous suggestion is taken (e.g. "Toronto, Ontario, Canada", not "Toronto, Ohio").
-      return pickOption(page, loc, a.value, (l) => a.match.every((m) => l.includes(norm(m))), 1500);
+      const fits = (l: string) => a.match.every((m) => norm(l).includes(norm(m)));
+      return comboPick(page, a, a.value, (labels) => {
+        const hits = [...new Set(labels.filter(fits).map((l) => l.trim()))];
+        const exact = hits.filter((l) => norm(l) === norm(a.value));
+        return exact.length === 1 ? exact[0] : hits.length === 1 ? hits[0] : null;
+      });
+    }
   }
+}
+
+/** Option text actually chosen for an action (verified on the page), by field key (refs change on re-render). */
+const picked = new Map<string, string>();
+
+/**
+ * A displayed value counts for the chosen option when it is that option, or the site's shortened
+ * form of it (a dialing-code select shows "🇨🇦 +1" for "🇨🇦 +1 Canada").
+ */
+export const shownMatches = (shown: string[], choice: string) => shown.some((v) => norm(v) === norm(choice) || (v.trim().length >= 2 && choice.includes(v.trim())));
+
+/**
+ * Searchable or read-only dropdowns of any component library: search → pick → verify (searchSelect);
+ * when typing is impossible or finds nothing, open the list and pick without typing (listSelect).
+ * The control is found again by ref, then by field key, so a re-render doesn't lose it.
+ */
+async function comboPick(page: Page, a: PlannedAction, query: string, decide: (labels: string[]) => string | null) {
+  const find: Finder = async () => {
+    const all = await scan(page);
+    const f = all.find((x) => x.ref === a.ref) ?? all.find((x) => x.visible && !x.group && fieldKey(x) === a.key);
+    return f ? { f, loc: page.locator(`[data-ca-ref="${f.ref}"]`) } : null;
+  };
+  const committed = (x: FieldDescriptor, p: string) => shownMatches(valuesOf(x), p);
+  let r = await searchSelect(page, find, { queries: [query], choose: decide, committed });
+  if (!r.ok) r = await listSelect(page, find, decide, committed);
+  if (r.ok) picked.set(a.key, r.picked[r.picked.length - 1]);
 }
 
 /**
@@ -205,12 +284,19 @@ export async function pickOption(page: Page, loc: Locator, text: string, fits: (
     await sleep(1200);
     opts = await visibleOptions(page);
   }
-  const hits: Locator[] = [];
-  for (const o of opts) if (fits(norm(await o.textContent({ timeout: 1000 })))) hits.push(o);
-  const exact: Locator[] = [];
-  for (const o of hits) if (norm(await o.textContent({ timeout: 1000 })) === norm(text)) exact.push(o);
-  const chosen = exact.length === 1 ? exact : hits.length === 1 ? hits : [];
-  if (chosen.length === 1) await chosen[0].click();
+  // Group by text: duplicates of one option (accessibility copies) are one choice, not ambiguity.
+  const byText = new Map<string, Locator[]>();
+  for (const o of opts) {
+    const t = norm(await o.textContent({ timeout: 1000 }).catch(() => ""));
+    if (t && fits(t)) byText.set(t, [...(byText.get(t) ?? []), o]);
+  }
+  const exactText = [...byText.keys()].filter((t) => t === norm(text));
+  const pickText = exactText.length === 1 ? exactText[0] : byText.size === 1 ? [...byText.keys()][0] : null;
+  const chosen = pickText ? await bestOption(byText.get(pickText)!) : null;
+  if (chosen) {
+    await chosen.scrollIntoViewIfNeeded().catch(() => {});
+    await chosen.click({ timeout: 4000 }).catch(() => chosen.click({ force: true, timeout: 4000 }));
+  }
   await sleep(150);
   // Ant Design keeps the menu open after Escape on the page. Focus the control, then Escape.
   await loc.press("Escape").catch(() => {});
@@ -244,10 +330,10 @@ export function verify(actions: PlannedAction[], after: FieldDescriptor[], resum
         break;
       }
       case "choose":
-        good = a.values.every((x) => list.includes(norm(x)));
+        good = a.values.every((x) => list.includes(norm(x))) || (picked.has(a.key) && shownMatches(valuesOf(f), picked.get(a.key)!));
         break;
       case "search":
-        good = list.some((x) => a.match.every((m) => x.includes(norm(m))));
+        good = list.some((x) => a.match.every((m) => x.includes(norm(m)))) || (picked.has(a.key) && shownMatches(valuesOf(f), picked.get(a.key)!));
         break;
     }
     if (good) ok.add(a.ref);
@@ -274,12 +360,7 @@ export const valuesOf = (f: FieldDescriptor | null | undefined): string[] => {
 
 /** Texts of the options currently shown (a menu, a prompt's suggestions). */
 export async function optionTexts(page: Page): Promise<string[]> {
-  const out: string[] = [];
-  for (const o of await visibleOptions(page)) {
-    const t = ((await o.textContent({ timeout: 1000 }).catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-    if (t && !out.includes(t)) out.push(t);
-  }
-  return out;
+  return [...new Set((await readOptions(page)).map((o) => o.t))];
 }
 
 async function waitOptions(page: Page, ms: number): Promise<string[]> {
@@ -300,18 +381,18 @@ async function waitOptions(page: Page, ms: number): Promise<string[]> {
 }
 
 async function clickOption(page: Page, label: string): Promise<boolean> {
-  for (const o of await visibleOptions(page)) {
-    if (norm(await o.textContent({ timeout: 1000 }).catch(() => "")) === norm(label)) {
-      await o.scrollIntoViewIfNeeded().catch(() => {});
-      await o.click({ timeout: 4000 }).catch(() => o.click({ force: true, timeout: 4000 }));
-      return true;
-    }
-  }
-  return false;
+  const same = (await readOptions(page)).filter((o) => norm(o.t) === norm(label));
+  if (!same.length) return false;
+  // Several copies of one option (a visible item and an accessibility copy): the library's item wins.
+  const best = same.find((o) => /ant-select-item-option|select__option|MuiAutocomplete-option|promptOption/.test(o.cls)) ?? same[0];
+  const o = page.locator(`[data-ca-opt="${best.i}"]`);
+  await o.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+  await o.click({ timeout: 4000 }).catch(() => o.click({ force: true, timeout: 4000 }));
+  return true;
 }
 
 async function closeMenu(page: Page, input?: Locator) {
-  if (input && (await input.inputValue({ timeout: 1000 }).catch(() => ""))) await input.fill("").catch(() => {});
+  if (input && (await input.isEditable({ timeout: 500 }).catch(() => false)) && (await input.inputValue({ timeout: 1000 }).catch(() => ""))) await input.fill("", { timeout: 2000 }).catch(() => {});
   await page.keyboard.press("Escape").catch(() => {});
   await sleep(120);
 }
@@ -350,14 +431,20 @@ export async function searchSelect(
     await o.guard?.();
     const t = await find();
     if (!t) return { ok: false, picked: [], seen, reason: "no_control" };
+    // Disabled (e.g. State before Country): nothing to do yet. Read-only (a plain dropdown): open it
+    // and choose from the list without typing.
+    if (await t.loc.isDisabled({ timeout: 500 }).catch(() => false)) return { ok: false, picked: [], seen, reason: "no_control" };
+    const typeable = await t.loc.isEditable({ timeout: 500 }).catch(() => false);
     await t.loc.click({ timeout: 5000 }).catch(() => t.loc.click({ force: true, timeout: 5000 }).catch(() => {}));
-    await t.loc.fill("").catch(() => {});
-    await t.loc.fill(query).catch(async () => {
-      await t.loc.pressSequentially(query, { delay: 20 }).catch(() => {});
-    });
+    if (typeable) {
+      await t.loc.fill("", { timeout: 2000 }).catch(() => {});
+      await t.loc.fill(query, { timeout: 2000 }).catch(async () => {
+        await t.loc.pressSequentially(query, { delay: 20, timeout: 5000 }).catch(() => {});
+      });
+    }
     let labels = await waitOptions(page, 2500);
-    if (!labels.length) {
-      await t.loc.press("Enter").catch(() => {}); // prompts that search on Enter
+    if (!labels.length && typeable) {
+      await t.loc.press("Enter", { timeout: 2000 }).catch(() => {}); // prompts that search on Enter
       labels = await waitOptions(page, 4000);
     }
     for (const l of labels) if (!seen.includes(l)) seen.push(l);
@@ -378,9 +465,9 @@ export async function searchSelect(
         const again = await find();
         if (!again) break;
         await again.loc.click({ timeout: 4000 }).catch(() => {});
-        await again.loc.fill(pick).catch(() => {});
+        if (typeable) await again.loc.fill(pick, { timeout: 2000 }).catch(() => {});
         await waitOptions(page, 2500);
-        if (!(await clickOption(page, pick))) await again.loc.press("Enter").catch(() => {});
+        if (!(await clickOption(page, pick)) && typeable) await again.loc.press("Enter", { timeout: 2000 }).catch(() => {});
       }
       const ok = await until(3000, async () => {
         const now = await find();
@@ -467,6 +554,7 @@ export async function browseSelect(
 export async function listSelect(page: Page, find: Finder, choose: (labels: string[]) => string | null, committed?: (f: FieldDescriptor, picked: string) => boolean): Promise<PickResult> {
   const t = await find();
   if (!t) return { ok: false, picked: [], seen: [], reason: "no_control" };
+  if (await t.loc.isDisabled({ timeout: 500 }).catch(() => false)) return { ok: false, picked: [], seen: [], reason: "no_control" };
   let labels: string[];
   if (t.f.control === "select" || t.f.control === "radio") labels = t.f.options.map((x) => x.label).filter((l) => !/^(select|choose|--)/i.test(l));
   else {
@@ -555,4 +643,167 @@ export async function dateSet(page: Page, find: Finder, value: { month?: string;
     const x = await find();
     return !!x && holds(x.f);
   });
+}
+
+// ---------------------------------------------------------------- interruptions
+
+export type NoticeOutcome = { kind: "none" } | { kind: "dismissed"; button: string; text: string } | { kind: "consent"; text: string; checkbox: boolean } | { kind: "form" };
+
+/**
+ * Open dialogs, read from the page (not from a site list):
+ *  - a routine informational notice ("I understand", "Got it", "Close", resume-upload confirmations,
+ *    "section saved") → acknowledged;
+ *  - "leave this page / unsaved changes" → stay;
+ *  - anything that asks for consent or a declaration (checkboxes, "I agree", certify, background
+ *    check, terms, privacy notice consent) → reported, never clicked here;
+ *  - a dialog that is itself a form → left to the form logic.
+ */
+export const OPEN_DIALOGS = String.raw`(() => {
+  const vis = (e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return r.width > 20 && r.height > 20 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0'; };
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const sel = '[role="dialog"], [role="alertdialog"], [aria-modal="true"], .ant-modal, .modal.show, .MuiDialog-paper, .ReactModal__Content';
+  const out = [];
+  document.querySelectorAll('[data-ca-dlg]').forEach((x) => x.removeAttribute('data-ca-dlg'));
+  let n = 0;
+  for (const d of document.querySelectorAll(sel)) {
+    if (!vis(d) || d.closest('[data-ca-seen]') || out.some((o) => o.el.contains(d))) continue;
+    const inputs = [...d.querySelectorAll('input:not([type=hidden]), select, textarea')].filter(vis);
+    const checkbox = inputs.some((i) => i.type === 'checkbox');
+    const buttons = [...d.querySelectorAll('button, [role="button"], a[role="button"]')].filter(vis).map((b) => { n++; b.setAttribute('data-ca-dlg', 'd' + n); return { ref: 'd' + n, text: clean(b.getAttribute('aria-label') || b.innerText) }; });
+    out.push({ el: d, text: clean(d.innerText).slice(0, 1500), checkbox, fields: inputs.filter((i) => i.type !== 'checkbox' && i.type !== 'radio').length, buttons });
+  }
+  return out.map(({ el, ...rest }) => rest);
+})()`;
+
+const ACK_RE = /^(ok|okay|got it|i understand|understood|close|dismiss|continue|acknowledged?|i acknowledge|i have read( this| the)?( information| notice)?|yes,? continue|proceed|return to (the )?application|×|x)$/i;
+const STAY_RE = /^(stay|stay on (this )?page|cancel|no|keep editing|go back)$/i;
+const LEAVE_RE = /leave (this )?(page|site)|unsaved changes|changes (you made )?(may|will) not be saved|discard (your )?changes/i;
+const BINDING_RE = /\b(i (hereby )?(agree|consent|certify|attest|declare|authori[sz]e)|terms (and|&) conditions|terms of (use|service)|consent|certif|attest|background (check|screening)|drug (test|screen)|signature|e-?sign|arbitration|non-?compete|true,? (accurate|correct) and complete|authori[sz]e .*(contact|verify|release))\b/i;
+
+export async function handleNotices(page: Page): Promise<NoticeOutcome[]> {
+  const out: NoticeOutcome[] = [];
+  for (let round = 0; round < 3; round++) {
+    const dialogs = (await page.evaluate(OPEN_DIALOGS).catch(() => [])) as { text: string; checkbox: boolean; fields: number; buttons: { ref: string; text: string }[] }[];
+    if (!dialogs.length) break;
+    let acted = false;
+    for (const d of dialogs) {
+      if (d.fields > 0) {
+        out.push({ kind: "form" });
+        continue;
+      }
+      if (LEAVE_RE.test(d.text)) {
+        const stay = d.buttons.find((b) => STAY_RE.test(b.text));
+        if (stay) {
+          await page.locator(`[data-ca-dlg="${stay.ref}"]`).click({ timeout: 4000 }).catch(() => {});
+          out.push({ kind: "dismissed", button: stay.text, text: d.text.slice(0, 200) });
+          acted = true;
+        }
+        continue;
+      }
+      if (d.checkbox || BINDING_RE.test(d.text)) {
+        out.push({ kind: "consent", text: d.text.slice(0, 600), checkbox: d.checkbox });
+        continue;
+      }
+      const ack = d.buttons.find((b) => ACK_RE.test(b.text));
+      if (ack) {
+        await page.locator(`[data-ca-dlg="${ack.ref}"]`).click({ timeout: 4000 }).catch(() => {});
+        await sleep(400);
+        out.push({ kind: "dismissed", button: ack.text, text: d.text.slice(0, 200) });
+        acted = true;
+      }
+    }
+    if (!acted) break;
+  }
+  return out;
+}
+
+/**
+ * Sections that keep edits only after their own Save / Update button (cards, inline editors): press
+ * each visible one once — never a page-level Next / Submit / Save and Continue.
+ */
+export async function commitOpenSections(page: Page): Promise<number> {
+  const marked = (await page
+    .evaluate(String.raw`(() => {
+      const vis = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      document.querySelectorAll('[data-ca-commit]').forEach((x) => x.removeAttribute('data-ca-commit'));
+      let n = 0;
+      for (const b of document.querySelectorAll('button, [role="button"]')) {
+        const t = (b.innerText || b.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+        if (!vis(b) || !/^(update|save)$/i.test(t) || b.disabled) continue;
+        if (b.closest('footer, [class*="footer"], [data-automation-id="pageFooter"], [role="dialog"]')) continue;
+        // Only a button that sits in a block of its own form fields (an inline section editor).
+        let a = b.parentElement, ok = false;
+        // Layout libraries nest a button deeply (Ant: 6+ wrappers); the nearest block with fields is its section.
+        for (let d = 0; a && d < 14 && a !== document.body; d++, a = a.parentElement) { if ([...a.querySelectorAll('input:not([type=hidden]), textarea')].some(vis)) { ok = true; break; } }
+        if (!ok) continue;
+        n++; b.setAttribute('data-ca-commit', String(n));
+      }
+      return n;
+    })()`)
+    .catch(() => 0)) as number;
+  for (let i = 1; i <= marked; i++) {
+    await page.locator(`[data-ca-commit="${i}"]`).click({ timeout: 4000 }).catch(() => {});
+    await sleep(500);
+  }
+  return marked;
+}
+
+// ---------------------------------------------------------------- navigation-safe page reads
+
+const NAV_RACE = /Execution context was destroyed|Cannot find context with specified id|frame was detached|Frame was detached|Navigation interrupted|context or browser has been closed.*navigat/i;
+
+/**
+ * Makes every page.evaluate on this page survive the site navigating at that moment (a redirect
+ * after Apply, a step change after Next): wait for the new document and read it again, a few times.
+ * Applied once per page (tabs opened later included), so every reader benefits — not one site.
+ */
+export function navigationSafe(page: Page): Page {
+  const p = page as Page & { __caSafe?: boolean };
+  if (p.__caSafe) return page;
+  p.__caSafe = true;
+  const orig = page.evaluate.bind(page) as (...a: unknown[]) => Promise<unknown>;
+  (page as unknown as { evaluate: (...a: unknown[]) => Promise<unknown> }).evaluate = async (...args: unknown[]) => {
+    for (let i = 0; ; i++) {
+      try {
+        return await orig(...args);
+      } catch (e) {
+        if (i >= 6 || page.isClosed() || !NAV_RACE.test(String((e as Error)?.message ?? e))) throw e;
+        await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+        await sleep(300 + i * 200);
+      }
+    }
+  };
+  return page;
+}
+
+/**
+ * Work inside an embedded frame (a form hosted in an iframe — iCIMS and many company sites) with the
+ * same tools as a page: reads, locators and roles go to the frame; keyboard, mouse, screenshots,
+ * events and the tab itself stay with the real page. Reads are navigation-safe like a page's.
+ */
+export function frameView(page: Page, frame: import("playwright-core").Frame): Page {
+  const fromFrame = new Set(["evaluate", "locator", "getByRole", "getByText", "getByLabel", "getByPlaceholder", "url", "waitForLoadState", "goto", "content", "title", "$", "$$", "waitForSelector", "waitForTimeout"]);
+  const evalSafe = async (...args: unknown[]) => {
+    for (let i = 0; ; i++) {
+      try {
+        return await (frame.evaluate as (...a: unknown[]) => Promise<unknown>)(...args);
+      } catch (e) {
+        if (i >= 6 || page.isClosed() || !NAV_RACE.test(String((e as Error)?.message ?? e))) throw e;
+        await frame.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+        await sleep(300 + i * 200);
+      }
+    }
+  };
+  return new Proxy(page, {
+    get(target, prop, receiver) {
+      if (prop === "evaluate") return evalSafe;
+      if (prop === "__caFrame") return frame;
+      if (typeof prop === "string" && fromFrame.has(prop)) {
+        const v = (frame as unknown as Record<string, unknown>)[prop];
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(frame) : v;
+      }
+      const v = Reflect.get(target, prop, receiver);
+      return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    },
+  }) as Page;
 }

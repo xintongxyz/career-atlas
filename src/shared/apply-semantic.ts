@@ -28,7 +28,7 @@ export const norm = (s: string | null | undefined) =>
 
 // ---------------------------------------------------------------- option domains
 
-export type OptionDomain = "yes_no" | "phone_type" | "country" | "region" | "degree" | "generic";
+export type OptionDomain = "yes_no" | "phone_type" | "country" | "region" | "degree" | "contact_method" | "generic";
 
 type Concept = { id: string; aliases: RegExp };
 const c = (id: string, aliases: RegExp): Concept => ({ id, aliases });
@@ -47,34 +47,57 @@ const YES_NO: Concept[] = [
   c("no", /^(no|n|false|negative|non|否)( i (am|do|have|will|can|would) not| i (havent|dont|wont|cant|wouldnt|m not|am not))?$/),
 ];
 
+// Names in English, ISO codes, and Chinese (My Profile may be written in either language).
 const COUNTRIES: Concept[] = [
-  c("canada", /^(canada|ca|can|canadian address)$/),
-  c("united states", /^(united states( of america)?|usa|us|u s( a)?|america)$/),
-  c("united kingdom", /^(united kingdom|uk|gb|great britain|england)$/),
-  c("china", /^(china|cn|chn|peoples republic of china|china mainland|mainland china|prc)$/),
-  c("india", /^(india|in|ind)$/),
-  c("france", /^(france|fr|fra)$/),
-  c("germany", /^(germany|de|deu)$/),
-  c("australia", /^(australia|au|aus)$/),
-  c("mexico", /^(mexico|mx|mex)$/),
+  c("canada", /^(canada|ca|can|canadian address|加拿大)$/),
+  c("united states", /^(united states( of america)?|usa|us|u s( a)?|america|美国|美利坚合众国)$/),
+  c("united kingdom", /^(united kingdom|uk|gb|great britain|england|英国|大不列颠)$/),
+  c("china", /^(china|cn|chn|peoples republic of china|china mainland|mainland china|prc|中国|中华人民共和国|中国大陆)$/),
+  c("india", /^(india|in|ind|印度)$/),
+  c("france", /^(france|fr|fra|法国)$/),
+  c("germany", /^(germany|de|deu|德国)$/),
+  c("australia", /^(australia|au|aus|澳大利亚|澳洲)$/),
+  c("mexico", /^(mexico|mx|mex|墨西哥)$/),
+  c("hong kong", /^(hong kong|hk|hkg|香港)$/),
+  c("taiwan", /^(taiwan|tw|twn|台湾)$/),
+  c("singapore", /^(singapore|sg|sgp|新加坡)$/),
+  c("japan", /^(japan|jp|jpn|日本)$/),
+  c("south korea", /^(south korea|korea|republic of korea|kr|kor|韩国)$/),
 ];
 
-const PROVINCES: [string, string][] = [
-  ["alberta", "ab"],
-  ["british columbia", "bc"],
-  ["manitoba", "mb"],
-  ["new brunswick", "nb"],
-  ["newfoundland and labrador", "nl"],
-  ["northwest territories", "nt"],
-  ["nova scotia", "ns"],
-  ["nunavut", "nu"],
-  ["ontario", "on"],
-  ["prince edward island", "pe"],
-  ["quebec", "qc"],
-  ["saskatchewan", "sk"],
-  ["yukon", "yt"],
+const COUNTRY_NAME: Record<string, string> = { canada: "Canada", "united states": "United States", "united kingdom": "United Kingdom", china: "China", india: "India", france: "France", germany: "Germany", australia: "Australia", mexico: "Mexico", "hong kong": "Hong Kong", taiwan: "Taiwan", singapore: "Singapore", japan: "Japan", "south korea": "South Korea" };
+
+/**
+ * The English name to search for on a form, for a country written any known way ("加拿大", "CA",
+ * "Canada" → "Canada"). Unknown spellings are returned unchanged (never guessed).
+ */
+export function englishCountry(value: string): string {
+  const ids = conceptsOf("country", value);
+  return ids.length === 1 && COUNTRY_NAME[ids[0]] ? COUNTRY_NAME[ids[0]] : value.trim();
+}
+
+const PROVINCES: [string, string, string][] = [
+  ["alberta", "ab", "阿尔伯塔省?|艾伯塔省?"],
+  ["british columbia", "bc", "不列颠哥伦比亚省?|卑诗省?"],
+  ["manitoba", "mb", "曼尼托巴省?"],
+  ["new brunswick", "nb", "新不伦瑞克省?"],
+  ["newfoundland and labrador", "nl", "纽芬兰与拉布拉多省?"],
+  ["northwest territories", "nt", "西北地区"],
+  ["nova scotia", "ns", "新斯科舍省?"],
+  ["nunavut", "nu", "努纳武特地区"],
+  ["ontario", "on", "安大略省?"],
+  ["prince edward island", "pe", "爱德华王子岛省?"],
+  ["quebec", "qc", "魁北克省?"],
+  ["saskatchewan", "sk", "萨斯喀彻温省?"],
+  ["yukon", "yt", "育空地区"],
 ];
-const REGIONS: Concept[] = PROVINCES.map(([name, code]) => c(name, new RegExp(`^(${name}|${code}|${name} \\(${code}\\)|${code} ${name}|${name} ${code})$`)));
+const REGIONS: Concept[] = PROVINCES.map(([name, code, zh]) => c(name, new RegExp(`^(${name}|${code}|${name} \\(${code}\\)|${code} ${name}|${name} ${code}|${zh})$`)));
+
+/** English name of a Canadian province / territory written any known way; unknown → unchanged. */
+export function englishRegion(value: string): string {
+  const ids = conceptsOf("region", value);
+  return ids.length === 1 ? ids[0].replace(/\b\w/g, (m) => m.toUpperCase()).replace(/\bAnd\b/, "and") : value.trim();
+}
 
 const DEGREES: Concept[] = [
   c("high_school", /^(high school( diploma)?|secondary( school)?( diploma)?|ged|high school or equivalent)$/),
@@ -84,7 +107,14 @@ const DEGREES: Concept[] = [
   c("doctorate", /^(doctorate|doctoral( degree)?|phd|ph d|doctor of philosophy)$/),
 ];
 
-const DOMAINS: Record<Exclude<OptionDomain, "generic">, Concept[]> = { yes_no: YES_NO, phone_type: PHONE_TYPES, country: COUNTRIES, region: REGIONS, degree: DEGREES };
+// "Preferred contact method" options. "Phone" never covers "Text" and vice versa.
+const CONTACT_METHODS: Concept[] = [
+  c("email", /^(e ?mail|e ?mail address|electronic mail|by e ?mail|via e ?mail|contact me (by|via) e ?mail|e ?mail me)$/),
+  c("phone", /^(phone|telephone|phone call|call|by phone|by telephone|contact me by phone|call me|voice)$/),
+  c("text", /^(text|sms|text message|text messaging|by text|by sms|contact me by text|text me)$/),
+];
+
+const DOMAINS: Record<Exclude<OptionDomain, "generic">, Concept[]> = { yes_no: YES_NO, phone_type: PHONE_TYPES, country: COUNTRIES, region: REGIONS, degree: DEGREES, contact_method: CONTACT_METHODS };
 
 /** The concept(s) a phrase belongs to within a domain. */
 export function conceptsOf(domain: OptionDomain, text: string): string[] {
@@ -151,6 +181,7 @@ export function matchOptionSemantic(options: FieldOption[], answer: string, doma
 /** Which option domain a field's label implies. */
 export function domainForLabel(label: string, semantic?: string): OptionDomain {
   const l = norm(label);
+  if (semantic === "contact_method" || /preferred contact type|preferred (method of |means of |way of |mode of )?(contact|communication)|contact (method|preference)|(method|way|means) (of|to) (contact|reach)|how (would|should|do) (you (like|prefer) (us to|us|to be)|we) (contact|reach)/.test(l)) return "contact_method";
   if (semantic === "phone_country" || /phone (device )?type|type of phone|phone type/.test(l)) return /country|code/.test(l) ? "country" : "phone_type";
   if (semantic === "country" || /^country\b|country (of|code|region)?$/.test(l)) return "country";
   if (semantic === "region" || /^(state|province|region|territory)|province or territory|state province/.test(l)) return "region";
@@ -200,6 +231,7 @@ export type Meaning =
   | "criminal_record"
   | "references"
   | "source"
+  | "contact_method"
   | "motivation"
   | "identity"
   | "legal"
@@ -276,6 +308,7 @@ const RULES: { meaning: Meaning; re: RegExp; not?: RegExp; sensitivity?: Sensiti
   { meaning: "language", re: /\b(speak|fluen|proficien|bilingual|language)\b/ },
   { meaning: "references", re: /\breferences?\b/, not: /referr/ },
   { meaning: "source", re: /\bhow did you (hear|find|learn)|\bwhere did you (hear|find|learn|see)|\bsource\b/ },
+  { meaning: "contact_method", re: /\bpreferred contact type\b|\bpreferred (method of |means of |way of |mode of )?(contact|communication)\b|\bcontact (method|preference)\b|\b(method|way|means) (of|to) (contact|reach)\b|\bhow (would|should|do) (you (like|prefer) (us to|us|to be)|we) (contact|reach)/ },
   { meaning: "motivation", re: /\bwhy (do you|are you)|cover letter|tell us|describe|what interests/ },
 ];
 
