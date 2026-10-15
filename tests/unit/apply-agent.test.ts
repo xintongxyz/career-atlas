@@ -19,6 +19,9 @@ const fields = [
   f({ ref: "f6", label: "Are you legally eligible to work in Canada?", control: "radio", options: [{ label: "Yes", value: "y" }, { label: "No", value: "n" }] as FieldDescriptor["options"] }),
 ];
 const obs: AgentObservation = {
+  goal: 'Apply for "Analyst" at Northwind',
+  page_state: "application",
+  widgets: [],
   url: "https://careers.example.test/apply",
   title: "Apply",
   headings: [],
@@ -34,6 +37,11 @@ const obs: AgentObservation = {
     { ref: "b4", text: "Continue as guest" },
     { ref: "b5", text: "Send my application" },
     { ref: "b6", text: "Sign in" },
+    { ref: "b7", text: "Submit", area: "subscription" },
+    { ref: "b8", text: "Search", area: "search" },
+    { ref: "b9", text: "Accept All Cookies", area: "cookie" },
+    { ref: "b10", text: "Reject All", area: "cookie" },
+    { ref: "b11", text: "Get updates", area: "subscription" },
   ],
 };
 const ctx: ValidationContext = { obs, fields, profile, employer: null };
@@ -50,6 +58,13 @@ describe("browser agent: trusted validation", () => {
   it("never clicks the final submit button, whatever it is called", () => {
     expect(v({ action: "click", ref: "b2" })).toMatch(/final submit/);
     expect(v({ action: "click", ref: "b5" })).toMatch(/final submit/);
+  });
+  it("never acts on site widgets (search, job alerts) and picks only private cookie choices", () => {
+    expect(v({ action: "click", ref: "b11" })).toMatch(/job-alert/);
+    expect(v({ action: "click", ref: "b8" })).toMatch(/job search/);
+    expect(v({ action: "click", ref: "b7" })).toMatch(/job-alert|final submit/);
+    expect(v({ action: "dismiss_dialog", ref: "b9" })).toMatch(/cookie/);
+    expect(v({ action: "dismiss_dialog", ref: "b10" })).toBeNull();
   });
   it("never creates accounts or signs in, and never touches passwords", () => {
     expect(v({ action: "click", ref: "b3" })).toMatch(/accounts/);

@@ -156,6 +156,8 @@ export const SCAN_FIELDS = String.raw`(() => {
     if (el.closest('[data-automation-id="beecatcher"]') || el.getAttribute('data-automation-id') === 'beecatcher') continue;
     if (el.closest('[data-automation-id="signInContent"], form[data-automation-id^="signInForm"]')) continue;
     if (el.closest('[data-automation-id="selectedItemList"]')) continue;
+    // Not part of the application: site search, job-alert sign-ups, cookie banners, site chrome (page-intent.ts).
+    if (el.closest('[data-ca-outside]')) continue;
     // Ant Design marks searchable selects read-only until they open. They are still fields.
     // A disabled control (for example State before Country) stays skipped until it is enabled.
     if (el.disabled) continue;

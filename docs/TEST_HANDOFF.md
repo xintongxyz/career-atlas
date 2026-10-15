@@ -223,3 +223,70 @@ An earlier version looped on the same question until the step limit; fixed (aske
 1. Reproduce: `npx vitest run tests/unit/apply-agent.test.ts tests/integration/apply-agent.test.ts`; live (owner's ChatGPT sign-in, synthetic only): `CA_LIVE_CODEX=1 CA_AGENT_EVIDENCE=/tmp/agent.jsonl npx vitest run tests/integration/apply-agent-live.test.ts`.
 2. Trace a run: `CA_APPLY_DEBUG=1` prints `AGENT {step, url, counts, proposal}` lines (structure only).
 3. Not done: date pickers and multi-select tag inputs as agent actions; frames (the agent works on the current page / frame view only); real-site runs. Do not add sign-in, account creation, e-mail codes or Submit to the agent — those stay in the dedicated, owner-authorised flows.
+
+## 18. Page intent (a posting is not a form) — critical fix, 2026-10-15
+
+**Failure (real, employer H, review mode).** Career Atlas did not click the posting's
+prominent "Apply now". It filled the sidebar "Get notified for similar jobs" e-mail (recorded as "Email address —
+filled and verified, 1 of 1") and paused at **Ready to submit**: the sidebar's "Submit" had been taken for the
+application's final Submit. Approving would have subscribed the owner to job alerts. GPT was never asked.
+
+**Root causes (reproduced from the attempt record and the live page's structure).**
+1. `PAGE_CONTROLS` counted every input outside header/nav/footer as an application field; the alert e-mail
+   (`type=email`) made the posting look like a form, so `decideNavigation` chose *fill* instead of Apply.
+2. `fillPage` acted on the whole page (and opened comboboxes to read options — the footer job search).
+3. `decideAdvance` treated any button named "Submit" as the final step; `submitButton()` matched the
+   sidebar's; `reviewPage` → `submitGate` → `submit_approval` ("ready to submit").
+4. The GPT agent ran only after the rules gave up (`agentOrStop`), never on this page.
+
+**Fix (general, no site rules).**
+- `src/local/apply/page-intent.ts` — `PAGE_MAP` reads the page's structure and marks widgets
+  (`data-ca-outside`): site **search** (search-typed or a one/two-field box with its own Search/Find),
+  **subscription** (an e-mail box, at most with a name, that talks about alerts / newsletters, sits in a
+  sidebar, or is the only field of its own small form on a page that still offers Apply), **cookie**
+  banners, page-level **chrome**. Guards: never a box holding the page's h1 or an Apply control, never a
+  control whose neighbourhood holds applicant fields, never inside a large form; an application's own
+  footer (with Next) is not chrome. The scanner skips marked controls, so the filler, the option reader,
+  rows and verification cannot touch them.
+- `pageState`: **posting** (Apply offered, no application evidence) · **application** (≥ 2 applicant meanings
+  or a resume upload) · **questions** (fields after entering the workflow, or step markers) · **login** ·
+  **unknown**. A lone e-mail is never an application.
+- `genericFlow` order: observe + purpose → milestones → cookie / guest / sign-in / CAPTCHA (fixed rules) →
+  on **posting / unknown** pages the **GPT agent decides** the next step (one validated, verified action;
+  refused proposals are fed back) → fixed Apply rule as fallback → **fill only inside the application** →
+  Next inside it → final step.
+- Milestones recorded as steps: `posting_identified`, `apply_clicked`, `application_entered` (verified on the
+  next page), `form_found`, `review_reached`. `reviewPage` fails closed without `form_found`
+  (`still_on_posting` / `application_form_not_found`), and clicks only the Submit marked by `MARK_SUBMIT`:
+  outside widgets, in the form that holds the applicant's fields (hidden earlier steps count), explicit
+  "… application" wording preferred; none → `submit_not_in_application`, several forms → `submit_ambiguous`.
+- Agent: observation now carries `goal` (job title, employer), `page_state`, `widgets`, and each button's
+  `area`; `validate()` refuses search / subscription controls and non-private cookie choices; the resume
+  upload counts only when the page shows the file.
+
+**Tests.** `tests/fixtures/posting-fixture.ts` (synthetic posting with Apply now, Save job, alert sign-up +
+Submit, similar jobs, typeahead search; multi-step application with submit-typed Next) and
+`tests/integration/apply-posting-intent.test.ts`: variants sidebar-first, search-first, late-apply, newtab,
+redirect, iframe, multi-submit (newsletter + feedback Submit on the application), dead Apply
+(`still_on_posting`), unfamiliar wording without AI (not filled, not ready) and with the agent (widget
+proposals refused), and the original case through approval (only the application is posted). The main case
+**fails on the previous engine** (it reached `submit_approval`) and passes now. Unit: `apply-page-intent.test.ts`.
+
+**Real GPT evidence (sanitized).**
+- Synthetic posting (`apply-agent-live.test.ts`): page_state *posting*, widgets *subscription: Get notified for
+  similar jobs*, *search: Find your next job.* → reasoning "This is the Product Analyst posting, and Apply now
+  starts its application." → click Apply now → `application_entered`, `form_found`; widget events: none. Same
+  with "I'm interested" wording.
+- **Real posting of employer H** (`apply-posting-probe-live.test.ts`, navigation only, empty profile, nothing typed):
+  OBSERVATION page_state *posting*; widgets *subscription: Get notified for similar jobs* (e-mail + Submit +
+  Manage Alerts), *search: Global search*, cookie link, header / footer chrome; Apply candidates: "Apply Now
+  <job title>". REASONING "The page is the target job posting, and 'Apply Now' starts its application."
+  ACTION click Apply Now — allowed. VERIFICATION page changed → the site's own application page, read as
+  *application* (19 fields: resume, first / last name, address, postal code, e-mail, phone). Stopped there.
+
+**Not done / blocked.**
+- Full real run of employer H from the owner's app: the old faulty attempt (paused at "ready to submit") blocks
+  a new one and must be **cancelled by the owner** in the app (cancelling it from the development session was
+  refused by the session's safety check — owner data). Then: Start application, review mode, no account.
+- Cookie banners offering only "Accept all" / "Manage settings" are left alone (no privacy-preserving choice);
+  a banner that blocks clicks would need the owner.

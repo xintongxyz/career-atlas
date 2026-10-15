@@ -96,45 +96,36 @@ describe.skipIf(!ready)("runtime browser agent (synthetic unfamiliar site)", () 
     expect(fx.submissions.filter((s) => s.path === "/pat/agent/1/submit")).toEqual([]);
   }, 240_000);
 
-  it("observe → propose → validate → act → verify: reaches Submit, refuses forbidden actions, never submits on its own", async () => {
+  it("GPT opens the unfamiliar application; Career Atlas fills it, asks once, gets past an odd step, refuses forbidden actions, submits only on approval", async () => {
     const log = { sent: [] as string[], proposals: [] as Record<string, unknown>[], results: [] as string[] };
     agentHook.propose = scripted(log);
+    // 1. "I'm interested" is chosen by the model (no Apply button); the application form is then filled by
+    //    Career Atlas from My Profile; the office is not in the profile → asked with the site's own wording.
     let a = await run("/pat/agent/1", "Agent");
-    const codes = a.steps.map((s) => s.code);
-    expect(codes).toEqual(expect.arrayContaining(["agent_started", "agent_proposed", "agent_verified", "agent_refused", "agent_finished"]));
+    expect(a.steps.map((s) => s.code)).toEqual(expect.arrayContaining(["page_assessed", "apply_clicked", "application_entered", "form_found"]));
+    expect(a).toMatchObject({ state: "needs_review", intervention: "missing_information" });
+    const q = a.questions.find((x) => /office/i.test(x.label))!;
+    expect(q).toMatchObject({ label: "Which office are you applying to? *", required: true });
+    expect(q.options).toEqual(expect.arrayContaining(["Toronto", "Montreal"]));
+    expect(a.filled.filter((f) => f.verified).map((f) => f.label)).toEqual(expect.arrayContaining(["Given name *", "Family name *", "E-mail address *"]));
+    // 2. Answered → resumed: the unfamiliar "Onward" step is handled by the agent; identity and Submit refused.
+    await api(`/api/apply/attempts/${a.id}/answers`, { method: "POST", json: { answers: { [q.key]: "Toronto" }, remember: [] } });
+    a = await settled(a.id);
+    expect(a.steps.map((s) => s.code)).toEqual(expect.arrayContaining(["agent_started", "agent_verified", "agent_refused", "review_reached"]));
     expect(a).toMatchObject({ state: "needs_review", intervention: "submit_approval" });
-    // Values came from My Profile through Career Atlas and were verified on the page.
-    expect(a.filled.filter((f) => f.source.startsWith("agent:") && f.verified).length).toBeGreaterThanOrEqual(3);
-    // Both forbidden proposals were refused by Career Atlas, and the model was told why.
     expect(log.results.some((r) => /^REFUSED: identity questions/.test(r))).toBe(true);
     expect(log.results.some((r) => /^REFUSED: the final submit button/.test(r))).toBe(true);
     // The model never saw the applicant's values — only labels, states and which facts exist.
     const sent = log.sent.join("\n");
     for (const v of ["Alex", "Rivera", "alex.rivera@example.test", "Resume_Alex"]) expect(sent).not.toContain(v);
     expect(fx.submissions.filter((s) => s.path === "/pat/agent/1/submit")).toEqual([]);
-
-    // Application-level approval: Career Atlas (not the model) clicks Submit and verifies the confirmation.
+    // 3. Application-level approval: Career Atlas (not the model) clicks the application's own Submit.
     a = await settled((await api<AttemptDTO>(`/api/apply/attempts/${a.id}/approve`, { method: "POST" })).body.id);
     expect(a.state).toBe("submitted_verified");
     const sub = fx.submissions.find((s) => s.path === "/pat/agent/1/submit")!;
     expect(sub.fields).toMatchObject({ given: "Alex", family: "Rivera", mail: "alex.rivera@example.test", office: "Toronto", gender: "" });
     expect(sub.files.map((f) => f.filename)).toEqual(["Resume_Alex.pdf"]);
-  }, 300_000);
-
-  it("asks the applicant once, pauses with the site's question, and uses the answer when resumed", async () => {
-    const log = { sent: [] as string[], proposals: [] as Record<string, unknown>[], results: [] as string[] };
-    agentHook.propose = scripted(log, { askOffice: true });
-    let a = await run("/pat/agent/1?variant=ask", "Agent asks");
-    expect(a).toMatchObject({ state: "needs_review", intervention: "missing_information" });
-    const q = a.questions.find((x) => /office/i.test(x.label))!;
-    expect(q).toMatchObject({ label: "Which office are you applying to? *", required: true });
-    expect(q.options).toEqual(expect.arrayContaining(["Toronto", "Montreal"]));
-    expect(log.proposals.filter((p) => p.action === "ask_user")).toHaveLength(2); // the repeat ends the run
-    await api(`/api/apply/attempts/${a.id}/answers`, { method: "POST", json: { answers: { [q.key]: "Montreal" }, remember: [] } });
-    a = await settled(a.id);
-    expect(a).toMatchObject({ state: "needs_review", intervention: "submit_approval" });
-    expect(a.filled.some((f) => f.source === "agent:answer" && f.verified)).toBe(true);
-  }, 300_000);
+  }, 400_000);
 
   it("a model that only proposes forbidden or invalid actions is stopped, nothing is submitted", async () => {
     agentHook.propose = async (_s, user) => {

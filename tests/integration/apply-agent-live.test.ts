@@ -9,6 +9,7 @@ import { appendFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { codexProvider } from "../../src/local/codex";
 import { startAtsFixture, type AtsFixture } from "../fixtures/ats-server";
+import { postingEvents } from "../fixtures/posting-fixture";
 import { agentHook, runtime, SELF } from "./harness";
 import { api, waitFor } from "./helpers";
 
@@ -70,4 +71,30 @@ describe.skipIf(!live)("runtime browser agent with the real GPT provider (opt-in
     expect(fx.submissions).toEqual([]);
     for (const v of ["Alex", "Rivera", "alex.rivera@example.test", "Resume_Alex"]) expect(sent.join("\n")).not.toContain(v);
   }, 1_000_000);
+
+  it("GPT reads a job posting with search and job-alert widgets: chooses the start control (also when it is worded unusually), never a widget", async () => {
+    const codex = codexProvider();
+    const provider = await codex.ready();
+    expect(provider).toBeTruthy();
+    for (const v of ["base", "unfamiliar"]) {
+      postingEvents.length = 0;
+      agentHook.propose = async (system, user, schema) => {
+        const u = JSON.parse(user) as { page: { url: string; page_state: string; widgets: unknown[]; buttons: unknown[] }; last_action_result: string };
+        const t0 = Date.now();
+        const proposal = (await provider!.completeJson({ system, user, jsonSchema: schema })) as Record<string, unknown>;
+        evidence({ kind: "posting_exchange", variant: v, observation: { url: u.page.url, page_state: u.page.page_state, widgets: u.page.widgets, buttons: u.page.buttons }, proposal, ms: Date.now() - t0 });
+        return proposal;
+      };
+      const id = (await api<{ id: string }>("/api/jobs", { method: "POST", json: { job: { company_name: "Northwind (synthetic)", title: "Product Analyst", country: "Canada", original_url: `${fx.url}/cw/job/1?v=${v}&live=1` }, confirm_duplicate: true } })).body.id;
+      const started = (await api<AttemptDTO>(`/api/jobs/${id}/apply`, { method: "POST", json: { resume_document_id: resume, submit_mode: "review", confirm: true } })).body.id;
+      const a = await waitFor(async () => {
+        const x = (await api<AttemptDTO>(`/api/apply/attempts/${started}`)).body;
+        return ["needs_review", "submitted_verified", "submission_unconfirmed", "failed", "cancelled"].includes(x.state) && x.stage !== "waiting_for_you" ? x : null;
+      }, 900_000);
+      evidence({ kind: "posting_result", variant: v, state: a.state, intervention: a.intervention, error_code: a.error_code, steps: a.steps.map((s) => [s.code, s.params ?? null]), widget_events: postingEvents });
+      expect(a.steps.map((s) => s.code)).toEqual(expect.arrayContaining(["page_assessed", "apply_clicked", "application_entered", "form_found"]));
+      expect(postingEvents.filter((e) => /search|subscribed|alerts|save_job/.test(e))).toEqual([]);
+      expect(fx.submissions.filter((s) => s.path.startsWith("/cw/"))).toEqual([]);
+    }
+  }, 1_800_000);
 });

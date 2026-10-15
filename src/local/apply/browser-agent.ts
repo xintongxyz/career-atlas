@@ -17,6 +17,7 @@ import type { Profile } from "@shared/profile";
 import type { Page } from "playwright-core";
 import { isIndeedOwnedHost } from "./indeed";
 import { checkSet, listSelect, scan, searchSelect, shownMatches, textSet, valuesOf, type Finder } from "./interact";
+import { PAGE_MAP, pageState, type PageMap, type PageState, type PageWidget, type WidgetKind } from "./page-intent";
 import { classify, fieldKey, norm, planForm, profileValue, question, toAction, type FieldDescriptor, type PlanContext, type Semantic } from "./plan";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -27,6 +28,8 @@ export interface AgentButton {
   ref: string;
   text: string;
   disabled?: boolean;
+  /** The control sits in a site widget, not in the page's own content: "search" | "subscription" | "chrome" | "cookie". */
+  area?: WidgetKind;
 }
 export interface AgentField {
   ref: string;
@@ -44,6 +47,12 @@ export interface AgentField {
   asked_applicant?: boolean;
 }
 export interface AgentObservation {
+  /** What the applicant wants done (job title and employer — not personal data). */
+  goal: string;
+  /** Career Atlas's own reading of the page: posting / application / questions / login / unknown. */
+  page_state: PageState;
+  /** Site widgets that are NOT part of the application (search, job alerts, chrome, cookie banners). */
+  widgets: PageWidget[];
   url: string;
   title: string;
   headings: string[];
@@ -67,12 +76,14 @@ const OBSERVE_JS = String.raw`(() => {
     if (!text || text.length > 90) continue;
     const b = { ref: ref(e), text };
     if (e.disabled || e.getAttribute('aria-disabled') === 'true') b.disabled = true;
+    const w = e.closest('[data-ca-outside]');
+    if (w) b.area = w.getAttribute('data-ca-outside');
     buttons.push(b);
     if (buttons.length >= 60) break;
   }
   document.documentElement.setAttribute('data-ca-bseq', String(n));
   const dialogs = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], .ant-modal, .modal.show')].filter(vis).map((d) => clean(d.innerText).slice(0, 400));
-  const headings = [...document.querySelectorAll('h1, h2, h3, legend, [role="heading"]')].filter(vis).map((h) => clean(h.innerText)).filter(Boolean).slice(0, 15);
+  const headings = [...document.querySelectorAll('h1, h2, h3, legend, [role="heading"]')].filter((h) => vis(h) && !h.closest('[data-ca-outside]')).map((h) => clean(h.innerText)).filter(Boolean).slice(0, 15);
   const errors = [...document.querySelectorAll('[role="alert"], .error, .field-error, .error-message, [class*="error-text"], [class*="explain-error"], [data-automation-id="errorMessage"]')].filter(vis).map((e) => clean(e.innerText)).filter(Boolean).slice(0, 10);
   const captcha = [...document.querySelectorAll('iframe[src*="captcha"], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="challenges.cloudflare"], iframe[src*="captcha-delivery"]')].some((f) => { const r = f.getBoundingClientRect(); return r.width > 40 && r.height > 40; });
   const password_field = [...document.querySelectorAll('input[type="password"]')].some(vis);
@@ -94,10 +105,24 @@ function stateOf(f: FieldDescriptor): string {
   return "filled";
 }
 
-export async function observeForModel(page: Page, answers: Record<string, unknown> = {}, asked: Set<string> = new Set()): Promise<{ obs: AgentObservation; fields: FieldDescriptor[] }> {
-  const base = (await page.evaluate(OBSERVE_JS)) as Omit<AgentObservation, "fields">;
+export interface ObserveContext {
+  goal: string;
+  answers?: Record<string, unknown>;
+  asked?: Set<string>;
+  inWorkflow?: boolean;
+}
+
+export async function observeForModel(page: Page, c: ObserveContext): Promise<{ obs: AgentObservation; fields: FieldDescriptor[]; map: PageMap }> {
+  const answers = c.answers ?? {};
+  const asked = c.asked ?? new Set<string>();
+  // Page purpose first: widgets are marked (and left out of the fields) before anything is described.
+  const map = (await page.evaluate(PAGE_MAP)) as PageMap;
+  const base = (await page.evaluate(OBSERVE_JS)) as Omit<AgentObservation, "fields" | "goal" | "page_state" | "widgets">;
   const fields = (await scan(page)).filter((f) => f.visible || f.control === "file");
   const obs: AgentObservation = {
+    goal: c.goal,
+    page_state: pageState(map, { inWorkflow: !!c.inWorkflow, login: base.password_field }),
+    widgets: map.widgets.filter((w) => w.kind !== "chrome" || w.inputs > 0).slice(0, 8),
     ...base,
     fields: fields.slice(0, 80).map((f) => ({
       ref: f.ref,
@@ -112,7 +137,7 @@ export async function observeForModel(page: Page, answers: Record<string, unknow
       ...(asked.has(fieldKey(f)) ? { asked_applicant: true } : {}),
     })),
   };
-  return { obs, fields };
+  return { obs, fields, map };
 }
 
 const answered = (answers: Record<string, unknown>, f: FieldDescriptor) => {
@@ -221,9 +246,11 @@ export const PROPOSAL_SCHEMA = {
   additionalProperties: false,
 };
 
-export const AGENT_SYSTEM = `You operate a job-application web page for the applicant, one action per turn, like a careful human assistant.
-You see the page as JSON (buttons b…, fields f… with label, control, state, options) plus available_facts: which profile facts exist (true/false or a count) and a few non-personal preferences.
-Goal: complete the application up to its final review / submit page, then stop.
+export const AGENT_SYSTEM = `You operate a job-application website for the applicant, one action per turn, like a careful human assistant.
+The applicant's goal is in "goal": apply for THAT job. Fill and advance the application for it up to its final review / submit page, then stop.
+You see the page as JSON: page_state (Career Atlas's reading: posting, application, questions, login, unknown), widgets (site parts that are NOT the application: search boxes, job alerts / newsletters, site header/footer, cookie banners), buttons b… (with area when inside such a widget), fields f… (label, control, state, options), plus available_facts: which profile facts exist (true/false or a count) and a few non-personal preferences.
+
+First understand the page: is it the job posting, an Apply / sign-in choice, the application form, a questionnaire, the final review, or a blocker? On a job posting, the next step is the control that STARTS the application for this job (Apply, Apply now, I'm interested, Start application…) — not job search, job alerts, "save job", sharing, similar jobs or navigation. Inputs on a posting (site search, alert e-mail) are never the application.
 
 Rules:
 - Applicant values come ONLY from the profile: use fill_from_profile / choose_from_profile with a fact key; Career Atlas looks the value up and enters it. You never type personal data yourself.
@@ -232,7 +259,8 @@ Rules:
 - Agreements, declarations, privacy consents → ask_user (Career Atlas may already have handled routine notices).
 - Repeated sections (work history, education) and long standard forms → run_autofill first; it fills everything the profile covers and verifies it.
 - To start: click the button that opens the application (Apply, Start, Begin, Continue as guest…). Never create an account or sign in; if the page requires it, finish with needs_user.
-- Informational pop-ups (OK, Got it, Close) → dismiss_dialog with that button's ref.
+- Informational pop-ups (OK, Got it, Close) → dismiss_dialog with that button's ref. Cookie banners: only a reject / necessary-only choice, or leave the banner alone.
+- Never act on buttons whose area is search or subscription; they are not part of the application.
 - After filling a step, click the button that moves to the next step (Next, Continue, Save and continue, Proceed…).
 - NEVER click the final submit button (Submit, Submit application, Send…). When the page is the final review / submit step, finish with status review_ready.
 - CAPTCHA or bot check → finish with needs_user.
@@ -255,6 +283,8 @@ export interface ValidationContext {
   asked?: Set<string>;
 }
 
+const COOKIE_PRIVATE_RE = /^(reject|decline|refuse|necessary|essential|only necessary|use necessary|accept necessary|agree to necessary|close)\b/i;
+
 /** Trusted checks: what the model may NOT do, whatever it proposes. Returns a refusal reason or null. */
 export function validate(a: AgentAction, v: ValidationContext): string | null {
   const btn = "ref" in a && a.ref ? v.obs.buttons.find((b) => b.ref === a.ref) : undefined;
@@ -264,6 +294,9 @@ export function validate(a: AgentAction, v: ValidationContext): string | null {
     case "dismiss_dialog": {
       if (!btn && !field) return "unknown ref — use a ref from the current observation";
       const text = btn?.text ?? field?.label ?? "";
+      // Purpose, not wording: a control inside a site widget is not part of this application.
+      if (btn?.area === "search" || btn?.area === "subscription") return `this control belongs to the site's ${btn.area === "search" ? "job search" : "job-alert / newsletter sign-up"}, not to the application for this job`;
+      if (btn?.area === "cookie" && !COOKIE_PRIVATE_RE.test(text)) return "cookie banners: only a reject / necessary-only choice (or leave it)";
       if (SUBMIT_RE.test(text)) return "the final submit button is never clicked by the agent — finish with review_ready";
       if (ACCOUNT_RE.test(text) && !/guest|without (an )?account/i.test(text)) return "creating accounts and signing in are not done by the agent — finish with needs_user";
       if (field && (field.control === "checkbox" || field.control === "radio" || field.control === "checkboxes")) return "use set_checkbox / choose_* for form controls";
@@ -344,6 +377,10 @@ export function toAgentAction(raw: Record<string, unknown>): AgentAction | null 
 export type Proposer = (system: string, user: string, schema: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
 export interface AgentHost {
+  /** "Apply for <job title> at <employer>". */
+  goal: string;
+  /** True once an Apply / guest action led into the application (page-state hint for the model). */
+  inWorkflow?: () => boolean;
   planCtx: PlanContext;
   resume: { name: string; mimeType: string; buffer: Buffer };
   /** Proposes the next action (Codex in the app; a scripted stand-in in tests). */
@@ -368,14 +405,29 @@ export interface AgentOutcome {
 /** Element under a ref: a field (data-ca-ref) or a button / link (data-ca-btn). */
 const byRef = (page: Page, ref: string) => page.locator(`[data-ca-ref="${ref}"], [data-ca-btn="${ref}"]`).first();
 
-export async function runBrowserAgent(page: Page, host: AgentHost, maxSteps = 30): Promise<AgentOutcome> {
+/** One decision of the agent, as the caller sees it. */
+export type AgentStep =
+  | { kind: "acted"; ok: boolean; note: string; action: AgentAction; target: string; reasoning: string; page: Page; from: PageState }
+  | { kind: "refused"; reason: string; action: AgentAction; target: string; reasoning: string }
+  | { kind: "finish"; outcome: AgentOutcome; reasoning: string }
+  | { kind: "stop"; outcome: AgentOutcome };
+
+/**
+ * The agent as a sequence of decisions. `step` takes ONE decision (observe → propose → validate → act →
+ * verify); the engine uses it inside its own loop (e.g. on a job posting), and `run` repeats it.
+ */
+export function createAgent(host: AgentHost) {
   const questions: PendingQuestion[] = [];
   const history: string[] = [];
+  const asked = new Set<string>();
   let lastResult = "none yet";
   let failures = 0;
   let lastSig = "";
-  const asked = new Set<string>();
-  for (let step = 1; step <= maxSteps; step++) {
+  let n = 0;
+  const out = (page: Page, status: AgentOutcome["status"], reason: string): AgentOutcome => ({ status, reason, questions, steps: n, page });
+
+  async function step(page: Page): Promise<AgentStep> {
+    n++;
     await host.guard();
     // Indeed pages are never automated (project rule), wherever a link led.
     const at = (() => {
@@ -385,56 +437,74 @@ export async function runBrowserAgent(page: Page, host: AgentHost, maxSteps = 30
         return "";
       }
     })();
-    if (isIndeedOwnedHost(at)) return { status: "blocked", reason: "Indeed pages are never automated", questions, steps: step, page };
-    // OBSERVE
-    const { obs, fields } = await observeForModel(page, host.planCtx.answers, asked);
+    if (isIndeedOwnedHost(at)) return { kind: "stop", outcome: out(page, "blocked", "Indeed pages are never automated") };
+    // OBSERVE (purpose first: widgets are marked and described as such)
+    const { obs, fields } = await observeForModel(page, { goal: host.goal, answers: host.planCtx.answers, asked, inWorkflow: host.inWorkflow?.() });
     // PLAN (the model)
-    const user = JSON.stringify({ step, last_action_result: lastResult, recent_actions: history.slice(-6), available_facts: factCatalog(host.planCtx.profile), page: obs });
+    const user = JSON.stringify({ step: n, last_action_result: lastResult, recent_actions: history.slice(-6), available_facts: factCatalog(host.planCtx.profile), page: obs });
     let raw: Record<string, unknown>;
     try {
       raw = await host.propose(AGENT_SYSTEM, user.slice(0, 30_000), PROPOSAL_SCHEMA);
     } catch {
-      return { status: "blocked", reason: "the AI provider did not answer", questions, steps: step, page };
+      return { kind: "stop", outcome: out(page, "blocked", "the AI provider did not answer") };
     }
     const a = toAgentAction(raw);
-    const reasoning = String(raw.reasoning ?? "").slice(0, 200);
+    const reasoning = String(raw.reasoning ?? "").slice(0, 240);
+    const observed = { url: obs.url, page_state: obs.page_state, headings: obs.headings.slice(0, 4), widgets: obs.widgets.map((w) => `${w.kind}: ${w.heading || w.buttons.slice(0, 2).join(" / ")}`), buttons: obs.buttons.length, fields: obs.fields.length };
     if (!a) {
       lastResult = "invalid proposal — use the schema";
-      if (++failures >= 3) return { status: "failed_repeatedly", reason: "invalid proposals", questions, steps: step, page };
-      continue;
+      host.trace?.({ step: n, observation: observed, proposal: "invalid" });
+      if (++failures >= 3) return { kind: "stop", outcome: out(page, "failed_repeatedly", "invalid proposals") };
+      return { kind: "refused", reason: "invalid proposal", action: { action: "wait" }, target: "", reasoning };
     }
-    const label = "ref" in a && a.ref ? (obs.buttons.find((b) => b.ref === a.ref)?.text ?? obs.fields.find((f) => f.ref === a.ref)?.label ?? a.ref) : "";
-    await host.event("agent_proposed", { action: a.action, target: String(label).slice(0, 60) });
-    host.trace?.({ step, url: obs.url, buttons: obs.buttons.length, fields: obs.fields.length, proposal: { ...a, reasoning } });
+    const target = "ref" in a && a.ref ? (obs.buttons.find((b) => b.ref === a.ref)?.text ?? obs.fields.find((f) => f.ref === a.ref)?.label ?? a.ref) : "";
+    await host.event("agent_proposed", { action: a.action, target: String(target).slice(0, 60) });
     // VALIDATE (trusted)
     const refusal = validate(a, { obs, fields, profile: host.planCtx.profile, employer: host.planCtx.employer ?? null, answers: host.planCtx.answers, asked });
+    host.trace?.({ step: n, observation: observed, reasoning, proposal: { action: a.action, target: String(target).slice(0, 80) }, check: refusal ? `refused: ${refusal}` : "allowed" });
     // Asking again about a question already recorded: the model is waiting for the applicant — stop here.
-    if (refusal && a.action === "ask_user" && questions.length) return { status: "needs_user", reason: "waiting for the applicant's answers", questions, steps: step, page };
+    if (refusal && a.action === "ask_user" && questions.length) return { kind: "stop", outcome: out(page, "needs_user", "waiting for the applicant's answers") };
     if (refusal) {
       lastResult = `REFUSED: ${refusal}`;
-      history.push(`${a.action} ${label} → refused`);
+      history.push(`${a.action} ${target} → refused`);
       await host.event("agent_refused", { action: a.action, reason: refusal.slice(0, 80) });
-      if (++failures >= 4) return { status: "failed_repeatedly", reason: refusal, questions, steps: step, page };
-      continue;
+      if (++failures >= 4) return { kind: "stop", outcome: out(page, "failed_repeatedly", refusal) };
+      return { kind: "refused", reason: refusal, action: a, target: String(target), reasoning };
     }
-    if (a.action === "finish") return { status: a.status, reason: a.reason || reasoning, questions, steps: step, page };
+    if (a.action === "finish") return { kind: "finish", outcome: out(page, a.status, a.reason || reasoning), reasoning };
     // ACT + VERIFY
     const sig = JSON.stringify(a);
     const res = await act(page, a, fields, host, questions, asked);
     lastResult = res.ok ? `ok: ${res.note}` : `FAILED: ${res.note}`;
-    history.push(`${a.action} ${label} → ${res.ok ? "ok" : "failed"}`);
+    history.push(`${a.action} ${target} → ${res.ok ? "ok" : "failed"}`);
     await host.event(res.ok ? "agent_verified" : "agent_failed", { action: a.action, note: res.note.slice(0, 80) });
-    host.trace?.({ step, result: lastResult });
-    if (res.page) page = res.page;
-    // RECOVER: the same failing action twice in a row is reported to the model; three failures stop.
+    host.trace?.({ step: n, verification: lastResult });
+    const next = res.page ?? page;
+    // RECOVER: failures are reported to the model; the same failing action twice is pointed out.
     if (!res.ok) {
       failures++;
       if (sig === lastSig) lastResult += " (same action failed twice — choose a different approach)";
-      if (failures >= 4) return { status: "failed_repeatedly", reason: res.note, questions, steps: step, page };
+      if (failures >= 4) return { kind: "stop", outcome: out(next, "failed_repeatedly", res.note) };
     } else failures = 0;
     lastSig = sig;
+    return { kind: "acted", ok: res.ok, note: res.note, action: a, target: String(target), reasoning, page: next, from: obs.page_state };
   }
-  return { status: "step_limit", reason: "step limit reached", questions, steps: maxSteps, page };
+
+  async function run(page: Page, maxSteps = 30): Promise<AgentOutcome> {
+    for (let i = 0; i < maxSteps; i++) {
+      const r = await step(page);
+      if (r.kind === "stop") return r.outcome;
+      if (r.kind === "finish") return r.outcome;
+      if (r.kind === "acted") page = r.page;
+    }
+    return out(page, "step_limit", "step limit reached");
+  }
+
+  return { step, run, questions, asked };
+}
+
+export async function runBrowserAgent(page: Page, host: AgentHost, maxSteps = 30): Promise<AgentOutcome> {
+  return createAgent(host).run(page, maxSteps);
 }
 
 async function act(page: Page, a: AgentAction, fields: FieldDescriptor[], host: AgentHost, questions: PendingQuestion[], asked: Set<string>): Promise<{ ok: boolean; note: string; page?: Page }> {
@@ -504,8 +574,9 @@ async function act(page: Page, a: AgentAction, fields: FieldDescriptor[], host: 
       await sleep(1500);
       const now = (await scan(page)).find((f) => f.ref === target.ref);
       const ok = !!now && valuesOf(now).some((n) => norm(n).includes(norm(host.resume.name)));
-      await host.event("uploaded_resume", { file: host.resume.name });
-      return ok ? { ok: true, note: "resume attached" } : { ok: true, note: "file sent (the page does not show its name)" };
+      // Attached = the page shows the file. Without that evidence it is not reported as done.
+      if (ok) await host.event("uploaded_resume", { file: host.resume.name });
+      return ok ? { ok: true, note: "resume attached (the page shows the file)" } : { ok: false, note: "no evidence on the page that the resume was attached" };
     }
     case "run_autofill": {
       const r = await host.autofill(page);

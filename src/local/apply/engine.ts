@@ -21,7 +21,7 @@
 // listed in THIRD_PARTY_NOTICES.md (AutoApply, Autofill-Jobs); see src/local/apply/workday.ts.
 import { classificationUrl, type AttemptState, type FilledField, type InterventionReason, type PendingQuestion } from "@shared/apply";
 import { emptyProfile, profileSchema, type Profile } from "@shared/profile";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BrowserContext, Page } from "playwright-core";
 import { eq } from "drizzle-orm";
@@ -34,9 +34,10 @@ import { launchBrowser, type BrowserChoice } from "./browser";
 import { tenantOf, type AccountManager } from "./credentials";
 import { questionMeaning } from "@shared/apply-semantic";
 import type { PublicFacts } from "./codex-agent";
-import { runBrowserAgent, type Proposer } from "./browser-agent";
+import { createAgent, type Proposer } from "./browser-agent";
+import { APPLY_CTA_RE, MARK_SUBMIT, PAGE_MAP, pageState, type PageMap, type PageState } from "./page-intent";
 import { PAGE_SIGNALS } from "./dom";
-import { PAGE_CONTROLS, decideAdvance, decideNavigation, safeClickName, type PageObservation } from "./generic";
+import { decideAdvance, decideNavigation, safeClickName, type PageObservation } from "./generic";
 import { commitOpenSections, enrichOptions, frameView, handleNotices, navigationSafe, perform, readMenu, scan, verify } from "./interact";
 import { classifyIndeedUrl } from "./indeed";
 import { applicationUrl, atsFromSignals, classifyAfterSubmit, stripQuery, successSentence, type Ats, type PageSignals } from "./outcome";
@@ -81,6 +82,9 @@ export interface EngineDeps {
   agentMaxSteps?: number;
 }
 
+/** What the attempt shows while a generic site is being worked on. */
+const STAGE_OF: Record<PageState, string> = { posting: "on_posting", application: "filling", questions: "filling", login: "sign_in", unknown: "reading_page" };
+
 class Stop extends Error {
   constructor(public code: string) {
     super(code);
@@ -121,6 +125,19 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   const evidence = new Set<string>((row.evidence as string[] | null) ?? []);
   let clickedThisRun = false;
   let agentRan = false;
+  let agent: ReturnType<typeof createAgent> | null = null;
+  let agentOpen: PendingQuestion[] = [];
+  let jobTitle: string | null = null;
+  /** Generic sites: an Apply / guest action led into the application (verified on the next page). */
+  let inWorkflow = false;
+  let lastState: PageState | null = null;
+  /** Application milestones reached in this run (posting → apply → application → form → review). */
+  const milestones = new Set<string>();
+  const milestone = async (m: "posting_identified" | "apply_clicked" | "application_entered" | "form_found" | "review_reached") => {
+    if (milestones.has(m)) return;
+    milestones.add(m);
+    await set({}, m);
+  };
   let ctx: BrowserContext | null = null;
   let allFilled: FilledField[] = [];
   let resumeFile = { name: "", mimeType: "", buffer: Buffer.alloc(0) };
@@ -179,6 +196,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     if (!bytes || bytes.byteLength !== row.resumeSizeBytes || (await sha256Hex(bytes.buffer as ArrayBuffer)) !== row.resumeSha256) throw new Stop("resume_changed");
     resumeFile = { name: row.resumeFileName, mimeType: row.resumeMimeType, buffer: Buffer.from(bytes) };
     const company = posting ? await db.query.companies.findFirst({ where: eq(companies.id, posting.companyId) }) : null;
+    jobTitle = posting?.title ?? null;
     jobSource = jobSourceOf({ sourcePlatform: posting?.sourcePlatform, originalUrl: posting?.originalUrl, route: row.route, sourceUrl: row.sourceUrl });
     planCtx = { profile, jobCountry: posting?.country ?? null, answers: (row.answers as Record<string, unknown> | null) ?? {}, resume: { fileName: resumeFile.name }, employer: company?.name ?? null, jobSource };
 
@@ -368,8 +386,9 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     return navigationSafe(fresh);
   }
 
-  async function observe(page: Page): Promise<PageObservation> {
-    return (await page.evaluate(PAGE_CONTROLS)) as PageObservation;
+  /** The page's structure and purpose (widgets marked out of the application) — see page-intent.ts. */
+  async function observe(page: Page): Promise<PageMap> {
+    return (await page.evaluate(PAGE_MAP)) as PageMap;
   }
 
   async function clickNamed(page: Page, name: string): Promise<boolean> {
@@ -399,9 +418,14 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   }
 
   /**
-   * A site that is not Workday, Greenhouse or Lever. Clicks Apply (and "Apply without an account"
-   * when that is offered — no account is created), fills from My Profile, adds work/education rows
-   * the profile has, and stops on the page that shows Submit unless submission was authorised.
+   * A site that is not Workday, Greenhouse or Lever.
+   *
+   * The page's PURPOSE is established before anything on it is touched (page-intent.ts): site search,
+   * job-alert sign-ups, cookie banners and site chrome are marked as not part of the application, and the
+   * page is read as a posting, an application step, a sign-in step or unknown. On a posting or an
+   * unfamiliar page the GPT agent (when available) decides the next step from that description; its action
+   * is validated, executed and verified by Career Atlas. Profile values are filled only once the
+   * application itself is on the page, and only inside it; the final Submit must belong to it.
    */
   async function genericFlow(page: Page, fromIndeed: boolean): Promise<AttemptState> {
     await set({ ats: null, stage: "opening" }, "opened_form");
@@ -410,6 +434,10 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     const appliesClicked = new Set<string>();
     let lastSig = "";
     let repeats = 0;
+    let aiSteps = 0;
+    /** An Apply / guest action was taken from this address; the next page tells whether it led into the application. */
+    let entryFrom: string | null = null;
+    const propose = deps.browserAgent ? await deps.browserAgent().catch(() => null) : null;
     for (let step = 0; step < 16; step++) {
       await checkCancel();
       let s = await signals(page);
@@ -433,9 +461,24 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       s = await signals(page);
       // A sign-in / registration step (an e-mail box on ".../login" before any application fields) is the
       // candidate's account step: never filled with the profile here.
-      const loginPage = /\/(log-?in|sign-?in|signin|logon|register|registration|account\/(login|create|signin))(\/|$|\?)/i.test(new URL(page.url()).pathname) && (obs.applicantFields ?? 0) <= 2;
-      const decision = decideNavigation(obs, { password: s.password || loginPage, challenge: s.challenge, cookieDismissed });
-      if (process.env.CA_APPLY_DEBUG) process.stderr.write(`GENERIC step=${step} url=${page.url().slice(0, 90)} pages=${ctx?.pages().length} fields=${obs.applicationFields} pw=${s.password} decision=${JSON.stringify(decision)} names=${JSON.stringify(obs.names.slice(0, 12))}\n`);
+      const loginPage = /\/(log-?in|sign-?in|signin|logon|register|registration|account\/(login|create|signin))(\/|$|\?)/i.test(new URL(page.url()).pathname) && obs.semantics.length <= 2;
+      let state = pageState(obs, { inWorkflow, login: s.password || loginPage });
+      // VERIFY the entry: after Apply, the page must have changed into the application (or its sign-in step).
+      if (entryFrom !== null) {
+        if (state === "application" || state === "questions" || state === "login" || (page.url() !== entryFrom && state !== "posting")) {
+          inWorkflow = true;
+          await milestone("application_entered");
+          state = pageState(obs, { inWorkflow, login: s.password || loginPage });
+        }
+        entryFrom = null;
+      }
+      if (state === "application") inWorkflow = true;
+      lastState = state;
+      if (state === "posting") await milestone("posting_identified");
+      if (state === "application" || state === "questions") await milestone("form_found");
+      await set({ stage: STAGE_OF[state] });
+      const decision = decideNavigation(navView(obs, state), { password: s.password || loginPage, challenge: s.challenge, cookieDismissed });
+      if (process.env.CA_APPLY_DEBUG) process.stderr.write(`GENERIC step=${step} url=${page.url().slice(0, 90)} state=${state} fields=${obs.applicationFields} sem=${obs.semantics.join(",")} widgets=${obs.widgets.map((w) => w.kind).join(",")} decision=${JSON.stringify(decision)} names=${JSON.stringify(obs.names.slice(0, 12))}\n`);
       const sig = `${decision.action}:${"name" in decision ? decision.name : ""}:${page.url()}`;
       repeats = sig === lastSig ? repeats + 1 : 0;
       lastSig = sig;
@@ -453,16 +496,64 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         await set({ state: "filling", intervention: null, stage: "filling" }, "signed_in_by_user");
         continue;
       }
-      if (decision.action === "click" && repeats < 2) {
+      // Privacy-preserving cookie choice and "apply without an account" are fixed rules (no account, no consent).
+      if (decision.action === "click" && decision.why !== "apply" && repeats < 2) {
         if (decision.why === "cookie") cookieDismissed = true;
         const tabs = ctx!.pages().length;
+        const from = page.url();
         if (await clickNamed(page, decision.name)) {
           page = await adoptNewTab(page, tabs);
+          if (decision.why === "guest") entryFrom = from;
+          await set({ stage: "opening" }, "opened_form");
+          continue;
+        }
+      }
+      // The posting may live inside a large embedded frame (iCIMS and many company sites): work inside it
+      // — once per frame — when this page itself offers nothing to apply with.
+      const frame = (obs.frames ?? []).sort((a, b) => b.area - a.area).find((f) => !framesOpened.has(f.src) && !/captcha|datadome|recaptcha|hcaptcha|turnstile|youtube|vimeo|maps\.google|googletagmanager|doubleclick/i.test(f.src));
+      if (frame && obs.semantics.length === 0 && state !== "posting") {
+        framesOpened.add(frame.src);
+        const real = page;
+        const f = real.frames().find((x) => x.url() === frame.src) ?? real.frames().find((x) => x !== real.mainFrame() && frame.src.startsWith(x.url().split("?")[0]));
+        if (f) {
+          page = frameView(real, f);
+          await set({ stage: "opening" }, "opened_embedded_form");
+          continue;
+        }
+      }
+      // UNDERSTAND + DECIDE on a posting or an unfamiliar page: the GPT agent reads the page (its widgets
+      // marked as such) against the goal and proposes the next action; Career Atlas validates, executes and
+      // verifies it. A refused or unhelpful proposal falls back to the fixed rules below.
+      if (propose && (state === "posting" || state === "unknown") && aiSteps < 8) {
+        aiSteps++;
+        const r = await agentFor(propose).step(page);
+        await set({}, "page_assessed", { state, by: "ai", action: r.kind === "acted" || r.kind === "refused" ? r.action.action : r.kind === "finish" ? `finish:${r.outcome.status}` : "stop", target: r.kind === "acted" || r.kind === "refused" ? r.target.slice(0, 60) : "" });
+        if (r.kind === "acted" && r.ok) {
+          const from = page.url();
+          page = r.page;
+          if (r.action.action === "click") {
+            await milestone("apply_clicked");
+            entryFrom = from;
+          }
+          continue;
+        }
+        if (r.kind === "stop" && r.outcome.status === "blocked" && /Indeed/.test(r.outcome.reason)) return fromIndeed && visible ? employerManual(page) : pause("unexpected_page", [], { errorCode: "indeed_not_automated" });
+        // Refused (e.g. a job-alert button): the model sees why on its next look, unless the fixed rules have a step.
+        if (r.kind === "refused" && decision.action !== "click") continue;
+      }
+      if (decision.action === "click" && repeats < 2) {
+        const tabs = ctx!.pages().length;
+        const from = page.url();
+        if (await clickNamed(page, decision.name)) {
+          page = await adoptNewTab(page, tabs);
+          await milestone("apply_clicked");
+          entryFrom = from;
           await set({ stage: "opening" }, "opened_form");
           continue;
         }
       } else if (decision.action === "fill") {
-        // Repeated rows (employment / education) entry by entry, then the rest of the page.
+        // Repeated rows (employment / education) entry by entry, then the rest of the page — inside the
+        // application only (widgets are marked out of scope and never scanned).
         const rows = await fillRows(rowsCtx(page));
         let { questions } = await fillPage(page, { uploadInPlan: true });
         questions = [...rows.questions, ...questions.filter((q) => !rows.questions.some((r) => r.key === q.key))];
@@ -483,16 +574,20 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         // Inline section editors keep edits only after their own Update / Save button.
         if (await commitOpenSections(page)) await set({}, "sections_saved");
         if (!questions.some((q) => q.required)) {
-          const adv = decideAdvance((await observe(page)).names);
+          const now = await observe(page);
+          const adv = decideAdvance(now.names);
           // Nothing to advance with yet, but an Apply control is still on the page (a tab or button
           // that reveals the form, e.g. "Apply" next to "Job details"): open it once.
           if (adv.action === "stuck") {
-            const apply = (await observe(page)).names.find((n) => /^apply\b|^apply (now|online|for this job)$/i.test(n) && !appliesClicked.has(n));
+            const apply = now.names.find((n) => APPLY_CTA_RE.test(n) && !appliesClicked.has(n));
             if (apply) {
               appliesClicked.add(apply);
               const tabs = ctx!.pages().length;
+              const from = page.url();
               if (await clickNamed(page, apply)) {
                 page = await adoptNewTab(page, tabs);
+                await milestone("apply_clicked");
+                entryFrom = from;
                 await set({ stage: "opening" }, "opened_form");
                 continue;
               }
@@ -514,26 +609,14 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           return visible ? manual(page, null, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
         }
       }
-      // The application may live inside a large embedded frame (iCIMS and many company sites):
-      // open that document directly — once per frame — and work on it.
-      const frame = (obs.frames ?? []).sort((a, b) => b.area - a.area).find((f) => !framesOpened.has(f.src) && !/captcha|datadome|recaptcha|hcaptcha|turnstile|youtube|vimeo|maps\.google|googletagmanager|doubleclick/i.test(f.src));
-      if (frame && (obs.applicantFields ?? 0) === 0) {
-        framesOpened.add(frame.src);
-        // Work inside the frame (reloading its address on its own often just reloads the wrapper).
-        const real = page;
-        const f = real.frames().find((x) => x.url() === frame.src) ?? real.frames().find((x) => x !== real.mainFrame() && frame.src.startsWith(x.url().split("?")[0]));
-        if (f) {
-          page = frameView(real, f);
-          await set({ stage: "opening" }, "opened_embedded_form");
-          continue;
-        }
-      }
-      if (deps.pageAgent && repeats < 3) {
+      if (deps.pageAgent && !propose && repeats < 3) {
         const suggestion = await deps.pageAgent({ buttons: obs.names, labels: obs.labels }).catch(() => null);
         const name = suggestion ? safeClickName(suggestion, obs.names) : null;
         const tabs = ctx!.pages().length;
+        const from = page.url();
         if (name && (await clickNamed(page, name))) {
           page = await adoptNewTab(page, tabs);
+          entryFrom = from;
           await set({}, "opened_form");
           continue;
         }
@@ -541,6 +624,51 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       return agentOrStop(page, fromIndeed);
     }
     return agentOrStop(page, fromIndeed);
+  }
+
+  /** The controls the fixed rules may act on, given what the page is: a posting has no application fields. */
+  function navView(m: PageMap, state: PageState): PageObservation {
+    const fields = state === "posting" ? 0 : m.applicationFields;
+    const applyNames = m.names.some((n) => APPLY_CTA_RE.test(n)) ? [] : m.chromeNames.filter((n) => APPLY_CTA_RE.test(n));
+    return { names: [...m.names, ...applyNames, ...m.cookieNames], applicationFields: fields, applicantFields: state === "posting" ? 0 : m.semantics.length, labels: m.labels, frames: m.frames };
+  }
+
+  /** The GPT agent for this run (one per run, so its memory of asked questions and failures is kept). */
+  function agentFor(propose: Proposer) {
+    agent ??= createAgent({
+      goal: `Apply for "${jobTitle ?? "this job"}"${planCtx.employer ? ` at ${planCtx.employer}` : ""}`,
+      inWorkflow: () => inWorkflow,
+      planCtx,
+      resume: resumeFile,
+      propose,
+      autofill: async (p) => {
+        await observe(p);
+        const rows = await fillRows(rowsCtx(p));
+        const { questions } = await fillPage(p, { uploadInPlan: true });
+        if (await commitOpenSections(p)) await set({}, "sections_saved");
+        agentOpen = [...rows.questions, ...questions.filter((q) => !rows.questions.some((r) => r.key === q.key))].filter((q) => q.required);
+        return { verified: allFilled.filter((f) => f.verified).length, open: agentOpen.map((q) => q.label.slice(0, 80)) };
+      },
+      guard: checkCancel,
+      event: async (code, params) => {
+        await set({ filled: allFilled }, code, params);
+      },
+      record: (f) => {
+        allFilled.push(f);
+      },
+      trace: (e) => {
+        // Structure and the model's reasoning only (labels, headings, actions) — never applicant values.
+        if (process.env.CA_APPLY_DEBUG) process.stderr.write(`AGENT ${JSON.stringify(e)}\n`);
+        try {
+          const dir = deps.evidenceDir(attemptId);
+          mkdirSync(dir, { recursive: true, mode: 0o700 });
+          appendFileSync(join(dir, "agent-trace.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), ...e })}\n`, { mode: 0o600 });
+        } catch {
+          /* best effort */
+        }
+      },
+    });
+    return agent;
   }
 
   /**
@@ -554,54 +682,45 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     const propose = deps.browserAgent && !agentRan ? await deps.browserAgent().catch(() => null) : null;
     if (!propose) {
       if (fromIndeed && visible) return employerManual(page);
+      // Never "done" while the job posting is still what the page shows.
+      if (lastState === "posting") {
+        await shot(page, "posting");
+        return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: "still_on_posting" });
+      }
       throw new Stop("unsupported_site");
     }
     agentRan = true;
     await set({ state: "filling", stage: "ai_agent" }, "agent_started");
-    let open: PendingQuestion[] = [];
-    const out = await runBrowserAgent(
-      page,
-      {
-        planCtx,
-        resume: resumeFile,
-        propose,
-        autofill: async (p) => {
-          const rows = await fillRows(rowsCtx(p));
-          const { questions } = await fillPage(p, { uploadInPlan: true });
-          if (await commitOpenSections(p)) await set({}, "sections_saved");
-          open = [...rows.questions, ...questions.filter((q) => !rows.questions.some((r) => r.key === q.key))].filter((q) => q.required);
-          return { verified: allFilled.filter((f) => f.verified).length, open: open.map((q) => q.label.slice(0, 80)) };
-        },
-        guard: checkCancel,
-        event: async (code, params) => {
-          await set({ filled: allFilled }, code, params);
-        },
-        record: (f) => {
-          allFilled.push(f);
-        },
-        trace: process.env.CA_APPLY_DEBUG ? (e) => process.stderr.write(`AGENT ${JSON.stringify(e)}\n`) : undefined,
-      },
-      deps.agentMaxSteps ?? 30,
-    );
+    const out = await agentFor(propose).run(page, deps.agentMaxSteps ?? 30);
     page = out.page;
     await set({ filled: allFilled }, "agent_finished", { status: out.status, steps: out.steps });
     const s = await signals(page);
     if (s.challenge) return visible ? manual(page, null, "captcha") : pause("captcha");
-    const questions = [...out.questions, ...open.filter((q) => !out.questions.some((x) => x.key === q.key))];
-    // "Final step" is checked, not believed: reviewPage needs a visible Submit. Only optional questions left
-    // on a page that shows Submit: the usual approval gate.
-    if (!questions.some((q) => q.required) && (out.status === "review_ready" || (await submitButton(page, null).isVisible().catch(() => false)))) return reviewPage(page);
+    const m = await observe(page);
+    const state = pageState(m, { inWorkflow, login: s.password });
+    lastState = state;
+    if (state === "application" || state === "questions") await milestone("form_found");
+    const questions = [...out.questions, ...agentOpen.filter((q) => !out.questions.some((x) => x.key === q.key))];
+    // "Final step" is checked, not believed: reviewPage needs the application's own Submit on the page.
+    if (!questions.some((q) => q.required) && (out.status === "review_ready" || m.submits.length > 0)) return reviewPage(page);
     if (s.password) return visible ? manual(page, null, "login_required") : pause("login_required", [], { stage: "sign_in" });
     await shot(page, "agent");
     if (questions.length) return visible ? manual(page, null, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
     if (fromIndeed && visible) return employerManual(page);
-    return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: `agent_${out.status}` });
+    return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: state === "posting" ? "still_on_posting" : `agent_${out.status}` });
   }
 
-  /** A generic page that shows the final Submit: stop for approval, or submit when authorised. */
+  /** A generic page that shows the application's final Submit: stop for approval, or submit when authorised. */
   async function reviewPage(page: Page): Promise<AttemptState> {
     await shot(page, "filled");
-    const submit = submitButton(page, null);
+    // Fail closed: the final step counts only inside an application this run actually reached, and the
+    // Submit must be that application's own (inside its scope, not a widget's, exactly one form).
+    if (!milestones.has("form_found")) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: lastState === "posting" ? "still_on_posting" : "application_form_not_found" });
+    await observe(page);
+    const found = Number(await page.evaluate(MARK_SUBMIT).catch(() => 0));
+    if (found !== 1) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: found === 0 ? "submit_not_in_application" : "submit_ambiguous" });
+    await milestone("review_reached");
+    const submit = page.locator('[data-ca-submit="1"]').first();
     if (!(await submit.isVisible().catch(() => false))) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page");
     const gate = await submitGate(page, null);
     if (gate) return gate;
