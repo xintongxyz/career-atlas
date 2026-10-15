@@ -89,6 +89,19 @@ describe("IMAP (synthetic server)", () => {
     enabled = true;
   });
 
+  it("links to another employer's Workday tenant are never used", () => {
+    expect(extractVerification({ plain: "", html: '<a href="https://otherco.wd5.myworkdayjobs.com/activate/x">Verify</a>' }, TENANT).link).toBeNull();
+    expect(extractVerification({ plain: "", html: '<a href="https://northwind.wd3.myworkdaysite.com/activate/x">Verify</a>' }, TENANT).link).toBe("https://northwind.wd3.myworkdaysite.com/activate/x");
+  });
+
+  it("the real app password is only sent to Gmail over TLS", async () => {
+    const fakeKeychain = { ...memoryStore(), kind: "keychain" as const };
+    await fakeKeychain.set("Career Atlas – Gmail app password", USER, APP_PW);
+    const m = mailVerifier({ store: fakeKeychain, settings: () => ({ enabled: true, address: USER }) });
+    m._setTarget({ host: "imap.example.test", port: 993, secure: true });
+    expect(await m.check()).toBe("unreachable");
+  });
+
   it("refuses plain-text IMAP with the real Keychain store", async () => {
     const fakeKeychain = { ...memoryStore(), kind: "keychain" as const };
     await fakeKeychain.set("Career Atlas – Gmail app password", USER, APP_PW);

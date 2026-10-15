@@ -47,7 +47,7 @@ export interface FieldDescriptor {
   /** Workday: the field's formField-<name>. */
   wdField?: string;
   /** Workday repeating panels (work / education / skills): filled by the Workday adapter, not the generic planner. */
-  group?: "work" | "education" | "skills" | null;
+  group?: "work" | "education" | "skills" | "websites" | "languages" | "certifications" | null;
   groupIndex?: number | null;
   /** The site marked the field as invalid (aria-invalid / Workday inputAlert). */
   invalid?: boolean;
@@ -99,6 +99,10 @@ export interface PlanContext {
   resume: { fileName: string };
   /** The employer (for employer-scoped answers such as "Have you worked for us before?"). */
   employer?: string | null;
+  /** Where the user found the job (from the saved job), for "How did you hear about us?". */
+  jobSource?: import("@shared/apply-match").JobSource;
+  /** Field keys already completed by a section handler (left alone here). */
+  handled?: Set<string>;
 }
 
 export type PlannedAction =
@@ -282,15 +286,15 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
     case "current_title":
       return currentJob ? { ok: true, value: currentJob.title, source: "experience.current" } : { ok: false, reason: "missing" };
     case "school": {
-      const e = latestEducation(p);
+      const e = educationFor(f, p);
       return e?.institution ? { ok: true, value: e.institution, source: "education" } : { ok: false, reason: "missing" };
     }
     case "discipline": {
-      const e = latestEducation(p);
+      const e = educationFor(f, p);
       return e?.field ? { ok: true, value: e.field, source: "education" } : { ok: false, reason: "missing" };
     }
     case "degree": {
-      const e = latestEducation(p);
+      const e = educationFor(f, p);
       if (!e) return { ok: false, reason: "missing" };
       // Only a direct level match; never a degree equivalence.
       const re = DEGREE_WORDS[e.level];
@@ -357,6 +361,18 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
 
 function latestEducation(p: Profile) {
   return [...p.education].sort((a, b) => (b.year ?? 0) - (a.year ?? 0))[0];
+}
+
+/**
+ * The education entry a school / degree / discipline field belongs to. Forms with numbered
+ * education blocks ("school_name_1", "education[1][degree]") get entry N (most recent first), so
+ * every school keeps its own degree and field; a single unnumbered field gets the most recent entry.
+ */
+function educationFor(f: FieldDescriptor, p: Profile) {
+  const m = /(?:_|\[|-)(\d+)\]?(?:\[[a-z_]+\])?$/i.exec(f.name) ?? /(?:_|-)(\d+)$/.exec(f.id);
+  if (!m || Number(m[1]) >= 20) return latestEducation(p); // "question_123456": an id, not a position
+  const sorted = [...p.education].sort((a, b) => (b.year ?? 0) - (a.year ?? 0));
+  return sorted[Number(m[1])];
 }
 
 // ---------------------------------------------------------------- options
@@ -521,6 +537,7 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
     if (!f.visible && f.control !== "file") continue;
     if (f.group) continue; // Workday work / education / skills panels: filled by the adapter
     const key = fieldKey(f);
+    if (ctx.handled?.has(key)) continue;
     let sem = classify(f);
     if (sem === "resume") {
       if (resumeDone) continue;

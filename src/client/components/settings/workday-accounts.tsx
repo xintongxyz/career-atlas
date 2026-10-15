@@ -18,6 +18,8 @@ interface AccountsView {
   store: "keychain" | "memory" | null;
   password_mode: "unique" | "shared";
   auto_sign_in: boolean;
+  ai_assist: boolean;
+  ai_available: boolean;
   shared_configured: boolean;
   accounts: { tenant: string; email: string; mode: "unique" | "shared"; status: string; created_at: number; last_sign_in_at: number | null; last_failure_at: number | null }[];
 }
@@ -99,6 +101,13 @@ export function WorkdayAccountsSection() {
                 </span>
               </label>
             </div>
+            <label className="flex items-start gap-2">
+              <Checkbox checked={v.ai_assist} disabled={!v.ai_available && !v.ai_assist} onCheckedChange={(c) => patch.mutate({ ai_assist: c === true })} aria-label={t("accounts.aiAssist")} className="mt-0.5" />
+              <span>
+                {t("accounts.aiAssist")}
+                <span className="block text-xs text-ink-3">{v.ai_available ? t("accounts.aiAssistHelp") : t("accounts.aiAssistUnavailable")}</span>
+              </span>
+            </label>
             {v.password_mode === "shared" ? (
               <div className="rounded-md border border-line px-3 py-3">
                 <p className="flex items-center gap-1.5 font-medium text-ink">

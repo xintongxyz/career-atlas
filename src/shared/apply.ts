@@ -69,7 +69,7 @@ export interface FilledField {
   source: string;
   verified: boolean;
   /** "kept": already right on the page; "corrected": a value the site had filled (e.g. from resume parsing) was replaced from My Profile; "parsed": filled by the site's resume parsing and not confirmed by My Profile. */
-  status?: "filled" | "kept" | "corrected" | "parsed";
+  status?: "filled" | "kept" | "corrected" | "parsed" | "skipped";
   /** Only for "parsed": the value the site filled, shown for review (stored locally only). */
   value?: string | null;
 }
@@ -179,7 +179,7 @@ export const answerSchema = z.object({
 
 export const resolveSchema = z.object({ outcome: z.enum(["submitted", "not_submitted"]) });
 
-export const accountSettingsSchema = z.object({ password_mode: z.enum(["unique", "shared"]).optional(), auto_sign_in: z.boolean().optional() });
+export const accountSettingsSchema = z.object({ password_mode: z.enum(["unique", "shared"]).optional(), auto_sign_in: z.boolean().optional(), ai_assist: z.boolean().optional() });
 export const sharedPasswordSchema = z.object({ password: z.string().min(8).max(200), confirm: z.string().max(200) });
 /** A password the user already has for one employer's Workday site (saved to the Keychain only). */
 export const existingAccountSchema = z.object({ site: z.string().trim().min(3).max(2000), email: z.string().trim().email().max(320), password: z.string().min(1).max(200) });

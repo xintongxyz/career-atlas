@@ -39,6 +39,8 @@ export interface LocalSettings {
   gmail_verification?: boolean;
   /** The Gmail address to read (defaults to the e-mail in My Profile). Not secret. */
   gmail_address?: string;
+  /** Applications: let Claude Code decide unclear option matches (one value + the site's options only). Off by default. */
+  apply_ai_assist?: boolean;
   /** Absolute path to the `claude` executable (auto-detected when unset). */
   claude_path?: string;
   claude_model?: string;

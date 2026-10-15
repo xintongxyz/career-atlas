@@ -78,6 +78,15 @@ let S = JSON.parse(localStorage.getItem(KEY) || 'null') || { v: { country: 'Unit
 const PARSED = () => ({ parsed: true, v: { country: 'Canada', 'legalName--firstName': 'Jordan', 'legalName--lastName': 'Okoye', email: 'j.okoye@example.test', addressLine1: '1 Parsed Street', city: 'Toronto', phone: '4165550142' },
   work: [{ jobTitle: 'Data Analyst', companyName: 'Fabrikam', current: true, startDate: '06/2024' }, { jobTitle: 'Research Assistant', companyName: 'Example University', current: false, startDate: '01/2022', endDate: '12/2022' }, { jobTitle: 'Barista', companyName: 'Parsed Café', current: false, startDate: '01/2019', endDate: '12/2019' }],
   edu: [{ school: ['Example University'], degree: "Master's Degree", field: ['Statistics'], lastYear: '2024' }], skills: [], files: S.files });
+// "rich": a closer copy of live Workday — id-based panels ("education-12--degree"), searchable
+// prompts with type="search", an async degree list, Websites / Languages sections with their own Add
+// buttons, a skills tag box that only accepts chosen suggestions, a hierarchical "How did you hear
+// about us?", and a full re-render after every choice (old element handles go stale).
+const RICH_PARSED = () => ({ parsed: true, seq: 40, v: { country: 'Canada', 'legalName--firstName': 'Riley', 'legalName--lastName': 'Chen', email: 'riley.chen@example.test', city: 'Toronto' },
+  work: [{ id: 37, jobTitle: 'Data Analyst', companyName: 'Fabrikam', current: true, startDate: '06/2024' }],
+  edu: [{ id: 38, school: ['University of Northfield'], degree: "Bachelor's Degree", field: [], lastYear: '' }],
+  web: [], lang: [], skills: [], files: S.files });
+if (has('rich')) { S.seq = S.seq || 40; S.web = S.web || []; S.lang = S.lang || []; }
 const autofillPending = () => CFG.mode === 'autofillWithResume' && !S.parsed;
 const save = () => localStorage.setItem(KEY, JSON.stringify(S));
 const post = (u, b) => fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) });
@@ -132,6 +141,77 @@ function date(name, label, parts, r, bind) {
   return '<div data-automation-id="formField-' + name + '"><label id="' + lid + '">' + esc(label) + req(r) + '</label><div data-automation-id="dateInputWrapper" role="group" aria-labelledby="' + lid + '">' + parts.map(box).join('/') + '</div>' + alert(name) + '</div>';
 }
 
+// ---------- rich builders (ids like live Workday: "<section>-<n>--<field>")
+function rtext(idv, name, label, r, bind) {
+  return '<div data-automation-id="formField-' + name + '"><label for="' + idv + '">' + esc(label) + req(r) + '</label><input type="text" id="' + idv + '" data-b="' + bind.k + '" value="' + esc(bind.get()) + '"' + inv(name) + '>' + alert(name) + '</div>';
+}
+function rlist(idv, name, label, options, r, bind) {
+  const v = bind.get();
+  const lid = id();
+  return '<div data-automation-id="formField-' + name + '"><label id="' + lid + '">' + esc(label) + req(r) + '</label><button type="button" id="' + idv + '" aria-haspopup="listbox" aria-labelledby="' + lid + '" data-lb="' + bind.k + '" data-opts="' + esc(JSON.stringify(options)) + '"' + inv(name) + '>' + esc(v || 'Select One') + '</button>' + alert(name) + '</div>';
+}
+function rprompt(idv, name, label, options, r, bind, multi) {
+  const vals = [].concat(bind.get() || []);
+  return '<div data-automation-id="formField-' + name + '"><label for="' + idv + '">' + esc(label) + req(r) + '</label><div data-automation-id="multiSelectContainer"><ul data-automation-id="selectedItemList" role="listbox">' +
+    vals.map((x) => '<li role="option" data-automation-id="selectedItem">' + esc(x) + '</li>').join('') + '</ul><input type="search" id="' + idv + '" data-automation-id="searchBox" placeholder="Search" data-rp="' + bind.k + '" data-multi="' + (multi ? 1 : 0) + '" data-opts="' + esc(JSON.stringify(options)) + '"' + inv(name) + '></div>' + alert(name) + '</div>';
+}
+function rcheck(idv, name, label, bind) {
+  return '<div data-automation-id="formField-' + name + '"><input type="checkbox" id="' + idv + '" data-b="' + bind.k + '"' + (bind.get() ? ' checked' : '') + '><label for="' + idv + '">' + esc(label) + '</label></div>';
+}
+function ryear(name, label, bind) {
+  const lid = id();
+  return '<div data-automation-id="formField-' + name + '"><label id="' + lid + '">' + esc(label) + '</label><div data-automation-id="dateInputWrapper" role="group" aria-labelledby="' + lid + '"><input type="text" role="spinbutton" aria-label="Year" data-automation-id="dateSectionYear-input" data-dt="' + bind.k + '" data-part="Year" value="' + esc(bind.get() || '') + '"></div></div>';
+}
+// "How did you hear about us?" — categories open their own list; typing searches the leaves.
+const SOURCE_TREE = { 'Job Board': ['Indeed', 'Glassdoor', 'Other Job Board'], 'Social Media': ['LinkedIn', 'Facebook', 'X (Twitter)'], 'Company Website': null, 'Employee Referral': null, 'Campus Recruitment': null, 'Recruitment Agency': null };
+function hprompt(name, label, r, bind) {
+  const v = bind.get();
+  const i = id();
+  return '<div data-automation-id="formField-' + name + '"><label for="' + i + '">' + esc(label) + req(r) + '</label><div data-automation-id="multiselectInputContainer"><ul data-automation-id="selectedItemList" role="listbox">' + (v ? '<li role="option" data-automation-id="selectedItem">' + esc(v) + '</li>' : '') +
+    '</ul><input id="' + i + '" data-automation-id="searchBox" placeholder="Search" data-hp-src="' + bind.k + '"' + inv(name) + '></div>' + alert(name) + '</div>';
+}
+const SCHOOLS = ['Northfield College', 'University of Northfield', 'University of Southfield', 'Southern University of Foreign Studies', 'Southern Foreign Studies Institute'];
+const DEGREES = ['High School Diploma', 'Associate Degree', "Bachelor's Degree", 'Bachelor of Arts', 'Bachelor of Science', "Master's Degree", 'Master of Science', 'Master of Business Administration (MBA)', 'Doctorate'];
+const FIELDS = ['Applied Statistics', 'Biostatistics', 'Business Economics', 'Computer Science', 'Economics', 'Statistics'];
+const SKILLS = ['Excel VBA', 'Microsoft Excel', 'Microsoft Power BI', 'Python (Programming Language)', 'R (Programming Language)', 'SQL', 'SQL Server', 'Tableau'];
+const LANGS = ['Cantonese', 'English', 'French', 'Mandarin', 'Spanish'];
+const LEVELS = ['Beginner', 'Intermediate', 'Advanced', 'Fluent'];
+function richExperience() {
+  const del = (g, i, label) => '<button type="button" data-del="' + g + '.' + i + '" aria-label="Delete ' + label + ' ' + (i + 1) + '">Delete</button>';
+  let h = '<div data-automation-id="applyFlowMyExpPage"><h2>My Experience</h2>';
+  h += '<div><h3>Work Experience</h3>';
+  S.work.forEach((w, i) => {
+    const p = 'workExperience-' + w.id + '--';
+    h += '<div class="panel"><h4>Work Experience ' + (i + 1) + '</h4>' + rtext(p + 'jobTitle', 'jobTitle', 'Job Title', true, bind('work.' + i + '.jobTitle')) + rtext(p + 'companyName', 'companyName', 'Company', true, bind('work.' + i + '.companyName')) +
+      '<div data-automation-id="formField-currentlyWorkHere"><input type="checkbox" id="' + p + 'currentlyWorkHere" data-b="work.' + i + '.current"' + (w.current ? ' checked' : '') + '><label for="' + p + 'currentlyWorkHere">I currently work here</label></div>' +
+      date('startDate', 'From', ['Month', 'Year'], true, bind('work.' + i + '.startDate')).replace('<div data-automation-id="dateInputWrapper"', '<div id="' + p + 'startDate" data-automation-id="dateInputWrapper"') +
+      (w.current ? '' : date('endDate', 'To', ['Month', 'Year'], true, bind('work.' + i + '.endDate'))) + del('work', i, 'Work Experience') + '</div>';
+  });
+  h += '<button type="button" data-add="work">Add</button></div>';
+  h += '<div><h3>Education</h3>';
+  S.edu.forEach((e, i) => {
+    const p = 'education-' + e.id + '--';
+    h += '<div class="panel"><h4>Education ' + (i + 1) + '</h4>' + rprompt(p + 'schoolName', 'schoolName', 'School or University', SCHOOLS, true, bind('edu.' + i + '.school'), false) +
+      rlist(p + 'degree', 'degree', 'Degree', DEGREES, true, bind('edu.' + i + '.degree')) + rprompt(p + 'fieldOfStudy', 'fieldOfStudy', 'Field of Study', FIELDS, false, bind('edu.' + i + '.field'), true) +
+      ryear('lastYearAttended', 'To (Actual or Expected)', bind('edu.' + i + '.lastYear')).replace('data-dt=', 'id="' + p + 'lastYearAttended" data-dt=') + del('edu', i, 'Education') + '</div>';
+  });
+  h += '<button type="button" data-add="edu">Add</button></div>';
+  h += '<div><h3>Languages</h3>';
+  S.lang.forEach((l, i) => {
+    const p = 'language-' + l.id + '--';
+    h += '<div class="panel"><h4>Languages ' + (i + 1) + '</h4>' + rlist(p + 'language', 'language', 'Language', LANGS, true, bind('lang.' + i + '.language')) + rcheck(p + 'native', 'native', 'I am fluent in this language.', bind('lang.' + i + '.native')) +
+      rlist(p + 'reading', 'reading', 'Reading', LEVELS, true, bind('lang.' + i + '.reading')) + rlist(p + 'speaking', 'speaking', 'Speaking', LEVELS, true, bind('lang.' + i + '.speaking')) + rlist(p + 'writing', 'writing', 'Writing', LEVELS, true, bind('lang.' + i + '.writing')) + del('lang', i, 'Languages') + '</div>';
+  });
+  h += '<button type="button" data-add="lang">Add</button></div>';
+  h += '<div><h3>Websites</h3>';
+  S.web.forEach((w, i) => { h += '<div class="panel"><h4>Websites ' + (i + 1) + '</h4><div><label for="web-' + w.id + '">URL' + req(true) + '</label><input type="text" id="web-' + w.id + '" data-b="' + bind('web.' + i + '.url').k + '" value="' + esc(w.url) + '"></div>' + del('web', i, 'Websites') + '</div>'; });
+  h += '<button type="button" data-add="web">Add</button></div>';
+  h += '<div><h3>Skills</h3>' + rprompt('skills--skills', 'skills', 'Type to Add Skills', SKILLS, false, bind('skills'), true) + '</div>';
+  h += '<div><h3>Resume/CV</h3><div data-automation-id="formField-resume"><label>Upload a file (5MB max)' + req(true) + '</label><div data-automation-id="attachments-FileUpload"><input type="file" data-automation-id="file-upload-input-ref" style="display:none"></div>' +
+    S.files.map((f) => '<div data-automation-id="file-upload-item"><span>' + esc(f) + '</span> <div data-automation-id="file-upload-successful">Successfully Uploaded!</div><button type="button" data-automation-id="delete-file" data-file="' + esc(f) + '" aria-label="Delete ' + esc(f) + '">Delete</button></div>').join('') + alert('resume') + '</div></div>';
+  return h + '</div>';
+}
+
 // ---------- bindings: "k" is a path like v.city or work.0.jobTitle
 const B = {};
 function bind(path) {
@@ -153,8 +233,9 @@ const QS = {
 };
 function stepHtml() {
   if (step === 0) return '<div data-automation-id="applyFlowMyInfoPage"><h2>My Information</h2>' +
-    prompt('source', 'How Did You Hear About Us?', ['Job Board', 'LinkedIn', 'Company Website', 'Employee Referral'], true, bind('v.source')) +
-    radio('candidateIsPreviousWorker', 'Please indicate if you have worked with us before.', [{ label: 'Yes', value: 'true' }, { label: 'No', value: 'false' }], true, bind('v.prev')) +
+    (has('rich') ? hprompt('source', 'How Did You Hear About Us?', true, bind('v.source')) + listbox('formerEmployee', 'Are you a former employee of Northwind Analytics?', ['Yes', 'No'], true, bind('v.prev'))
+      : prompt('source', 'How Did You Hear About Us?', ['Job Board', 'LinkedIn', 'Company Website', 'Employee Referral'], true, bind('v.source')) +
+    radio('candidateIsPreviousWorker', 'Please indicate if you have worked with us before.', [{ label: 'Yes', value: 'true' }, { label: 'No', value: 'false' }], true, bind('v.prev'))) +
     listbox('country', 'Country', ['Canada', 'United States of America'], true, bind('v.country')) +
     text('legalName--firstName', 'Given Name(s)', true, bind('v.legalName--firstName')) +
     text('legalName--lastName', 'Family Name', true, bind('v.legalName--lastName')) +
@@ -168,6 +249,7 @@ function stepHtml() {
     text('phoneNumber', 'Phone Number', true, bind('v.phone')) +
     '<input type="text" name="website" data-automation-id="beecatcher" tabindex="-1" autocomplete="off" style="position:absolute;left:-9999px" data-hp="1">' +
     '</div>';
+  if (step === 1 && has('rich')) return richExperience();
   if (step === 1) {
     let h = '<div data-automation-id="applyFlowMyExpPage"><h2>My Experience</h2><div role="group" aria-labelledby="we-h"><h3 id="we-h">Work Experience</h3>';
     S.work.forEach((w, i) => {
@@ -288,7 +370,13 @@ function validate() {
     need('countryPhoneCode', v.phoneCode, 'Country Phone Code'); need('phoneNumber', v.phone, 'Phone Number');
     if (has('validate') && v.phone && /[^0-9]/.test(v.phone)) e.push({ name: 'phoneNumber', msg: 'Phone number must contain only digits.' });
   }
-  if (step === 1) {
+  if (step === 1 && has('rich')) {
+    S.work.forEach((w) => { need('jobTitle', w.jobTitle, 'Job Title'); need('companyName', w.companyName, 'Company'); });
+    S.edu.forEach((x) => { need('schoolName', x.school, 'School'); need('degree', x.degree, 'Degree'); });
+    S.lang.forEach((x) => { need('language', x.language, 'Language'); need('reading', x.reading, 'Reading'); need('speaking', x.speaking, 'Speaking'); need('writing', x.writing, 'Writing'); });
+    S.web.forEach((x) => need('url', x.url, 'URL'));
+    need('resume', S.files, 'Resume');
+  } else if (step === 1) {
     S.work.forEach((w) => { need('jobTitle', w.jobTitle, 'Job Title'); need('companyName', w.companyName, 'Company'); need('startDate', w.startDate, 'From'); if (!w.current) need('endDate', w.endDate, 'To'); });
     S.edu.forEach((x) => { need('schoolName', x.school, 'School'); need('degree', x.degree, 'Degree'); });
     need('resume', S.files, 'Resume');
@@ -333,6 +421,36 @@ document.addEventListener('keydown', (e) => {
   if (t.dataset && t.dataset.dt && /^[0-9]$/.test(e.key)) t.dataset.typed = (t.dataset.typed || '') + e.key;
   if (t.dataset && t.dataset.dt && (e.key === 'Backspace' || e.key === 'Delete')) t.dataset.typed = '';
 });
+// Rich prompts: suggestions appear ~300 ms after typing (or on Enter); only a chosen suggestion is a value.
+let rpTimer = null;
+function richSearch(t) {
+  const q = t.value.toLowerCase().trim();
+  if (!q) { closeMenu(); return; }
+  const opts = JSON.parse(t.dataset.opts).filter((o) => o.toLowerCase().includes(q));
+  openMenu(t, opts, (pick) => {
+    const b = B[t.dataset.rp];
+    if (t.dataset.multi === '1') { const cur = [].concat(b.get() || []); if (!cur.includes(pick)) cur.push(pick); b.set(cur); } else b.set([pick]);
+    return true; // full re-render
+  });
+}
+function sourceMenu(t, list) {
+  openMenu(t, list, (pick) => {
+    if (SOURCE_TREE[pick]) { setTimeout(() => { sourceMenu(t, SOURCE_TREE[pick]); const back = document.createElement('button'); back.type = 'button'; back.textContent = 'Back'; back.setAttribute('data-automation-id', 'promptBackButton'); back.addEventListener('mousedown', (ev) => { ev.preventDefault(); sourceMenu(t, Object.keys(SOURCE_TREE)); }); menu && menu.prepend(back); }, 0); return false; }
+    B[t.dataset.hpSrc].set(pick);
+    return true;
+  });
+}
+document.addEventListener('input', (e) => {
+  const t = e.target;
+  if (t.dataset && t.dataset.rp) { clearTimeout(rpTimer); rpTimer = setTimeout(() => richSearch(t), 300); }
+  if (t.dataset && t.dataset.hpSrc) {
+    clearTimeout(rpTimer);
+    const q = t.value.toLowerCase().trim();
+    rpTimer = setTimeout(() => { const leaves = Object.entries(SOURCE_TREE).flatMap(([k, v]) => v || [k]); sourceMenu(t, q ? leaves.filter((x) => x.toLowerCase().includes(q)) : Object.keys(SOURCE_TREE)); }, 300);
+  }
+});
+document.addEventListener('keydown', (e) => { const t = e.target; if (t.dataset && t.dataset.rp && e.key === 'Enter') { e.preventDefault(); richSearch(t); } });
+document.addEventListener('click', (e) => { const t = e.target; if (t.dataset && t.dataset.hpSrc && !t.value) setTimeout(() => sourceMenu(t, Object.keys(SOURCE_TREE)), 0); }, true);
 document.addEventListener('focusout', (e) => {
   const t = e.target;
   if (t.dataset && t.dataset.dt) {
@@ -352,14 +470,14 @@ document.addEventListener('input', (e) => {
 document.addEventListener('change', (e) => {
   const t = e.target;
   if (t.type === 'radio') B[t.dataset.b].set(t.value);
-  if (t.type === 'checkbox') { B[t.dataset.b].set(t.checked); if (/\.current$/.test(t.dataset.b)) render(); }
+  if (t.type === 'checkbox') { B[t.dataset.b].set(t.checked); if (/\.current$/.test(t.dataset.b) || has('rich')) render(); }
   if (t.type === 'file' && t.files[0]) {
     const f = t.files[0];
     const fd = new FormData(); fd.append('file', f);
     fetch('/wd/api/upload', { method: 'POST', body: fd }).then(() => {
       S.files = S.files.concat(f.name);
       if (autofillPending() && has('slowparse')) { CFG.parsing = true; render(); setTimeout(() => { CFG.parsing = false; render(); }, 17000); return; } // parsing, then "Continue"
-      if (autofillPending()) { setTimeout(() => { S = PARSED(); save(); step = 0; render(); }, 800); return; } // parsing…
+      if (autofillPending()) { setTimeout(() => { S = has('rich') ? RICH_PARSED() : PARSED(); save(); step = 0; render(); }, 800); return; } // parsing…
       save(); render();
     });
   }
@@ -375,9 +493,14 @@ document.addEventListener('click', (e) => {
       t.textContent = pick;
       t.removeAttribute('aria-invalid');
       // Conditional question: appears only when sponsorship is needed (re-render like a React state change).
-      return t.dataset.lb === 'v.qSponsor' && (before === 'Yes') !== (pick === 'Yes');
+      return has('rich') || (t.dataset.lb === 'v.qSponsor' && (before === 'Yes') !== (pick === 'Yes'));
     });
     return;
+  }
+  if (t.dataset.add && has('rich')) {
+    S.seq = (S.seq || 40) + 3; // live Workday numbers panels with an internal counter
+    const item = { work: { id: S.seq, current: false }, edu: { id: S.seq, school: [], field: [] }, web: { id: S.seq, url: '' }, lang: { id: S.seq } }[t.dataset.add];
+    S[t.dataset.add].push(item); save(); render(); return;
   }
   if (t.dataset.add) { (t.dataset.add === 'work' ? S.work : S.edu).push(t.dataset.add === 'work' ? { current: false } : {}); save(); render(); return; }
   if (t.dataset.del) { const [g, i] = t.dataset.del.split('.'); S[g].splice(Number(i), 1); save(); render(); return; }

@@ -17,6 +17,7 @@ import { createTaskRunner, type TaskRunner } from "./tasks";
 import { createApplyRunner, type ApplyRunner } from "./apply/runner";
 import { accountManager, keychainStore, memoryStore, passwordProblems, tenantOf } from "./apply/credentials";
 import { mailVerifier } from "./apply/mail";
+import { aiOptionMatcher } from "./apply/ai-assist";
 import { accountSettingsSchema, existingAccountSchema, mailSettingsSchema, sharedPasswordSchema } from "@shared/apply";
 import { profileSchema } from "@shared/profile";
 import { spawn } from "node:child_process";
@@ -134,7 +135,7 @@ export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: 
   });
   // Gmail verification e-mails: opt-in; the app password shares the same secure store.
   const mail = mailVerifier({ store: secrets, settings: () => ({ enabled: cfg.settings.gmail_verification === true, address: cfg.settings.gmail_address ?? null }) });
-  const apply = createApplyRunner({ getEnv: () => env, automationDir: join(cfg.dataDir, "automation"), allowLoopback: cfg.kind !== "personal", accounts, mail, ...opts.apply });
+  const apply = createApplyRunner({ getEnv: () => env, automationDir: join(cfg.dataDir, "automation"), allowLoopback: cfg.kind !== "personal", accounts, mail, aiAssist: () => (cfg.settings.apply_ai_assist === true && env.AI_PROVIDER === "claude_code" ? aiOptionMatcher(env) : null), ...opts.apply });
   await apply.init();
   env.APPLY = apply;
 
@@ -250,6 +251,8 @@ function registerLocalRoutes(app: Hono<HonoEnv>, rt: { cfg: LocalConfig; d1: Loc
     store: accounts.storeKind,
     password_mode: accounts.settings().mode,
     auto_sign_in: accounts.settings().autoSignIn,
+    ai_assist: cfg.settings.apply_ai_assist === true,
+    ai_available: rt.env.AI_PROVIDER === "claude_code",
     shared_configured: await accounts.sharedConfigured(),
     accounts: accounts.list().map((a) => ({ tenant: a.tenant, email: a.email, mode: a.mode, status: a.status, created_at: a.created_at, last_sign_in_at: a.last_sign_in_at ?? null, last_failure_at: a.last_failure_at ?? null })),
   });
@@ -258,6 +261,7 @@ function registerLocalRoutes(app: Hono<HonoEnv>, rt: { cfg: LocalConfig; d1: Loc
     const body = await jsonBody(c, accountSettingsSchema);
     if (body.password_mode) writeSettings(cfg, { workday_password_mode: body.password_mode });
     if (body.auto_sign_in !== undefined) writeSettings(cfg, { workday_auto_sign_in: body.auto_sign_in });
+    if (body.ai_assist !== undefined) writeSettings(cfg, { apply_ai_assist: body.ai_assist });
     return c.json(await accountView());
   });
   app.put("/api/local/accounts/shared-password", async (c) => {

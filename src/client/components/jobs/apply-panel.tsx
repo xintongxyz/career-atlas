@@ -660,6 +660,7 @@ function ReviewSummary({ attempt: a }: { attempt: AttemptDTO }) {
   const p = profile.data?.profile;
   const parsed = a.filled.filter((f) => f.status === "parsed");
   const corrected = a.filled.filter((f) => f.status === "corrected");
+  const skipped = a.filled.filter((f) => f.status === "skipped");
   const show = (v: string | string[] | boolean) => (typeof v === "boolean" ? (v ? t("profile.tri.yes") : t("profile.tri.no")) : Array.isArray(v) ? v.join(", ") : v);
   return (
     <div className="space-y-2 rounded-md bg-surface px-3 py-2.5 text-xs text-ink-2">
@@ -693,6 +694,7 @@ function ReviewSummary({ attempt: a }: { attempt: AttemptDTO }) {
         </div>
       ) : null}
       {corrected.length ? <p>{t("apply.review.corrected", { fields: corrected.map((f) => f.label.replace(/\*$/, "")).join(", ") })}</p> : null}
+      {skipped.length ? <p className="text-ink-3">{t("apply.review.skipped", { fields: skipped.map((f) => f.label.replace(/^Skills: /, "").replace(/\*$/, "")).join(", ") })}</p> : null}
       {parsed.length ? (
         <div className="rounded border border-warn/30 bg-warn-soft/40 px-2 py-1.5">
           <p className="font-medium text-warn">{t("apply.review.parsed")}</p>

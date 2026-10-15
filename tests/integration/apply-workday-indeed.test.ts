@@ -153,12 +153,8 @@ describe.skipIf(!ready)("Workday (synthetic multi-step wizard)", () => {
     expect(a.filled.find((f) => /Address Line 1/.test(f.label))).toMatchObject({ status: "parsed", value: "1 Parsed Street", verified: false });
     a = await answer(a.id, { "wd:source": "LinkedIn" }, ["wd:source"]);
 
-    // My Experience: the parsed entry with a different end date and the parsed entry not in My Profile are the user's decisions.
-    a = await settled(a.id);
-    expect(keys(a)).toEqual(["work_conflict:1", "work_extra:barista parsed café"]);
-    expect(a.questions.find((q) => q.key === "work_conflict:1")?.label).toMatch(/“12\/2022” ≠ “12\/2023”/);
-    a = await answer(a.id, { "work_conflict:1": "Use My Profile", "work_extra:barista parsed café": "Remove" });
-
+    // My Experience completes without questions: the parsed entry's wrong end date is corrected from My
+    // Profile; the parsed entry that is not in My Profile is kept and listed for review (not asked).
     // Application Questions: authorization and sponsorship from My Profile; prior application, co-op,
     // licence and start date are NOT inferred (different meanings from prior employment / student status).
     a = await settled(a.id);
@@ -185,7 +181,7 @@ describe.skipIf(!ready)("Workday (synthetic multi-step wizard)", () => {
 
     const s = fx.workday.submissions[0] as { v: Record<string, unknown>; work: Record<string, unknown>[]; edu: Record<string, unknown>[]; skills: string[]; files: string[] };
     expect(s.v).toMatchObject({ email: "jordan.okoye@example.test", addressLine1: "1 Parsed Street", prev: "false", phoneType: "Mobile Phone", region: "Ontario", source: "LinkedIn", qAuth: "Yes", qSponsor: "No", qApplied: "no", qCoop: "No", qStart: "12/01/2026", indigenous: "I prefer not to answer", terms: true });
-    expect(s.work.map((w) => [w.jobTitle, w.endDate ?? null])).toEqual([["Data Analyst", null], ["Research Assistant", "12/2023"]]); // corrected, no duplicate, Barista removed
+    expect(s.work.map((w) => [w.jobTitle, w.endDate ?? null])).toEqual([["Data Analyst", null], ["Research Assistant", "12/2023"], ["Barista", "12/2019"]]); // corrected, no duplicate, the extra entry kept
     expect(s.edu).toHaveLength(1);
     expect(s.files).toEqual(["Jordan_Analytics.pdf"]);
     expect(s.skills).toEqual(expect.arrayContaining(["SQL", "Python"]));

@@ -28,24 +28,71 @@ export const SCAN_FIELDS = String.raw`(() => {
   const wdName = (el) => { const f = wdField(el); return f ? f.getAttribute('data-automation-id').slice(10) : ''; };
   const container = (el) => wdField(el) || el.closest('.field, .application-question, .application-field, .form-field, li, fieldset, [class*="question"], [class*="field"]');
   const wdLabel = (el) => { const f = wdField(el); if (!f) return ''; const l = f.querySelector('label, legend'); return l ? textOf(l) : ''; };
-  // Workday repeating panels (work experience, education): Workday marks each panel
-  // (data-automation-id="workExperience-1", "education-2") and prefixes its inputs' ids the same way.
-  const PANEL_RE = /^(workExperience|education)-(\d+)$/;
+  // Workday repeating sections (work experience, education, websites, languages, certifications) and
+  // the skills tag box. A control belongs to a panel when (in this order):
+  //   1. an ancestor is marked data-automation-id="<prefix>-<n>" (e.g. "education-2"), or
+  //   2. its id is "<prefix>-<n>--<field>" (live Workday: n is an internal counter, not a position), or
+  //   3. it sits under a section heading ("Websites", "Languages", …) inside a block holding exactly
+  //      one Delete/Remove button.
+  // groupIndex is the panel's POSITION among the section's panels on the page (0-based).
+  const GROUP_OF = { workexperience: 'work', education: 'education', webaddress: 'websites', website: 'websites', websites: 'websites', language: 'languages', languages: 'languages', certification: 'certifications', certifications: 'certifications', licensecertification: 'certifications' };
+  const SECTION_RE = [[/^(work )?experience$|^work experience|^employment( history)?$/i, 'work'], [/^education/i, 'education'], [/^(web ?sites?|social network|links?|urls?)\b/i, 'websites'], [/^languages?\b/i, 'languages'], [/^skills?\b/i, 'skills'], [/^(certifications?|licen[cs]es?)\b/i, 'certifications']];
+  const HEAD_SEL = 'h1,h2,h3,h4,h5,legend,[role="heading"]';
+  const headingOf = (el) => {
+    let a = el.parentElement;
+    for (let d = 0; a && d < 12 && a !== document.body; d++, a = a.parentElement) {
+      const hs = [...a.querySelectorAll(HEAD_SEL)].filter((h) => !h.contains(el) && (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING));
+      for (let i = hs.length - 1; i >= 0; i--) {
+        const t = textOf(hs[i]);
+        if (t && !/^(work experience|education|websites?|languages?|certifications?) \d+$/i.test(t)) return t;
+      }
+    }
+    return '';
+  };
+  const groupOfHeading = (h) => { for (const [re, g] of SECTION_RE) if (re.test(h)) return g; return null; };
+  const idNums = {};
+  const idOrder = (prefix, num) => {
+    if (!idNums[prefix]) {
+      const seen = [];
+      for (const x of document.querySelectorAll('[id^="' + prefix + '-"]')) { const m = x.id.match(/^[A-Za-z]+-(\d+)--/); if (m && !seen.includes(m[1])) seen.push(m[1]); }
+      idNums[prefix] = seen;
+    }
+    return idNums[prefix].indexOf(num);
+  };
+  const DEL_RE = /^(delete|remove)\b/i;
+  const panelBlocks = new Map();
+  const panelCount = {};
   const panelOf = (el) => {
     let a = el;
     while (a && a !== document.body) {
-      const m = (a.getAttribute && a.getAttribute('data-automation-id') || '').match(PANEL_RE);
-      if (m) {
-        const all = [...document.querySelectorAll('[data-automation-id^="' + m[1] + '-"]')].filter((x) => PANEL_RE.test(x.getAttribute('data-automation-id')));
-        return { group: m[1] === 'workExperience' ? 'work' : 'education', groupIndex: all.indexOf(a) };
+      const m = (a.getAttribute && a.getAttribute('data-automation-id') || '').match(/^([A-Za-z]+)-(\d+)$/);
+      const g = m && GROUP_OF[m[1].toLowerCase()];
+      if (g) {
+        const all = [...document.querySelectorAll('[data-automation-id^="' + m[1] + '-"]')].filter((x) => new RegExp('^' + m[1] + '-\\d+$').test(x.getAttribute('data-automation-id')));
+        return { group: g, groupIndex: all.indexOf(a) };
       }
       a = a.parentElement;
     }
-    const idm = (el.id || '').match(/^(workExperience|education)-(\d+)--/);
-    if (idm) return { group: idm[1] === 'workExperience' ? 'work' : 'education', groupIndex: Number(idm[2]) - 1 };
+    const idm = (el.id || '').match(/^([A-Za-z]+)-(\d+)--/);
+    if (idm && GROUP_OF[idm[1].toLowerCase()]) return { group: GROUP_OF[idm[1].toLowerCase()], groupIndex: idOrder(idm[1], idm[2]) };
     if (wdName(el) === 'skills') return { group: 'skills', groupIndex: 0 };
+    const g = groupOfHeading(headingOf(el));
+    if (g === 'skills') return { group: 'skills', groupIndex: 0 };
+    if (g) {
+      let b = el.parentElement;
+      for (let d = 0; b && d < 8 && b !== document.body; d++, b = b.parentElement) {
+        const dels = [...b.querySelectorAll('button')].filter((x) => DEL_RE.test(clean(x.getAttribute('aria-label') || x.textContent)));
+        if (dels.length === 1) {
+          if (!panelBlocks.has(b)) { panelCount[g] = (panelCount[g] || 0) + 1; panelBlocks.set(b, panelCount[g] - 1); }
+          return { group: g, groupIndex: panelBlocks.get(b) };
+        }
+        if (dels.length > 1) break;
+      }
+    }
     return { group: null, groupIndex: null };
   };
+  // Field name: Workday's formField-<name>, else the id suffix ("education-4--degree" → "degree").
+  const fieldName = (el) => wdName(el) || ((el.id || '').match(/--([A-Za-z]+)$/) || [])[1] || '';
   const labelFor = (el) => {
     const w = wdLabel(el);
     if (w) return w;
@@ -70,7 +117,7 @@ export const SCAN_FIELDS = String.raw`(() => {
     const sec = el.closest('section, fieldset, [id*="section"], [class*="section"]');
     let head = '';
     if (sec) { const h = sec.querySelector('h1,h2,h3,h4,legend'); if (h) head = textOf(h); head += ' ' + (sec.id || ''); }
-    return clean(head);
+    return clean(head) || headingOf(el);
   };
   const isDemo = (el) => !!el.closest('#demographic-section, #eeoc_fields, .eeo-section, [class*="demographic"], [data-qa*="eeo"], [data-automation-id="applyFlowVoluntaryDisclosuresPage"], [data-automation-id="applyFlowSelfIdentifyPage"], [data-automation-id="voluntaryDisclosuresPage"], [data-automation-id="selfIdentificationPage"]') || /voluntary|self.identif|demographic|equal employment|eeo/i.test(sectionOf(el));
   const requiredOf = (el, label) => el.required || el.getAttribute('aria-required') === 'true' || /\*\s*$|\*\s*\(|\(required\)/i.test(label) || !!(container(el) && container(el).querySelector('.required, [class*="required"], abbr[title="required"]'));
@@ -80,7 +127,8 @@ export const SCAN_FIELDS = String.raw`(() => {
   const controls = root.querySelectorAll('input, select, textarea, button[aria-haspopup="listbox"]');
   for (const el of controls) {
     const type = el.tagName === 'BUTTON' ? 'listbox' : (el.getAttribute('type') || el.tagName).toLowerCase();
-    if (['hidden', 'submit', 'button', 'reset', 'image', 'search', 'password'].includes(type)) continue;
+    // (type="search" is kept: Workday's searchable prompts and the skills box may use it.)
+    if (['hidden', 'submit', 'button', 'reset', 'image', 'password'].includes(type)) continue;
     // Never touch honeypots ("for robots only") or sign-in / account forms.
     if (el.closest('[data-automation-id="beecatcher"]') || el.getAttribute('data-automation-id') === 'beecatcher') continue;
     if (el.closest('[data-automation-id="signInContent"], form[data-automation-id^="signInForm"]')) continue;
@@ -89,7 +137,7 @@ export const SCAN_FIELDS = String.raw`(() => {
     if (el.closest('[aria-hidden="true"]') && type !== 'file') continue;
     const panel = panelOf(el);
     const invalid = el.getAttribute('aria-invalid') === 'true' || !!(wdField(el) && wdField(el).querySelector('[data-automation-id="inputAlert"], [data-automation-id="errorMessage"]'));
-    const base = { invalid, inputType: type, name: el.name || wdName(el), id: el.id || '', placeholder: clean(el.getAttribute('placeholder')), autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(), section: sectionOf(el), demographic: isDemo(el), options: [], wdField: wdName(el), group: panel.group, groupIndex: panel.groupIndex };
+    const base = { invalid, inputType: type, name: el.name || fieldName(el), id: el.id || '', placeholder: clean(el.getAttribute('placeholder')), autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(), section: sectionOf(el), demographic: isDemo(el), options: [], wdField: fieldName(el), group: panel.group, groupIndex: panel.groupIndex };
     // Workday date: month / day / year inputs typed separately -> one field.
     const dai = el.getAttribute('data-automation-id') || '';
     const datePart = (dai.match(/^dateSection(Month|Day|Year)-input$/) || [])[1];
@@ -114,9 +162,10 @@ export const SCAN_FIELDS = String.raw`(() => {
       continue;
     }
     // Workday searchable multiselect ("prompt"): chosen values are shown as selectedItem chips.
-    if (el.closest('[data-automation-id="multiselectInputContainer"], [data-automation-id="multiSelectContainer"]')) {
+    const MS = '[data-automation-id="multiselectInputContainer"], [data-automation-id="multiSelectContainer"], [data-uxi-widget-type="multiselect"], [data-uxi-widget-type="selectinput"]';
+    if (el.closest(MS) || el.getAttribute('data-automation-id') === 'searchBox' || (type === 'search' && wdField(el))) {
       const label = labelFor(el);
-      const holder = wdField(el) || el.closest('[data-automation-id="multiselectInputContainer"], [data-automation-id="multiSelectContainer"]');
+      const holder = wdField(el) || el.closest(MS) || el.parentElement;
       const chips = [...holder.querySelectorAll('[data-automation-id="selectedItem"]')].map(textOf).filter(Boolean);
       out.push({ ...base, ref: ref(el), control: 'combobox', asyncOptions: true, label, required: requiredOf(el, label), value: chips, visible: visible(el) || visible(holder) });
       continue;

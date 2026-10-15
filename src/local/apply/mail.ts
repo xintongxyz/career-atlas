@@ -70,7 +70,8 @@ export class Imap {
 
   static async open(target: ImapTarget, timeoutMs = 20_000): Promise<Imap> {
     const sock = await new Promise<Socket>((resolve, reject) => {
-      const s = target.secure ? tlsConnect({ host: target.host, port: target.port, servername: target.host }) : netConnect({ host: target.host, port: target.port });
+      // Certificate checks are never relaxed (rejectUnauthorized), TLS 1.2 at least.
+      const s = target.secure ? tlsConnect({ host: target.host, port: target.port, servername: target.host, rejectUnauthorized: true, minVersion: "TLSv1.2" }) : netConnect({ host: target.host, port: target.port });
       const timer = setTimeout(() => {
         s.destroy();
         reject(new ImapError("unreachable"));
@@ -265,7 +266,10 @@ export function extractVerification(msg: { plain: string; html: string }, tenant
       continue;
     }
     if (u.protocol !== "https:" && !(u.protocol === "http:" && /^(127\.0\.0\.1|localhost)$/.test(u.hostname) && u.host === tenant)) continue;
-    const onSite = u.host.toLowerCase() === tenant.toLowerCase() || WORKDAY_HOST.test(u.hostname);
+    // The employer's own site, or the same employer on another Workday host (acme.wd3.myworkdayjobs.com
+    // ↔ acme.wd3.myworkdaysite.com) — never another employer's tenant.
+    const label = tenant.toLowerCase().split(".")[0];
+    const onSite = u.host.toLowerCase() === tenant.toLowerCase() || (WORKDAY_HOST.test(u.hostname) && u.hostname.toLowerCase().split(".")[0] === label);
     if (!onSite || !/verif|activat|confirm|validat|token|passwordless/i.test(u.pathname + u.search)) continue;
     links.push(u.toString());
   }
@@ -306,7 +310,8 @@ export function mailVerifier(opts: { store: SecretStore | null; settings: () => 
   const session = async (address: string): Promise<Imap> => {
     const pw = await password(address);
     if (!pw) throw new ImapError("auth_failed");
-    if (!target.secure && store?.kind === "keychain") throw new ImapError("unreachable"); // never plain text with real mail
+    // The real app password only ever goes to Gmail over TLS (plain text / other hosts: tests only).
+    if (store?.kind === "keychain" && (target.host !== GMAIL_IMAP.host || target.port !== GMAIL_IMAP.port || !target.secure)) throw new ImapError("unreachable");
     const c = await Imap.open(target);
     try {
       await c.login(address, pw.replace(/\s+/g, ""));
@@ -337,17 +342,24 @@ export function mailVerifier(opts: { store: SecretStore | null; settings: () => 
         if (!looksLikeWorkdayVerification(from, decodeHeader(head.subject ?? ""))) continue;
         candidates.push({ uid, at, workday: /workday/i.test(from) });
       }
+      // Newest first; a message that names this employer's site comes before one that doesn't.
+      const label = tenant.toLowerCase().split(".")[0];
+      const scored: { uid: number; at: number; workday: boolean; mentions: boolean; msg: { plain: string; html: string } }[] = [];
       for (const cand of candidates.sort((a, b) => b.at - a.at)) {
         const full = await c.cmd(`UID FETCH ${cand.uid} (BODY.PEEK[])`);
         for (const r of full) {
           const li = /\u0000(\d+)\u0000/.exec(r.text);
           if (!li) continue;
           const msg = messageText(r.literals[Number(li[1])].toString("latin1"));
+          const body = `${msg.plain} ${msg.html}`.toLowerCase();
           // Not from a Workday address: only when the message itself is about this employer's Workday site.
-          if (!cand.workday && !`${msg.plain} ${msg.html}`.toLowerCase().includes(tenant.toLowerCase())) continue;
-          const v = extractVerification(msg, tenant);
-          if (v.code || v.link) return v;
+          if (!cand.workday && !body.includes(tenant.toLowerCase())) continue;
+          scored.push({ ...cand, mentions: body.includes(tenant.toLowerCase()) || (label.length >= 3 && body.includes(label)), msg });
         }
+      }
+      for (const c of scored.sort((a, b) => Number(b.mentions) - Number(a.mentions) || b.at - a.at)) {
+        const v = extractVerification(c.msg, tenant);
+        if (v.code || v.link) return v;
       }
     }
     return null;

@@ -390,19 +390,29 @@ export async function workdayCreateAccount(page: Page, email: string, password: 
 
 // ---------------------------------------------------------------- repeating panels
 
+// The "Add" / "Add Another" button of ONE section. A button belongs to the section named in its own
+// aria-label ("Add Work Experience") or, failing that, to the nearest section heading above it
+// (never just any heading further up the page) — so Education's Add is never used for Websites.
 const ADD_BUTTON = String.raw`((src) => {
   const re = new RegExp(src, 'i');
-  document.querySelectorAll('[data-ca-add]').forEach((x) => x.removeAttribute('data-ca-add'));
-  const btns = [...document.querySelectorAll('button, [data-automation-id="add-button"]')].filter((b) => b.getAttribute('data-automation-id') === 'add-button' || /^add( another)?$/i.test((b.textContent || '').trim()));
-  for (const b of btns) {
-    let label = (b.getAttribute('aria-label') || '') + ' ' + (b.textContent || '');
-    let a = b.parentElement;
-    for (let d = 0; d < 6 && a && !re.test(label); d++) {
-      const h = a.querySelector('h2, h3, h4, legend, [role=heading]');
-      if (h) label += ' ' + (h.textContent || '');
-      a = a.parentElement;
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const vis = (e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const HEAD = 'h1,h2,h3,h4,h5,legend,[role="heading"]';
+  const SKIP = /^(work experience|education|websites?|languages?|certifications?) \d+$/i;
+  const headingOf = (el) => {
+    let a = el.parentElement;
+    for (let d = 0; a && d < 12 && a !== document.body; d++, a = a.parentElement) {
+      const hs = [...a.querySelectorAll(HEAD)].filter((h) => !h.contains(el) && (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING));
+      for (let i = hs.length - 1; i >= 0; i--) { const t = clean(hs[i].textContent); if (t && !SKIP.test(t)) return t; }
     }
-    if (re.test(label)) { b.setAttribute('data-ca-add', '1'); return true; }
+    return '';
+  };
+  document.querySelectorAll('[data-ca-add]').forEach((x) => x.removeAttribute('data-ca-add'));
+  const btns = [...document.querySelectorAll('button, [role="button"], [data-automation-id="add-button"]')].filter((b) => vis(b) && (b.getAttribute('data-automation-id') === 'add-button' || /^add( another)?\b/i.test(clean(b.textContent)) || /^add\b/i.test(clean(b.getAttribute('aria-label')))));
+  for (const b of btns) {
+    const own = clean(b.getAttribute('aria-label') || b.textContent).replace(/^add( another)?\s*/i, '');
+    const owner = own && own.length > 2 ? own : headingOf(b);
+    if (re.test(owner)) { b.setAttribute('data-ca-add', '1'); return true; }
   }
   return false;
 })`;
@@ -447,4 +457,30 @@ export function degreeOption(level: string, options: string[]): string | null {
   if (!re) return null;
   const hits = options.filter((o) => re.test(norm(o)) && !(level === "diploma" && /high school/.test(norm(o))));
   return hits.length === 1 ? hits[0] : null;
+}
+
+
+// Saves / closes a repeatable panel when the tenant shows a Save / Done button inside it. The panel
+// is the smallest block that holds all of the given controls and no other panel's Delete button.
+const PANEL_SAVE = String.raw`((refs) => {
+  const els = refs.map((r) => document.querySelector('[data-ca-ref="' + r + '"]')).filter(Boolean);
+  if (!els.length) return false;
+  let a = els[0].parentElement;
+  while (a && a !== document.body && !els.every((e) => a.contains(e))) a = a.parentElement;
+  for (let d = 0; a && d < 3 && a !== document.body; d++, a = a.parentElement) {
+    const dels = [...a.querySelectorAll('button')].filter((b) => /^(delete|remove)\b/i.test((b.getAttribute('aria-label') || b.textContent || '').trim()));
+    if (dels.length > 1) return false;
+    const save = [...a.querySelectorAll('button')].find((b) => { const r = b.getBoundingClientRect(); return r.width > 0 && /^(save|done|ok|update)$/i.test((b.textContent || '').trim()) && !b.closest('[data-automation-id="pageFooter"]'); });
+    if (save) { save.setAttribute('data-ca-save', '1'); return true; }
+  }
+  return false;
+})`;
+
+export async function savePanel(page: Page, refs: string[]): Promise<boolean> {
+  await page.evaluate("document.querySelectorAll('[data-ca-save]').forEach((x) => x.removeAttribute('data-ca-save'))").catch(() => {});
+  const found = (await page.evaluate(`${PANEL_SAVE}(${JSON.stringify(refs)})`).catch(() => false)) as boolean;
+  if (!found) return false;
+  await page.locator("[data-ca-save]").first().click({ timeout: 4000 }).catch(() => {});
+  await sleep(400);
+  return true;
 }

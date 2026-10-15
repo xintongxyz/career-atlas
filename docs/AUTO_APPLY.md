@@ -86,6 +86,48 @@ recognised by Workday's own page markup) are a multi-step wizard. Career Atlas:
   veteran status) are never answered automatically; declarations, consents, background checks,
   criminal-record and conflict-of-interest questions always need your approval.
 
+### Repeatable sections and tag boxes (`src/local/apply/wd-sections.ts`)
+
+Each Workday section is handled as a unit, from My Profile, and every value is verified on a fresh
+read of the page (React re-renders replace elements; controls are found again before each action):
+
+- **Sections and panels** are recognised by Workday's `data-automation-id` markers, by live ids
+  (`education-12--degree`: the number is an internal counter, the panel's *position* is used), or by
+  the section heading plus one Delete button per entry. The **Add** button used is the one owned by
+  that section (its own label, or the nearest heading above it) — Education's Add is never used for
+  Websites.
+- **Education**: every school keeps its own level, field and year. Existing entries (resume parsing,
+  saved drafts) are matched by school (aliases such as "University of X" / "X University" / "uX");
+  a wrong degree or field there is corrected from My Profile; new schools are added. Degree: the
+  generic option ("Master's Degree"), a specific one ("Master of Science") only if it is the only one
+  of that level. Field of study: the exact option; a joint programme ("Economics and Statistics") as
+  its exact parts when the box takes several values; never a different major.
+- **Websites**: LinkedIn, personal website, portfolio and GitHub (distinct by destination), one row
+  each: Add → URL → type (when asked) → Save (when the tenant has one) → verified; no duplicates.
+- **Languages**: one entry per saved language; language by name (Mandarin / Chinese aliases), the
+  "fluent" box only for a saved fluent / native level, each proficiency control (overall or reading /
+  speaking / writing) from the saved level mapped onto the site's scale — unmappable required scales
+  are asked, never guessed.
+- **Skills**: every saved skill, one search each, the exact suggestion or an unambiguous equivalent
+  (Excel → Microsoft Excel, Python → Python (Programming Language); never Excel → Excel VBA, SQL → SQL
+  Server); a tag counts only when it shows as selected. Skills the employer's list doesn't offer are
+  skipped and listed at Review — they never block the application.
+- **How did you hear about us?** comes from the saved job (Indeed route, LinkedIn / Indeed /
+  Glassdoor links or `source=` in the job link, a company-site job); hierarchical lists are opened
+  (Social Media → LinkedIn, Job Board → Indeed); a truthful broader category is used only when the
+  exact source isn't offered; never Referral, Campus, Agency or similar. Unknown source → Application
+  Defaults or a question.
+- **Work experience**: matched by title (+ company), corrected from My Profile, added when missing;
+  a richer description the site already has is kept. Entries the form shows that are not in My
+  Profile are kept and listed at Review (removed only when you choose Remove).
+- **Optional AI matching** (Settings → Workday accounts → *Use Claude to match unclear options*,
+  off by default, needs Claude Code signed in): only when no exact / equivalent option exists, Claude
+  receives ONE value (a skill, field of study, language or school) and the option list the site
+  showed — nothing else from My Profile — and may name the option that means the same thing; its
+  answer must be one of the options. It never supplies applicant facts.
+- A section that can't be completed leaves a local diagnostic snapshot (`attempts/<id>/diag-*.json`:
+  labels, control kinds, whether a value is present, option counts — never values) and a screenshot.
+
 ### Application Defaults (My Profile)
 
 Reusable answers by **meaning** (every field can stay *Not specified* — never treated as "No"):
@@ -152,6 +194,9 @@ Off by default; turned on by the owner on 2026-10-14 for their own Mac. *Setting
   tried *for this application* (account automation authorised in the start dialog). The code is
   typed into Workday's code field, or the link is opened in the automation browser; then sign-in
   continues with the saved password. If nothing arrives within 3 minutes the step is handed to you.
+- The real app password is only ever sent to `imap.gmail.com:993` over TLS 1.2+ with certificate
+  checks; a verification link is used only when it points at this employer's own site (another
+  employer's Workday tenant is refused); messages that name the employer's site are tried first.
 - Plain-text IMAP is refused with the real Keychain; tests use a synthetic IMAP server
   (`tests/fixtures/imap-server.ts`) and the in-memory store.
 

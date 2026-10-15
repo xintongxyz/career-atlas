@@ -23,7 +23,7 @@ import { classificationUrl, type AttemptState, type FilledField, type Interventi
 import { emptyProfile, profileSchema, type Profile } from "@shared/profile";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { BrowserContext, Locator, Page } from "playwright-core";
+import type { BrowserContext, Page } from "playwright-core";
 import { eq } from "drizzle-orm";
 import { schema, getDb } from "../../server/db/client";
 import type { AppEnv } from "../../server/env";
@@ -33,12 +33,15 @@ import { getProfileRow } from "../../server/services/profile";
 import { launchBrowser, type BrowserChoice } from "./browser";
 import { tenantOf, type AccountManager } from "./credentials";
 import { questionMeaning } from "@shared/apply-semantic";
-import { PAGE_SIGNALS, SCAN_FIELDS } from "./dom";
+import { PAGE_SIGNALS } from "./dom";
+import { enrichOptions, perform, scan, verify } from "./interact";
 import { classifyIndeedUrl } from "./indeed";
 import { applicationUrl, atsFromSignals, classifyAfterSubmit, stripQuery, type Ats, type PageSignals } from "./outcome";
-import { fieldKey, filledSummary, holds, norm, planForm, question, toAction, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
+import { fieldKey, norm, planForm, question, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
+import { fillSections } from "./wd-sections";
+import { jobSourceOf, type JobSource } from "@shared/apply-match";
 import type { MailVerifier } from "./mail";
-import { accountTermsLabel, activeStep, addButton, clickNext, codeInput, declineCookies, degreeOption, deletePanel, enterApplyFlow, isAutofillUpload, nextButton, submitVerificationCode, uploadResume, WD_OPTION_SEL, wdReady, wdSettle, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
+import { accountTermsLabel, activeStep, clickNext, codeInput, declineCookies, enterApplyFlow, isAutofillUpload, nextButton, submitVerificationCode, uploadResume, wdReady, wdSettle, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
 
 const { applicationAttempts, documents, jobPostings, companies } = schema;
 
@@ -56,6 +59,8 @@ export interface EngineDeps {
   accounts?: AccountManager;
   /** Gmail verification e-mails (opt-in, Settings). */
   mail?: MailVerifier | null;
+  /** Owner opt-in: Claude decides whether one of the site's options means the same as a value (never facts). */
+  aiAssist?: ((purpose: "skill" | "field_of_study" | "language" | "school", value: string, options: string[]) => Promise<string | null>) | null;
 }
 
 class Stop extends Error {
@@ -101,6 +106,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   let allFilled: FilledField[] = [];
   let resumeFile = { name: "", mimeType: "", buffer: Buffer.alloc(0) };
   let planCtx: PlanContext = { profile: emptyProfile(), jobCountry: null, answers: {}, resume: { fileName: "" } };
+  let jobSource: JobSource = null;
   const allow = deps.allowLoopback;
 
   const set = (patch: Partial<typeof applicationAttempts.$inferInsert>, code?: string, params?: Record<string, string | number>) => updateAttempt(db, attemptId, patch, code ? { code, params } : undefined);
@@ -153,7 +159,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     if (!bytes || bytes.byteLength !== row.resumeSizeBytes || (await sha256Hex(bytes.buffer as ArrayBuffer)) !== row.resumeSha256) throw new Stop("resume_changed");
     resumeFile = { name: row.resumeFileName, mimeType: row.resumeMimeType, buffer: Buffer.from(bytes) };
     const company = posting ? await db.query.companies.findFirst({ where: eq(companies.id, posting.companyId) }) : null;
-    planCtx = { profile, jobCountry: posting?.country ?? null, answers: (row.answers as Record<string, unknown> | null) ?? {}, resume: { fileName: resumeFile.name }, employer: company?.name ?? null };
+    jobSource = jobSourceOf({ sourcePlatform: posting?.sourcePlatform, originalUrl: posting?.originalUrl, route: row.route, sourceUrl: row.sourceUrl });
+    planCtx = { profile, jobCountry: posting?.country ?? null, answers: (row.answers as Record<string, unknown> | null) ?? {}, resume: { fileName: resumeFile.name }, employer: company?.name ?? null, jobSource };
 
     // ---- open
     await checkCancel();
@@ -418,7 +425,9 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       st = await wdSettle(page);
       const after = `${st.step ?? ""}|${st.pageId ?? ""}`;
       if (after === name && st.kind === "step") {
-        const fields = (await scan(page)).filter((f) => f.visible && (f.invalid || (f.required && isEmpty(f.value) && !f.group)));
+        // A hidden file input with an uploaded file listed next to it is not "empty".
+        const uploaded = (await page.locator('[data-automation-id="file-upload-item"]').count()) > 0;
+        const fields = (await scan(page)).filter((f) => f.visible && (f.invalid || (f.required && isEmpty(f.value) && !f.group && !(f.control === "file" && uploaded))));
         if (st.errors.length || fields.length) {
           // Exactly the fields the site rejected — the rest of the application is kept as is.
           const qs = fields.map((f) => question(f, f.group ? `${f.group}:${f.groupIndex}:${f.wdField}` : fieldKey(f), "not_accepted", false, st.errors.find((e) => norm(e).includes(norm(f.label).slice(0, 20))) ?? st.errors.join(" | ").slice(0, 300), qmOf(f)));
@@ -641,10 +650,13 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       const now = await enrichOptions(page, fields.filter((f) => f.visible && !handled.has(fieldKey(f))), checkStep);
       plan = planForm(now, planCtx);
       const before = new Map(now.map((f) => [f.ref, f.value]));
-      for (const a of plan.actions) {
+      for (let i = 0; i < plan.actions.length; i++) {
         await checkCancel();
         await checkStep();
-        if (a.kind !== "upload") await perform(page, a).catch(() => {});
+        if (plan.actions[i].kind === "upload") continue;
+        // The page may have re-rendered since the scan (React): find the control again by its identity.
+        plan.actions[i] = (await refreshAction(page, plan.actions[i])) ?? plan.actions[i];
+        await perform(page, plan.actions[i]).catch(() => {});
       }
       const after = await scan(page);
       const ok = verify(plan.actions, after, resumeFile);
@@ -664,7 +676,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         const key = fieldKey(f);
         handled.add(key);
         const v = Array.isArray(f.value) ? f.value.join(", ") : typeof f.value === "string" ? f.value : "";
-        if (!opts.parsedMode || !v || planned.has(key) || f.control === "file" || f.group || f.demographic) continue;
+        if (!opts.parsedMode || !v || planned.has(key) || planCtx.handled?.has(key) || f.control === "file" || f.group || f.demographic) continue;
         allFilled.push({ label: (f.label || key).slice(0, 300), source: "site", verified: false, status: "parsed", value: v.slice(0, 300) });
       }
     }
@@ -678,226 +690,47 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     return { questions };
   }
 
-  /** Workday work experience / education / skills panels, from My Profile (in profile order). */
+  /** Workday sections (work, education, websites, languages, skills, source) — see wd-sections.ts. */
   async function fillWorkdaySections(page: Page): Promise<{ questions: PendingQuestion[] }> {
-    const questions: PendingQuestion[] = [];
-    const actions: PlannedAction[] = [];
-    const p = planCtx.profile;
-    const ans = planCtx.answers;
-    const panelsOf = (fields: FieldDescriptor[], group: "work" | "education") => {
-      const m = new Map<number, FieldDescriptor[]>();
-      for (const f of fields) if (f.group === group && f.groupIndex != null) m.set(f.groupIndex, [...(m.get(f.groupIndex) ?? []), f]);
-      return m;
-    };
-    const val = (ds: FieldDescriptor[], wd: string) => {
-      const f = ds.find((d) => d.wdField === wd);
-      return f ? (Array.isArray(f.value) ? f.value.join(", ") : String(f.value ?? "")) : "";
-    };
-    const plain = (raw: string | null | undefined) => (raw ? raw : null);
-
-    for (const group of ["work", "education"] as const) {
-      const entries = group === "work" ? p.experience : p.education;
-      const anchor = group === "work" ? "jobTitle" : "schoolName";
-      let fields = await scan(page);
-      if (!fields.some((f) => f.group === group) && !(await addButton(page, group === "work" ? /work experience/ : /education/))) continue;
-      // 1. Match existing panels (saved draft or resume parsing) to profile entries.
-      let panels = panelsOf(fields, group);
-      const assigned = new Map<number, number>(); // panel → profile entry
-      const used = new Set<number>();
-      const extras: number[] = [];
-      for (const [pi, ds] of [...panels.entries()].sort((a, b) => a[0] - b[0])) {
-        const first = norm(val(ds, anchor) || val(ds, "school"));
-        const second = norm(group === "work" ? val(ds, "companyName") : val(ds, "degree"));
-        if (!first && !second) continue; // empty panel: reused below
-        const k = entries.findIndex((e, j) => {
-          if (used.has(j)) return false;
-          if (group === "work") {
-            const w = e as Profile["experience"][number];
-            return norm(w.title) === first && (!second || !w.organization || norm(w.organization) === second);
-          }
-          const ed = e as Profile["education"][number];
-          return !!ed.institution && norm(ed.institution) === first;
-        });
-        if (k >= 0) {
-          assigned.set(pi, k);
-          used.add(k);
-        } else extras.push(pi);
-      }
-      const preexisting = new Set(assigned.keys());
-      // 2. Entries Workday shows that are not in My Profile (e.g. parsed from the resume): the user decides.
-      let removed = false;
-      for (const pi of extras.sort((a, b) => b - a)) {
-        const ds = panels.get(pi)!;
-        const desc = [val(ds, anchor) || val(ds, "school"), group === "work" ? val(ds, "companyName") : val(ds, "degree")].filter(Boolean).join(" — ");
-        const key = `${group}_extra:${norm(desc)}`.slice(0, 200);
-        const choice = String(ans[key] ?? "");
-        if (choice === "Remove") {
-          if (await deletePanel(page, group, pi)) removed = true;
-        } else if (choice !== "Keep") {
-          questions.push({ key, label: `${group === "work" ? "Work experience" : "Education"} entry on the form that is not in My Profile: “${desc}”`, kind: "radio", required: true, options: ["Keep", "Remove"], reason: "parsed_unverified", sensitive: false, hint: null });
-        }
-      }
-      if (removed) {
-        // Panel numbers shift after a removal: match again on the next pass.
-        fields = await scan(page);
-        panels = panelsOf(fields, group);
-        assigned.clear();
-        used.clear();
-        for (const [pi, ds] of panels) {
-          const first = norm(val(ds, anchor) || val(ds, "school"));
-          const k = entries.findIndex((e, j) => !used.has(j) && (group === "work" ? norm((e as Profile["experience"][number]).title) === first : norm((e as Profile["education"][number]).institution ?? "") === first));
-          if (k >= 0) {
-            assigned.set(pi, k);
-            used.add(k);
-          }
-        }
-        preexisting.clear();
-        for (const pi of assigned.keys()) preexisting.add(pi);
-      }
-      // 3. Profile entries without a panel: reuse empty panels, then "Add".
-      for (let k = 0; k < entries.length; k++) {
-        if (used.has(k)) continue;
-        const empty = [...panels.entries()].find(([pi, ds]) => !assigned.has(pi) && !norm(val(ds, anchor) || val(ds, "school")));
-        if (empty) {
-          assigned.set(empty[0], k);
-          used.add(k);
-          continue;
-        }
-        const add = await addButton(page, group === "work" ? /work experience/ : /education/);
-        if (!add) break;
-        const before = panels.size;
-        await add.click();
-        for (let w = 0; w < 20 && panelsOf(await scan(page), group).size === before; w++) await sleep(150);
-        fields = await scan(page);
-        panels = panelsOf(fields, group);
-        const fresh = [...panels.keys()].filter((pi) => !assigned.has(pi)).sort((a, b) => b - a)[0];
-        if (fresh == null) break;
-        await set({}, group === "work" ? "work_entry_added" : "education_entry_added", { n: k + 1 });
-        assigned.set(fresh, k);
-        used.add(k);
-      }
-      // 4. Fill each assigned panel from its profile entry (performed right away: adding panels in
-      //    the next section may re-render the form).
-      for (const [pi, k] of assigned) {
-        const label = group === "work" ? `${(entries[k] as Profile["experience"][number]).title}` : `${(entries[k] as Profile["education"][number]).institution ?? ""}`;
-        const want = (wd: string): string | boolean | null => {
-          const a = ans[`${group}:${k}:${wd}`];
-          if (a !== undefined && a !== "") return a as string | boolean;
-          if (group === "work") {
-            const e = entries[k] as Profile["experience"][number];
-            if (wd === "jobTitle") return e.title;
-            if (wd === "companyName" || wd === "company") return plain(e.organization);
-            if (wd === "currentlyWorkHere") return e.current;
-            if (wd === "startDate") return plain(e.start);
-            if (wd === "endDate") return e.current ? null : plain(e.end);
-            if (wd === "roleDescription" || wd === "description") return plain(e.description);
-            return null;
-          }
-          const e = entries[k] as Profile["education"][number];
-          if (wd === "schoolName" || wd === "school") return plain(e.institution);
-          if (wd === "fieldOfStudy") return plain(e.field);
-          if (wd === "lastYearAttended" || wd === "endDate") return e.year ? String(e.year) : null;
-          return null;
-        };
-        // An entry already on the form (saved draft or resume parsing) that differs from My Profile is a
-        // genuine conflict: the user chooses — it is neither silently overwritten nor duplicated.
-        const src = group === "work" ? "experience" : "education";
-        let keepSite = false;
-        if (preexisting.has(pi)) {
-          const diffs: string[] = [];
-          for (const f of (await enrichOptions(page, panelsOf(await scan(page), group).get(pi) ?? [], checkStep))) {
-            if (!f.visible || !f.wdField || f.control === "file" || f.wdField === "degree") continue;
-            const v = want(f.wdField);
-            if (v === null || v === undefined || v === "" || (isEmpty(f.value) && f.control !== "checkbox")) continue;
-            const a = toAction(f, `${group}:${k}:${f.wdField}`, v, src);
-            const shown = !("misfit" in a) && a.kind === "date" ? [a.value.month, a.value.day, a.value.year].filter(Boolean).join("/") : String(v);
-            if (!("misfit" in a) && !holds(f, a)) diffs.push(`${f.label.replace(/\*\s*$/, "")}: “${Array.isArray(f.value) ? f.value.join(", ") : String(f.value)}” ≠ “${shown}”`);
-          }
-          if (diffs.length) {
-            const decision = String(ans[`${group}_conflict:${k}`] ?? "");
-            if (!decision) {
-              questions.push({ key: `${group}_conflict:${k}`, label: `${group === "work" ? "Work experience" : "Education"} “${label}” on the form differs from My Profile — ${diffs.join("; ")}`.slice(0, 500), kind: "radio", required: true, options: ["Use My Profile", "Keep the form's values"], reason: "conflict", sensitive: false, hint: null, rememberable: false });
-              continue;
-            }
-            keepSite = decision.startsWith("Keep");
-          }
-        }
-        // The checkbox first: it shows or hides the end date.
-        let ds = panelsOf(await scan(page), group).get(pi) ?? [];
-        const cb = ds.find((d) => d.wdField === "currentlyWorkHere" && d.control === "checkbox");
-        const cv = cb && !keepSite ? want("currentlyWorkHere") : null;
-        if (cb && typeof cv === "boolean" && cb.value !== cv) {
-          await perform(page, { ref: cb.ref, key: `${group}:${k}:currentlyWorkHere`, label: cb.label, control: "checkbox", kind: "check", value: cv, source: "experience" }).catch(() => {});
-          await sleep(300);
-        }
-        ds = await enrichOptions(page, panelsOf(await scan(page), group).get(pi) ?? [], checkStep);
-        for (const f of ds) {
-          if (!f.visible || !f.wdField || f.control === "file") continue;
-          if (keepSite && !isEmpty(f.value)) continue; // the user kept the form's values
-          const key = `${group}:${k}:${f.wdField}`;
-          if (f.wdField === "currentlyWorkHere") {
-            if (cb && typeof cv === "boolean") actions.push({ ref: f.ref, key, label: f.label, control: "checkbox", kind: "check", value: cv, source: "experience" });
-            continue;
-          }
-          let v = want(f.wdField);
-          if (group === "education" && f.wdField === "degree" && (ans[key] === undefined || ans[key] === "")) {
-            const e = entries[k] as Profile["education"][number];
-            v = degreeOption(e.level, f.options.map((o) => o.label));
-            if (!v && f.required) {
-              questions.push(question(f, key, "missing", false, e.level));
-              continue;
-            }
-          }
-          if (v === null || v === undefined || v === "") {
-            if (f.required) questions.push({ ...question(f, key, "missing", false), label: `${label}: ${f.label}`.slice(0, 500) });
-            continue;
-          }
-          const a = toAction(f, key, v, group === "work" ? "experience" : "education");
-          if ("misfit" in a) {
-            if (f.required) questions.push({ ...question(f, key, "no_matching_option", false, String(v)), label: `${label}: ${f.label}`.slice(0, 500) });
-            continue;
-          }
-          // Already right on the form: keep it (no erase and re-type).
-          if (holds(f, a.kind === "search" ? { ...a, match: [String(v)], value: String(v) } : a)) continue;
-          // Searchable school / field-of-study lists: only an exact option is taken.
-          if (a.kind === "search") actions.push({ ...a, match: [String(v)], value: String(v) });
-          else actions.push(a);
-        }
-      }
-      await runActions(actions.splice(0));
-    }
-
-    // Skills: each profile skill that the employer's list offers exactly (optional; never invented).
-    const skills = (await scan(page)).find((f) => f.group === "skills" && f.visible && f.control === "combobox");
-    if (skills && p.skills.length) {
-      const have = new Set((Array.isArray(skills.value) ? skills.value : []).map(norm));
-      for (const sk of p.skills.slice(0, 25)) {
-        if (have.has(norm(sk))) continue;
-        await pickOption(page, page.locator(`[data-ca-ref="${skills.ref}"]`), sk, (l) => l === norm(sk), 600).catch(() => {});
-      }
-      const now = (await scan(page)).find((f) => f.ref === skills.ref);
-      const chips = new Set((Array.isArray(now?.value) ? now.value : []).map(norm));
-      allFilled.push({ label: skills.label || "Skills", source: "skills", verified: p.skills.some((sk) => chips.has(norm(sk))) });
-    }
-
-    return { questions };
-
-    async function runActions(list: PlannedAction[]) {
-      if (!list.length) return;
-      for (const a of list) {
+    const r = await fillSections({
+      page,
+      profile: planCtx.profile,
+      answers: planCtx.answers,
+      employer: planCtx.employer ?? null,
+      jobSource,
+      guard: async () => {
         await checkCancel();
         await checkStep();
-        await perform(page, a).catch(() => {});
-      }
-      const after = await scan(page);
-      const ok = verify(list, after, resumeFile);
-      allFilled = allFilled.concat(filledSummary(list, ok));
-      for (const a of list) {
-        if (ok.has(a.ref)) continue;
-        const f = after.find((x) => x.ref === a.ref);
-        if ((f?.required ?? true) && !questions.some((q) => q.key === a.key)) questions.push(f ? question(f, a.key, "not_accepted", false) : { key: a.key, label: a.label, kind: "text", required: true, options: [], reason: "not_accepted", sensitive: false, hint: null });
-      }
-      await set({ filled: allFilled }, "filled", { count: ok.size, total: list.length });
+      },
+      record: (f) => {
+        allFilled.push(f);
+      },
+      event: async (code, params) => {
+        await set({ filled: allFilled }, code, params);
+      },
+      diag: (section, fields, note) => diagnose(page, section, fields, note),
+      equivalent: deps.aiAssist ? (purpose, value, options) => deps.aiAssist!(purpose, value, options) : undefined,
+    });
+    planCtx.handled = new Set([...(planCtx.handled ?? []), ...r.handled]);
+    await set({ filled: allFilled }, "filled", { count: allFilled.filter((x) => x.verified).length, total: allFilled.length });
+    return { questions: r.questions };
+  }
+
+  /**
+   * Local diagnostic snapshot of a section that could not be completed: a screenshot (local only, like
+   * other evidence) and its structure — labels, control kinds, whether a value is present, how many
+   * options — never the values themselves.
+   */
+  async function diagnose(page: Page, section: string, fields: FieldDescriptor[], note: string) {
+    try {
+      const dir = deps.evidenceDir(attemptId);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const shape = fields.map((f) => ({ label: f.label.slice(0, 120), control: f.control, field: f.wdField ?? null, group: f.group ?? null, index: f.groupIndex ?? null, required: f.required, has_value: !isEmpty(f.value), options: f.options.length }));
+      writeFileSync(join(dir, `diag-${section}-${Date.now()}.json`), JSON.stringify({ section, note, at: new Date().toISOString(), url_path: new URL(page.url()).pathname.replace(/[^/]{24,}/g, "…"), fields: shape }, null, 2), { mode: 0o600 });
+      await shot(page, `diag-${section}`.slice(0, 40));
+      await set({}, "section_diagnosed", { section, note });
+    } catch {
+      /* diagnostics are best effort */
     }
   }
 
@@ -1036,186 +869,6 @@ async function signals(page: Page): Promise<PageSignals> {
   return (await page.evaluate(PAGE_SIGNALS)) as PageSignals;
 }
 
-async function scan(page: Page): Promise<FieldDescriptor[]> {
-  return (await page.evaluate(SCAN_FIELDS)) as FieldDescriptor[];
-}
-
-const OPTION_SEL = `.select__option, [role="option"], [id*="-option-"], ${WD_OPTION_SEL}`;
-
-/** Visible options of an open menu (never the Workday "selectedItemList" chips). */
-async function visibleOptions(page: Page): Promise<Locator[]> {
-  const loc = page.locator(OPTION_SEL).filter({ visible: true });
-  const out: Locator[] = [];
-  const n = await loc.count();
-  for (let i = 0; i < n; i++) {
-    const o = loc.nth(i);
-    if (await o.evaluate((e) => !e.closest('[data-automation-id="selectedItemList"]')).catch(() => false)) out.push(o);
-  }
-  return out;
-}
-
-/** Reads the options of comboboxes / listboxes (they exist only while the menu is open). */
-async function enrichOptions(page: Page, fields: FieldDescriptor[], guard?: () => Promise<void>): Promise<FieldDescriptor[]> {
-  for (const f of fields) {
-    if ((f.control !== "combobox" && f.control !== "listbox") || !f.visible || f.options.length || (f.control === "combobox" && f.asyncOptions)) continue;
-    await guard?.();
-    const loc = page.locator(`[data-ca-ref="${f.ref}"]`);
-    try {
-      await loc.click({ timeout: 3000 });
-      // Options may load after the menu opens: wait for them (up to 3 s) before reading.
-      let found = await visibleOptions(page);
-      for (let w = 0; w < 12 && !found.length; w++) {
-        await sleep(250);
-        found = await visibleOptions(page);
-      }
-      const texts: string[] = [];
-      for (const o of found) {
-        const tx = ((await o.textContent()) ?? "").replace(/\s+/g, " ").trim();
-        if (tx) texts.push(tx);
-      }
-      f.options = texts.slice(0, 300).map((l) => ({ value: l, label: l }));
-      if (f.control === "combobox") f.asyncOptions = !texts.length;
-      await page.keyboard.press("Escape");
-      await sleep(100);
-    } catch {
-      if (f.control === "combobox") f.asyncOptions = true;
-    }
-  }
-  return fields;
-}
-
-async function perform(page: Page, a: PlannedAction) {
-  const loc = page.locator(`[data-ca-ref="${a.ref}"]`);
-  // The page re-rendered since the scan: fail fast (the step is verified and asked again) instead of waiting.
-  if (!(await loc.count())) throw new Error("stale_field");
-  switch (a.kind) {
-    case "fill":
-      await loc.fill(a.value);
-      await loc.blur().catch(() => {});
-      return;
-    case "check":
-      // A click (not setChecked): some forms re-render on change, which would make setChecked retry.
-      if ((await loc.isChecked()) !== a.value) await loc.click({ force: true });
-      return;
-    case "date":
-      // Workday date sections only commit real keystrokes.
-      for (const part of ["month", "day", "year"] as const) {
-        const v = a.value[part];
-        const ref = a.parts[part];
-        if (!v) continue;
-        const target = ref ? page.locator(`[data-ca-ref="${ref}"]`) : null;
-        if (!target) continue;
-        await target.click();
-        await target.press("ControlOrMeta+A");
-        await target.pressSequentially(v);
-      }
-      await page.keyboard.press("Tab").catch(() => {});
-      return;
-    case "choose":
-      if (a.control === "select") {
-        await loc.selectOption({ label: a.values[0] });
-        return;
-      }
-      if (a.control === "radio" || a.control === "checkboxes") {
-        for (const r of a.optionRefs ?? []) await page.locator(`[data-ca-ref="${r}"]`).check({ force: true });
-        return;
-      }
-      if (a.control === "listbox") return chooseListbox(page, loc, a.values[0]);
-      if (a.control === "combobox") return pickOption(page, loc, a.values[0], (l) => l === norm(a.values[0]), 250);
-      return;
-    case "search":
-      // Only an unambiguous suggestion is taken (e.g. "Toronto, Ontario, Canada", not "Toronto, Ohio").
-      return pickOption(page, loc, a.value, (l) => a.match.every((m) => l.includes(norm(m))), 1500);
-  }
-}
-
-/**
- * Workday button dropdown: open, wait for the options, click the one with exactly this text, then
- * re-read the button until the choice has persisted (React may re-render); one retry.
- */
-async function chooseListbox(page: Page, loc: Locator, label: string) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    await loc.click();
-    let opts = await visibleOptions(page);
-    for (let w = 0; w < 12 && !opts.length; w++) {
-      await sleep(250);
-      opts = await visibleOptions(page);
-    }
-    let clicked = false;
-    for (const o of opts) {
-      if (norm(await o.textContent()) === norm(label)) {
-        await o.click();
-        clicked = true;
-        break;
-      }
-    }
-    if (!clicked) {
-      await page.keyboard.press("Escape");
-      return;
-    }
-    for (let w = 0; w < 8; w++) {
-      await sleep(250);
-      if (norm(await loc.textContent().catch(() => "")) === norm(label)) return;
-    }
-  }
-}
-
-async function pickOption(page: Page, loc: Locator, text: string, fits: (normalizedLabel: string) => boolean, wait: number) {
-  await loc.click();
-  await loc.fill(text);
-  await sleep(wait);
-  let opts = await visibleOptions(page);
-  if (!opts.length) {
-    // Workday prompts search on Enter.
-    await loc.press("Enter").catch(() => {});
-    await sleep(1200);
-    opts = await visibleOptions(page);
-  }
-  const hits: Locator[] = [];
-  for (const o of opts) if (fits(norm(await o.textContent()))) hits.push(o);
-  if (hits.length === 1) await hits[0].click();
-  await sleep(150);
-  await page.keyboard.press("Escape").catch(() => {});
-}
-
-function verify(actions: PlannedAction[], after: FieldDescriptor[], resume: { name: string }): Set<string> {
-  const ok = new Set<string>();
-  const byKey = new Map(after.map((f) => [fieldKey(f), f]));
-  const byRef = new Map(after.map((f) => [f.ref, f]));
-  const digits = (s: string) => s.replace(/\D+/g, "");
-  for (const a of actions) {
-    const f = byRef.get(a.ref) ?? byKey.get(a.key);
-    if (!f) continue;
-    const v = f.value;
-    const list = (Array.isArray(v) ? v : [String(v ?? "")]).map(norm);
-    let good = false;
-    switch (a.kind) {
-      case "upload":
-        good = list.includes(norm(resume.name));
-        break;
-      case "fill":
-        good = /phone|tel/.test(`${f.name} ${f.id} ${f.inputType}`.toLowerCase()) ? digits(String(v)).endsWith(digits(a.value).slice(-7)) && digits(a.value).length > 0 : norm(String(v)) === norm(a.value);
-        break;
-      case "check":
-        good = v === a.value;
-        break;
-      case "date": {
-        const want = [a.value.month, a.value.day, a.value.year].filter(Boolean).map((x) => String(Number(x))).join("/");
-        good = String(v ?? "").split("/").map((x) => String(Number(x))).join("/") === want;
-        break;
-      }
-      case "choose":
-        good = a.values.every((x) => list.includes(norm(x)));
-        break;
-      case "search":
-        good = list.some((x) => a.match.every((m) => x.includes(norm(m))));
-        break;
-    }
-    if (good) ok.add(a.ref);
-  }
-  return ok;
-}
-
 function submitButton(page: Page, ats: Ats | null) {
   const generic = page.getByRole("button", { name: /^submit( (my )?application)?$/i });
   if (ats === "lever") return page.locator('#btn-submit, button[data-qa="btn-submit"]').or(generic).first();
@@ -1253,6 +906,20 @@ async function waitForOutcome(page: Page, ats: Ats | null, posts: ReturnType<typ
     await sleep(500);
   }
   return last.kind === "validation_errors" && !posts.posted() ? last : last.kind === "challenge" || last.kind === "email_code" ? last : ({ kind: "pending" } as const);
+}
+
+/**
+ * An action whose element was replaced by a re-render gets the new element (same field key), with
+ * its option / date-part references remapped. Unchanged when the element is still there.
+ */
+async function refreshAction(page: Page, a: PlannedAction): Promise<PlannedAction | null> {
+  if (await page.locator(`[data-ca-ref="${a.ref}"]`).count()) return a;
+  const f = (await scan(page)).find((x) => x.visible && !x.group && fieldKey(x) === a.key);
+  if (!f) return null;
+  const next = { ...a, ref: f.ref } as PlannedAction;
+  if (next.kind === "choose" && next.optionRefs) next.optionRefs = next.values.map((v) => f.options.find((o) => norm(o.label) === norm(v))?.ref).filter((x): x is string => !!x);
+  if (next.kind === "date") next.parts = f.parts ?? next.parts;
+  return next;
 }
 
 const isTimeout = (e: unknown) => (e as Error)?.name === "TimeoutError" || /Timeout \d+ms exceeded/.test(String((e as Error)?.message ?? ""));
