@@ -35,6 +35,9 @@ export function createApplyRunner(opts: {
   mail?: MailVerifier | null;
   /** Owner opt-in AI option matching (read at the start of each run). */
   aiAssist?: () => EngineDeps["aiAssist"];
+  /** Unfamiliar application pages. Sees labels only; never profile values. */
+  pageAgent?: EngineDeps["pageAgent"];
+  chooseOption?: EngineDeps["chooseOption"];
 }): ApplyRunner {
   const queue: string[] = [];
   const cancelled = new Set<string>();
@@ -80,6 +83,8 @@ export function createApplyRunner(opts: {
             accounts: opts.accounts,
             mail: opts.mail ?? null,
             aiAssist: opts.aiAssist?.() ?? null,
+            pageAgent: opts.pageAgent,
+            chooseOption: opts.chooseOption,
           },
           id,
           ),

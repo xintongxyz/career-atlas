@@ -18,6 +18,8 @@ export interface Submission {
 export interface AtsFixture {
   url: string;
   submissions: Submission[];
+  /** Query strings captured from synthetic custom-form review pages. */
+  echoes: string[];
   hits: string[];
   workday: WorkdayFixtureState;
   indeed: IndeedFixtureState;
@@ -161,6 +163,69 @@ function lever(path: string, variant: string) {
   return page("Northwind Analytics - Business Analyst", body, script);
 }
 
+function customApplication(pathname: string) {
+  if (pathname.endsWith("/start")) {
+    return page(
+      "Apply",
+      `<h1>How do you want to apply?</h1>
+      <button type="button" id="guest">Apply without an Account</button>
+      <button type="button" id="signin">Sign In</button>
+      <a href="/custom/jobs/42/register">Create one now.</a>
+      <script>
+        document.getElementById('guest').addEventListener('click', () => { location.href = '/custom/jobs/42/apply'; });
+        document.getElementById('signin').addEventListener('click', () => { location.href = '/custom/jobs/42/register'; });
+      </script>`,
+    );
+  }
+  if (pathname.endsWith("/apply")) {
+    return page(
+      "Application",
+      `<h1>Application</h1>
+      <form id="app">
+        <div class="field"><label for="email">Email Address *</label><input id="email" required></div>
+        <div class="field"><label for="confirmEmail">Confirm Email Address *</label><input id="confirmEmail" required></div>
+        <div class="field"><label for="firstName">First Name *</label><input id="firstName" autocomplete="given-name" required></div>
+        <div class="field"><label for="lastName">Last Name *</label><input id="lastName" autocomplete="family-name" required></div>
+        <div class="field"><label for="country">Country</label><select id="country"><option value="">Select</option><option>Canada</option><option>United States</option></select></div>
+        <div class="field"><label for="resume">Resume</label><input id="resume" type="file"></div>
+        <div class="field"><label for="jobPostingApplication_workHistory_0_title">Position Title *</label><input id="jobPostingApplication_workHistory_0_title" required></div>
+        <div class="field"><label for="jobPostingApplication_workHistory_0_companyName">Employer Name *</label><input id="jobPostingApplication_workHistory_0_companyName" required></div>
+        <div class="field"><label for="jobPostingApplication_workHistory_0_isCurrent">Current Job</label><input id="jobPostingApplication_workHistory_0_isCurrent" type="checkbox"></div>
+        <div class="field"><label for="jobPostingApplication_educationHistory_0_schoolName">School *</label><input id="jobPostingApplication_educationHistory_0_schoolName" required></div>
+        <button type="button" id="next">Next</button>
+      </form>
+      <script>
+        document.getElementById('next').addEventListener('click', () => {
+          const val = (id) => document.getElementById(id).value;
+          const q = new URLSearchParams({
+            email: val('email'), confirm: val('confirmEmail'), first: val('firstName'), last: val('lastName'),
+            country: val('country'), title: val('jobPostingApplication_workHistory_0_title'),
+            org: val('jobPostingApplication_workHistory_0_companyName'),
+            current: document.getElementById('jobPostingApplication_workHistory_0_isCurrent').checked ? '1' : '0',
+            school: val('jobPostingApplication_educationHistory_0_schoolName'),
+            resume: (document.getElementById('resume').files[0] || {}).name || ''
+          });
+          location.href = '/custom/jobs/42/review?' + q.toString();
+        });
+      </script>`,
+    );
+  }
+  if (pathname.endsWith("/review")) {
+    return page(
+      "Review",
+      `<h1>Review your application</h1>
+      <form id="application-form" method="post" action="/custom/jobs/42/submit"></form>
+      <button type="button" id="submit">Submit</button>
+      <script>document.getElementById('submit').addEventListener('click', () => document.getElementById('application-form').submit());</script>`,
+    );
+  }
+  return page(
+    "Product Analyst",
+    `<h1>Product Analyst</h1><p>Synthetic employer site.</p><button type="button" id="apply">Apply</button>
+    <script>document.getElementById('apply').addEventListener('click', () => { location.href = '/custom/jobs/42/start'; });</script>`,
+  );
+}
+
 async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c as Buffer);
@@ -169,6 +234,7 @@ async function readBody(req: IncomingMessage) {
 
 export async function startAtsFixture(): Promise<AtsFixture> {
   const submissions: Submission[] = [];
+  const echoes: string[] = [];
   const hits: string[] = [];
   const workday = newWorkdayState();
   const indeed = newIndeedState();
@@ -210,6 +276,10 @@ export async function startAtsFixture(): Promise<AtsFixture> {
     if (/^\/lever\/[^/]+\/[0-9a-f-]{36}\/thanks$/.test(u.pathname)) return html(page("Thanks", "<h3>Application submitted!</h3><p>Thanks for applying to Northwind Analytics.</p>"));
     if (/^\/lever\/[^/]+\/[0-9a-f-]{36}\/apply$/.test(u.pathname)) return html(lever(u.pathname, variant));
     if (u.pathname === "/other/careers") return html(page("Careers", "<h1>Careers</h1><form><input name=q></form>"));
+    if (u.pathname.startsWith("/custom/jobs/42")) {
+      if (u.pathname.endsWith("/review")) echoes.push(u.search);
+      return html(customApplication(u.pathname));
+    }
     html("Not found", 404);
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -217,6 +287,7 @@ export async function startAtsFixture(): Promise<AtsFixture> {
   return {
     url: `http://127.0.0.1:${port}`,
     submissions,
+    echoes,
     hits,
     workday,
     indeed,

@@ -33,8 +33,10 @@ import { getProfileRow } from "../../server/services/profile";
 import { launchBrowser, type BrowserChoice } from "./browser";
 import { tenantOf, type AccountManager } from "./credentials";
 import { questionMeaning } from "@shared/apply-semantic";
+import type { PublicFacts } from "./codex-agent";
 import { PAGE_SIGNALS } from "./dom";
-import { enrichOptions, perform, scan, verify } from "./interact";
+import { PAGE_CONTROLS, addPanelButton, decideAdvance, decideNavigation, panelCount, safeClickName, type PageObservation } from "./generic";
+import { enrichOptions, perform, readMenu, scan, verify } from "./interact";
 import { classifyIndeedUrl } from "./indeed";
 import { applicationUrl, atsFromSignals, classifyAfterSubmit, stripQuery, type Ats, type PageSignals } from "./outcome";
 import { fieldKey, norm, planForm, question, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
@@ -61,6 +63,13 @@ export interface EngineDeps {
   mail?: MailVerifier | null;
   /** Owner opt-in: Claude decides whether one of the site's options means the same as a value (never facts). */
   aiAssist?: ((purpose: "skill" | "field_of_study" | "language" | "school", value: string, options: string[]) => Promise<string | null>) | null;
+  /**
+   * Unfamiliar pages: pick one visible control to press. The model sees button names and labels only.
+   * The engine refuses Submit, sign-in and account creation even if the model asks for them.
+   */
+  pageAgent?: ((obs: { buttons: string[]; labels: string[] }) => Promise<string | null>) | null;
+  /** Unfamiliar closed questions: pick an option from boolean facts (has email, has phone, job source). Never profile values. */
+  chooseOption?: ((label: string, options: string[], facts: PublicFacts) => Promise<string | null>) | null;
 }
 
 class Stop extends Error {
@@ -234,6 +243,144 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     return indeedApply ? pause("confirm_result", [], { route: "indeed_apply" }) : pause("unexpected_page", [], { errorCode: "indeed_no_destination" });
   }
 
+  async function observe(page: Page): Promise<PageObservation> {
+    return (await page.evaluate(PAGE_CONTROLS)) as PageObservation;
+  }
+
+  async function clickNamed(page: Page, name: string): Promise<boolean> {
+    const re = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+    for (const role of ["button", "link"] as const) {
+      const loc = page.getByRole(role, { name: re }).first();
+      if (await loc.isVisible().catch(() => false)) {
+        await loc.click({ timeout: 8000 });
+        await page.waitForLoadState("domcontentloaded").catch(() => {});
+        await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
+        await sleep(600);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function facts(): PublicFacts {
+    const c = planCtx.profile.contact;
+    const t = planCtx.profile.application_defaults.phone_type;
+    return { has_email: !!c.email, has_phone: !!c.phone, phone_type: t === "mobile" || t === "home" || t === "work" ? t : null, job_source: jobSource };
+  }
+
+  /**
+   * A site that is not Workday, Greenhouse or Lever. Clicks Apply (and "Apply without an account"
+   * when that is offered — no account is created), fills from My Profile, adds work/education rows
+   * the profile has, and stops on the page that shows Submit unless submission was authorised.
+   */
+  async function genericFlow(page: Page, fromIndeed: boolean): Promise<AttemptState> {
+    await set({ ats: null, stage: "opening" }, "opened_form");
+    let cookieDismissed = false;
+    let lastSig = "";
+    let repeats = 0;
+    for (let step = 0; step < 16; step++) {
+      await checkCancel();
+      let s = await signals(page);
+      if (s.greenhouseIframe) {
+        await goto(page, s.greenhouseIframe, t.navigation);
+        s = await signals(page);
+      }
+      if (atsFromSignals(s, allow)) return formFlow(page, fromIndeed);
+      const obs = await observe(page);
+      const decision = decideNavigation(obs, { password: s.password, challenge: s.challenge, cookieDismissed });
+      const sig = `${decision.action}:${"name" in decision ? decision.name : ""}:${page.url()}`;
+      repeats = sig === lastSig ? repeats + 1 : 0;
+      lastSig = sig;
+      if (decision.action === "captcha") return visible ? manual(page, null, "captcha") : pause("captcha");
+      if (decision.action === "login") return visible ? manual(page, null, "login_required") : pause("login_required");
+      if (decision.action === "click" && repeats < 2) {
+        if (decision.why === "cookie") cookieDismissed = true;
+        if (await clickNamed(page, decision.name)) {
+          await set({ stage: "opening" }, "opened_form");
+          continue;
+        }
+      } else if (decision.action === "fill") {
+        let { questions } = await fillPage(page, { uploadInPlan: true });
+        if (questions.some((q) => q.required && q.options.length) && deps.chooseOption) {
+          let changed = false;
+          let asked = 0;
+          for (const q of questions) {
+            if (!q.required || !q.options.length || asked >= 2) continue;
+            asked++;
+            const choice = await deps.chooseOption(q.label, q.options, facts()).catch(() => null);
+            if (choice && q.options.includes(choice)) {
+              planCtx.answers[q.key] = choice;
+              changed = true;
+            }
+          }
+          if (changed) questions = (await fillPage(page, { uploadInPlan: true })).questions;
+        }
+        const names = (await observe(page)).names;
+        const fields = await scan(page);
+        if (!questions.some((q) => q.required)) {
+          const workHave = panelCount(fields, "work");
+          const eduHave = panelCount(fields, "education");
+          const addWork = workHave > 0 && workHave < planCtx.profile.experience.length ? addPanelButton(names, "work") : null;
+          const addEdu = !addWork && eduHave > 0 && eduHave < planCtx.profile.education.length ? addPanelButton(names, "education") : null;
+          const add = addWork ?? addEdu;
+          if (add) {
+            const group = addWork ? "work" : "education";
+            const before = addWork ? workHave : eduHave;
+            await clickNamed(page, add);
+            const after = panelCount(await scan(page), group);
+            if (after > before) {
+              await set({}, group === "work" ? "work_entry_added" : "education_entry_added", { n: after });
+              continue;
+            }
+          }
+          const adv = decideAdvance((await observe(page)).names);
+          if (adv.action === "click") {
+            const beforeUrl = page.url();
+            await clickNamed(page, adv.name);
+            if (page.url() === beforeUrl && repeats >= 2) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+            await set({}, "next_step", { step: step + 2 });
+            continue;
+          }
+          if (adv.action === "review") {
+            await shot(page, "filled");
+            const submit = submitButton(page, null);
+            if (!(await submit.isVisible().catch(() => false))) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page");
+            const gate = await submitGate(page, null);
+            if (gate) return gate;
+            const posts = trackSubmissions(page);
+            await markSubmitting();
+            await submit.click();
+            const outcome = await waitForOutcome(page, null, posts, t.afterSubmit);
+            if (outcome.kind === "verified") return verified(page, outcome.text, outcome.url, "page");
+            if (outcome.kind === "validation_errors") {
+              await shot(page, "rejected");
+              return visible ? manual(page, null, "validation_errors") : pause("validation_errors", [], { errorCode: "validation_errors", errorMessage: outcome.errors.join(" | ").slice(0, 600) });
+            }
+            if (outcome.kind === "challenge" && !posts.posted()) return visible ? manual(page, null, "captcha") : pause("captcha");
+            if (visible) return manual(page, null, outcome.kind === "email_code" ? "login_required" : "unexpected_page");
+            return unconfirmed(page, outcome.kind === "email_code" ? "verification_code_required" : outcome.kind === "challenge" ? "captcha_after_submit" : "no_confirmation");
+          }
+        }
+        if (questions.length) {
+          await shot(page, `step-${step + 1}`);
+          return visible ? manual(page, null, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
+        }
+      }
+      if (deps.pageAgent && repeats < 3) {
+        const suggestion = await deps.pageAgent({ buttons: obs.names, labels: obs.labels }).catch(() => null);
+        const name = suggestion ? safeClickName(suggestion, obs.names) : null;
+        if (name && (await clickNamed(page, name))) {
+          await set({}, "opened_form");
+          continue;
+        }
+      }
+      if (fromIndeed && visible) return employerManual(page);
+      throw new Stop("unsupported_site");
+    }
+    if (fromIndeed && visible) return employerManual(page);
+    throw new Stop("unsupported_site");
+  }
+
   /** The application form itself: Workday wizard, or a single-page Greenhouse / Lever form. */
   async function formFlow(page: Page, fromIndeed: boolean): Promise<AttemptState> {
     let s = await signals(page);
@@ -260,11 +407,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     }
     if (s.challenge) return visible ? manual(page, ats, "captcha") : pause("captcha");
     if (!s.hasForm && s.password) return visible ? manual(page, ats, "login_required") : pause("login_required");
-    if (!ats) {
-      // Followed from Indeed to an employer site Career Atlas can't fill: the user completes it there.
-      if (fromIndeed && visible) return employerManual(page);
-      throw new Stop("unsupported_site");
-    }
+    if (!ats) return genericFlow(page, fromIndeed);
     if (!s.hasForm) throw new Stop("form_not_found");
     await set({ ats, stage: "filling" }, "detected_ats", { ats });
 
@@ -639,29 +782,97 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       if (!fresh.length) break;
       let plan = planForm(fresh, planCtx);
       const upload = plan.actions.find((a) => a.kind === "upload");
-      if (upload && !uploaded) {
+      const alreadyUploaded = fields.some((f) => f.control === "file" && (Array.isArray(f.value) ? f.value : [String(f.value ?? "")]).some((n) => norm(n) === norm(resumeFile.name)));
+      if (upload && !uploaded && !alreadyUploaded) {
         // Resume first: some systems (e.g. Lever) parse it and pre-fill fields, which are then checked.
+        // Uploading again makes some sites wipe the answers already on the page.
         await page.locator(`[data-ca-ref="${upload.ref}"]`).setInputFiles(resumeFile);
         await set({}, "uploaded_resume", { file: resumeFile.name, sha256: row!.resumeSha256 });
         uploaded = true;
-        await sleep(1200);
+        // Ant Design clears the input and shows the name in its list, sometimes after an upload request.
         fields = await scan(page);
+        for (let w = 0; w < 16 && !fields.some((f) => f.control === "file" && (Array.isArray(f.value) ? f.value : [String(f.value ?? "")]).some((n) => norm(n) === norm(resumeFile.name))); w++) {
+          await sleep(500);
+          fields = await scan(page);
+        }
       }
       const now = await enrichOptions(page, fields.filter((f) => f.visible && !handled.has(fieldKey(f))), checkStep);
       plan = planForm(now, planCtx);
       const before = new Map(now.map((f) => [f.ref, f.value]));
-      for (let i = 0; i < plan.actions.length; i++) {
-        await checkCancel();
-        await checkStep();
-        if (plan.actions[i].kind === "upload") continue;
-        // The page may have re-rendered since the scan (React): find the control again by its identity.
-        plan.actions[i] = (await refreshAction(page, plan.actions[i])) ?? plan.actions[i];
-        await perform(page, plan.actions[i]).catch(() => {});
+      // Repeating editors (work, education) discard unsaved rows when something else is clicked.
+      // Fill those rows and press their Update button before touching the rest of the page.
+      const panelRefs = new Set(now.filter((f) => f.group === "work" || f.group === "education").map((f) => f.ref));
+      const groupOf = new Map(now.map((f) => [f.ref, f.group]));
+      const panelActions = plan.actions.filter((a) => panelRefs.has(a.ref) && a.kind !== "upload");
+      const workActions = panelActions.filter((a) => groupOf.get(a.ref) === "work");
+      const eduActions = panelActions.filter((a) => groupOf.get(a.ref) === "education");
+      const rest = [...plan.actions.filter((a) => !panelRefs.has(a.ref))].sort((a, b) => Number(a.kind === "search" || a.kind === "choose") - Number(b.kind === "search" || b.kind === "choose"));
+      const ordered = [...workActions, ...eduActions, ...rest];
+      const run = async (list: PlannedAction[]) => {
+        for (let i = 0; i < list.length; i++) {
+          await checkCancel();
+          await checkStep();
+          if (list[i].kind === "upload") continue;
+          list[i] = (await refreshAction(page, list[i])) ?? list[i];
+          await perform(page, list[i]).catch(() => {});
+        }
+      };
+      const closeMenus = async () => {
+        await page.keyboard.press("Escape").catch(() => {});
+      };
+      // Returns true only when this panel's Update button closed the editor. A click elsewhere discards it.
+      const commit = async (idPart: string): Promise<boolean> => {
+        const field = page.locator(`[id*="${idPart}"]`).first();
+        if (!(await field.count().catch(() => 0))) return false;
+        await closeMenus();
+        const update = field.locator("xpath=following::button[normalize-space()='Update'][1]");
+        if (!(await update.isVisible().catch(() => false))) return false;
+        await update.click({ timeout: 4000 }).catch(() => {});
+        for (let w = 0; w < 8; w++) {
+          if ((await page.locator(`[id*="${idPart}"]`).count().catch(() => 0)) === 0) return true;
+          await sleep(200);
+        }
+        return false;
+      };
+      const confirmed = new Set<string>();
+      const remember = async (list: PlannedAction[]) => {
+        if (!list.length) return;
+        for (const ref of verify(list, await scan(page), resumeFile)) confirmed.add(ref);
+      };
+      // If Update did not close the editor, keep only values the inputs still show.
+      const keep = async (list: PlannedAction[], saved: boolean) => {
+        if (saved) return;
+        const still = verify(list, await scan(page), resumeFile);
+        for (const a of list) if (!still.has(a.ref)) confirmed.delete(a.ref);
+      };
+      // Dropdown menus are portaled outside the editor. Clicking one discards the unsaved row,
+      // so text, dates and checkboxes are saved first. Optional country menus stay for a later pass.
+      const plain = (list: PlannedAction[]) => list.filter((a) => a.kind !== "search" && a.kind !== "choose");
+      const workPlain = plain(workActions);
+      const eduPlain = plain(eduActions);
+      await run(workPlain);
+      await remember(workPlain);
+      await keep(workPlain, await commit("workHistory_"));
+      if (!(await page.locator("[id*='educationHistory_']").count().catch(() => 0)) && eduPlain.length) {
+        const add = page.getByRole("button", { name: /^add education history$/i }).first();
+        if (await add.isVisible().catch(() => false)) {
+          await add.click().catch(() => {});
+          await sleep(400);
+        }
       }
+      await run(eduPlain);
+      await remember(eduPlain);
+      await keep(eduPlain, await commit("educationHistory_"));
+      await closeMenus();
+      await run(rest);
+      plan.actions = ordered;
       const after = await scan(page);
       const ok = verify(plan.actions, after, resumeFile);
+      for (const ref of confirmed) ok.add(ref);
+      const incoming = plan.actions.map((a) => ({ label: (a.label || a.key).slice(0, 300), source: a.source, verified: ok.has(a.ref), status: (opts.parsedMode && !isEmpty(before.get(a.ref)) ? "corrected" : "filled") as "corrected" | "filled" }));
+      allFilled = allFilled.filter((x) => !incoming.some((n) => n.label === x.label && n.source === x.source));
       allFilled = allFilled.concat(
-        plan.actions.map((a) => ({ label: (a.label || a.key).slice(0, 300), source: a.source, verified: ok.has(a.ref), status: (opts.parsedMode && !isEmpty(before.get(a.ref)) ? "corrected" : "filled") as "corrected" | "filled" })),
+        incoming,
         plan.kept.map((k) => ({ label: (k.label || k.key).slice(0, 300), source: k.source, verified: true, status: "kept" as const })),
       );
       questions.push(...plan.questions.filter((q) => !questions.some((x) => x.key === q.key)));
@@ -670,20 +881,43 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         const f = after.find((x) => fieldKey(x) === a.key) ?? now.find((x) => x.ref === a.ref);
         if (f && f.required && !questions.some((q) => q.key === a.key)) questions.push(question(f, a.key, "not_accepted", false, null, qmOf(f)));
       }
+      const verifiedKeys = new Set(plan.actions.filter((a) => ok.has(a.ref)).map((a) => a.key));
+      for (let i = questions.length - 1; i >= 0; i--) if (verifiedKeys.has(questions[i].key)) questions.splice(i, 1);
       // Pre-filled by the site (resume parsing) and not confirmed by My Profile: kept, shown at Review.
       const planned = new Set([...plan.actions.map((a) => a.key), ...plan.kept.map((k) => k.key), ...plan.questions.map((q) => q.key)]);
       for (const f of now) {
         const key = fieldKey(f);
+        const action = plan.actions.find((a) => a.key === key);
+        // A value the page did not keep is tried again on the next pass (resume parsing often re-renders).
+        if (action && !ok.has(action.ref)) continue;
         handled.add(key);
         const v = Array.isArray(f.value) ? f.value.join(", ") : typeof f.value === "string" ? f.value : "";
         if (!opts.parsedMode || !v || planned.has(key) || planCtx.handled?.has(key) || f.control === "file" || f.group || f.demographic) continue;
         allFilled.push({ label: (f.label || key).slice(0, 300), source: "site", verified: false, status: "parsed", value: v.slice(0, 300) });
       }
     }
+    // A required menu we could not answer (Preferred Contact Method, for example) needs its option
+    // labels so Review can ask. Open it only after repeating editors are saved — an outside click
+    // discards an unsaved work or education row. Never choose an option here.
+    const openEditor = page.locator("[id*='workHistory_'], [id*='educationHistory_']").locator("visible=true");
+    const editorCount = await openEditor.count().catch(() => -1);
+    if (editorCount === 0) {
+      const open = await scan(page);
+      for (const q of questions) {
+        if (!q.required || q.options.length) continue;
+        const f = open.find((x) => fieldKey(x) === q.key && x.visible && (x.control === "combobox" || x.control === "listbox"));
+        if (!f) continue;
+        const labels = await readMenu(page, f.ref).catch(() => []);
+        if (labels.length) q.options = labels;
+      }
+    }
     // Before moving on: every visible required field must have a value (nothing left for the site to reject).
-    for (const f of await scan(page)) {
-      if (!f.visible || !f.required || f.group || f.control === "file" || !isEmpty(f.value)) continue;
+    // A second copy of the same control (Dayforce renders some inputs twice) does not count when the other holds the value.
+    const visibleFields = await scan(page);
+    const valued = new Set(visibleFields.filter((f) => f.visible && !isEmpty(f.value)).map((f) => fieldKey(f)));
+    for (const f of visibleFields) {
       const key = fieldKey(f);
+      if (!f.visible || !f.required || f.group || f.control === "file" || valued.has(key)) continue;
       if (!questions.some((q) => q.key === key)) questions.push(question(f, key, "missing", false, null, qmOf(f)));
     }
     await set({ filled: allFilled }, "filled", { count: allFilled.filter((x) => x.verified).length, total: allFilled.length });
@@ -914,7 +1148,9 @@ async function waitForOutcome(page: Page, ats: Ats | null, posts: ReturnType<typ
  */
 async function refreshAction(page: Page, a: PlannedAction): Promise<PlannedAction | null> {
   if (await page.locator(`[data-ca-ref="${a.ref}"]`).count()) return a;
-  const f = (await scan(page)).find((x) => x.visible && !x.group && fieldKey(x) === a.key);
+  // Workday panels are filled by their own adapter. Ordinary repeating blocks (a work-history row on
+  // an unfamiliar form) must be found again after a re-render, or the fill hits a detached node.
+  const f = (await scan(page)).find((x) => x.visible && fieldKey(x) === a.key && !(x.group && x.wdField));
   if (!f) return null;
   const next = { ...a, ref: f.ref } as PlannedAction;
   if (next.kind === "choose" && next.optionRefs) next.optionRefs = next.values.map((v) => f.options.find((o) => norm(o.label) === norm(v))?.ref).filter((x): x is string => !!x);

@@ -319,6 +319,28 @@ describe.skipIf(!ready)("automated applications (synthetic forms, headless brows
     expect((await detail(fill.jid)).status).toBe("applied");
   }, T);
 
+  it("an unfamiliar employer form is filled from My Profile and stops at Review", async () => {
+    const before = fx.submissions.length;
+    const id = await job(`${fx.url}/custom/jobs/42`, "Custom form analyst");
+    const a = await settled((await start(id, resumeB, "review")).body.id);
+    expect(a).toMatchObject({ state: "needs_review", intervention: "submit_approval", submit_clicked_at: null });
+    expect(a.steps.map((s) => s.code)).toEqual(expect.arrayContaining(["opened_form", "uploaded_resume", "next_step"]));
+    expect(a.filled.filter((f) => f.verified).length).toBeGreaterThan(3);
+    expect(fx.submissions.length).toBe(before);
+    expect((await detail(id)).status).toBe("saved");
+    const q = new URLSearchParams(fx.echoes.at(-1) ?? "");
+    expect(q.get("email")).toBe("alex.rivera@example.test");
+    expect(q.get("confirm")).toBe("alex.rivera@example.test");
+    expect(q.get("first")).toBe("Alex");
+    expect(q.get("last")).toBe("Rivera");
+    expect(q.get("title")).toBe("Data Analyst");
+    expect(q.get("org")).toBe("Fabrikam");
+    expect(q.get("school")).toBe("Example University");
+    expect(q.get("current")).toBe("1");
+    expect(q.get("country")).toBe("Canada");
+    expect(q.get("resume")).toBe("Alex_Rivera_Analytics.pdf");
+  }, T);
+
   it("attempt history is kept per job, and logs never contain personal details", async () => {
     const id = (await api<{ items: JobListItem[] }>("/api/jobs?q=Missing%20resume")).body.items[0].id;
     const ov = (await api<ApplyOverview>(`/api/jobs/${id}/apply`)).body;

@@ -29,9 +29,13 @@ site confirms the submission.
    answers you want reused for exactly the same question later (they appear under
    **My Profile → Saved application answers** and can be deleted there).
 
-Sites that are not supported (LinkedIn, Ashby, SmartRecruiters, iCIMS, Taleo, unknown sites
-without a Workday/Greenhouse/Lever form) get **manual assistance** instead: your details ready to
-copy and a link to the form. Mark the job applied yourself afterwards.
+Sites that are not Workday, Greenhouse or Lever are filled the same way when the page has an
+ordinary application form: Career Atlas clicks **Apply** (and **Apply without an account** when
+that choice is offered, so no account is created) and fills from My Profile. A required answer
+that is not in My Profile pauses the attempt. When the form can be completed, it stops on the
+review page until you approve Submit. A signed-in Codex (ChatGPT) can choose the next control or
+an unclear option; it is not given your profile values. LinkedIn, Ashby and SmartRecruiters stay
+manual. Indeed is never automated.
 
 ## Workday
 

@@ -29,7 +29,7 @@ interface LocalStatus {
     total_bytes: number;
   };
   tasks: { running: number; queued: number; retrying: number };
-  ai: { provider: string; claude: { available: boolean; path: string | null; version: string | null; logged_in: boolean; auth_method: string | null; subscription: boolean; reason?: string } };
+  ai: { provider: string; claude: { available: boolean; path: string | null; version: string | null; logged_in: boolean; auth_method: string | null; subscription: boolean; reason?: string }; codex: { available: boolean; path: string | null; version: string | null; logged_in: boolean; chatgpt: boolean; reason?: string } };
 }
 
 const mb = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`;
@@ -137,6 +137,7 @@ export function LocalDataSection() {
           </div>
           {!claude.subscription ? <p className="text-xs text-ink-3">{t("local.claudeHowTo")}</p> : null}
           <p className="rounded-md bg-info-soft px-3 py-2 text-xs text-info">{t("local.aiNotice")}</p>
+          <p className="text-xs text-ink-3">{s.ai.codex?.chatgpt ? t("local.codexReady") : s.ai.codex?.reason === "api_key_refused" ? t("local.codexApiKey") : s.ai.codex?.path ? t("local.codexOff") : t("local.codexMissing")}</p>
           <label className="flex items-center gap-2">
             <input type="checkbox" className="size-4" checked={aiOn} disabled={setAi.isPending || (!aiOn && !claude.subscription)} onChange={(e) => setAi.mutate(e.target.checked ? "claude_code" : "none")} />
             {t("local.aiEnable")}

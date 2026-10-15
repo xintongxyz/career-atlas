@@ -11,6 +11,7 @@
 // Ideas (not code) from the MIT-licensed projects devdattatalele/auto-apply,
 // andrewmillercode/Autofill-Jobs and Br1an67/OpenJobAutofill; see docs/AUTO_APPLY.md.
 import type { FilledField, PendingQuestion } from "@shared/apply";
+import { SOURCE_QUERY } from "@shared/apply-match";
 import { domainForLabel, matchOptionSemantic, questionMeaning, type QuestionMeaning } from "@shared/apply-semantic";
 import type { Profile } from "@shared/profile";
 
@@ -63,6 +64,7 @@ export type Semantic =
   | "email"
   | "phone"
   | "phone_country"
+  | "contact_method"
   | "location"
   | "city"
   | "region"
@@ -175,7 +177,11 @@ function classifyStandard(f: FieldDescriptor, name: string, id: string, ac: stri
   if (ac === "family-name" || /(^|[^a-z])(last_?name|lastname|lname|surname|family_?name)/.test(keys) || /^(legal )?last name|^surname|^family name/.test(label)) return "last_name";
   if (/preferred_?name/.test(keys) || /^preferred (first )?name/.test(label)) return "preferred_name";
   if (ac === "name" || name === "name" || /^(full |legal )?name$/.test(label)) return "full_name";
+  if (/confirm e-?mail|re-?enter e-?mail|e-?mail address again/.test(label) || /confirmemail|emailconfirm|email_confirm/.test(keys)) return "email";
   if (ac === "email" || f.inputType === "email" || /(^|[^a-z])e?-?mail/.test(keys) || /^e ?mail/.test(label)) return "email";
+  if (/preferred contact (method|type)/.test(label)) return "contact_method";
+  if ((f.control === "combobox" || f.control === "select") && /dialing code|calling code/.test(label)) return "phone_country";
+  if ((f.control === "combobox" || f.control === "select") && /^(phone|mobile|cell)/.test(label) && !/phone|mobile/.test(id)) return "phone_country";
   if (/phone (device )?type|type of phone|phone device/.test(label)) return "phone_type";
   if (f.control !== "combobox" && f.control !== "select" && f.control !== "listbox" && (ac.startsWith("tel") || f.inputType === "tel" || /phone|mobile/.test(keys) || /^(phone|mobile|telephone|cell)/.test(label))) return "phone";
   if (/linkedin/.test(all)) return "linkedin";
@@ -251,6 +257,15 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
       return has(c.email) ? { ok: true, value: c.email!, source: "contact.email" } : { ok: false, reason: "missing" };
     case "phone":
       return has(c.phone) ? { ok: true, value: c.phone!, source: "contact.phone" } : { ok: false, reason: "missing" };
+    case "contact_method": {
+      const t = p.application_defaults.phone_type;
+      if (t === "mobile") return { ok: true, value: "Mobile", source: "defaults.phone_type" };
+      if (t === "home") return { ok: true, value: "Home", source: "defaults.phone_type" };
+      if (t === "work") return { ok: true, value: "Work", source: "defaults.phone_type" };
+      if (has(c.email) && !has(c.phone)) return { ok: true, value: "Email", source: "contact.email" };
+      if (has(c.phone) && !has(c.email)) return { ok: true, value: "Mobile", source: "contact.phone" };
+      return { ok: false, reason: "missing" };
+    }
     case "phone_type": {
       const t = p.application_defaults.phone_type;
       return t ? { ok: true, value: t === "mobile" ? "Mobile" : t === "home" ? "Home" : "Work", source: "defaults.phone_type" } : { ok: false, reason: "missing" };
@@ -454,6 +469,11 @@ export function screeningValue(qm: QuestionMeaning, ctx: PlanContext, label = ""
     if (asked.length && d.placement_months.length && asked.every((n) => d.placement_months.includes(n))) return ok("yes", "defaults.placement_months");
     return { ok: false, reason: "missing" };
   }
+  if (qm.meaning === "source") {
+    if (typeof d.source === "string" && d.source) return ok(d.source, "defaults.source");
+    if (ctx.jobSource) return ok(SOURCE_QUERY[ctx.jobSource], `job.source.${ctx.jobSource}`);
+    return { ok: false, reason: "missing" };
+  }
   const key = DEFAULT_KEY[qm.meaning];
   if (!key) return null;
   const v = d[key];
@@ -530,12 +550,85 @@ export function toAction(f: FieldDescriptor, key: string, value: unknown, source
 
 const CLOSED: Control[] = ["select", "radio", "listbox", "checkbox", "combobox"];
 
+const LEVEL_LABEL: Record<string, string> = {
+  high_school: "High School",
+  diploma: "Diploma",
+  bachelor: "Bachelor's",
+  master: "Master's",
+  doctorate: "Doctorate",
+};
+
+/**
+ * A calendar day for a control that requires one. My Profile stores a month (YYYY-MM) or a year.
+ * The day is the 1st of that month, or 1 January of that year — recorded as such so Review can
+ * show the source. A text field keeps the stored precision.
+ */
+function dated(raw: string | null | undefined, inputType: string): string | null {
+  if (!raw) return null;
+  if (inputType !== "date") return raw;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}$/.test(raw)) return `${raw}-01`;
+  if (/^\d{4}$/.test(raw)) return `${raw}-01-01`;
+  return null;
+}
+
+/**
+ * Repeating work / education blocks on ordinary forms (Dayforce-style ids).
+ * Workday panels keep their own adapter (they set wdField). Returns null when this field is not one of those blocks.
+ */
+export function repeatingValue(f: FieldDescriptor, ctx: PlanContext): Resolved | null {
+  const m = f.id.match(/(workHistory|educationHistory)_(\d+)_([A-Za-z]+)/);
+  if (!m) return null;
+  const kind = m[1].toLowerCase();
+  const index = Number(m[2]);
+  const suffix = m[3].toLowerCase();
+  if (kind === "workhistory") {
+    const e = [...ctx.profile.experience].sort((a, b) => (b.start ?? "").localeCompare(a.start ?? ""))[index];
+    if (!e) return { ok: false, reason: "missing" };
+    const src = `experience.${index}`;
+    if (suffix === "title") return { ok: true, value: e.title, source: `${src}.title` };
+    if (suffix === "companyname" || suffix === "employer") return e.organization ? { ok: true, value: e.organization, source: `${src}.organization` } : { ok: false, reason: "missing" };
+    if (suffix === "iscurrent" || suffix === "current") return { ok: true, value: !!e.current, source: `${src}.current` };
+    if (suffix === "effectivestart" || suffix === "startdate") {
+      const v = dated(e.start, f.inputType);
+      return v ? { ok: true, value: v, source: `${src}.start` } : { ok: false, reason: "missing" };
+    }
+    if (suffix === "effectiveend" || suffix === "enddate") {
+      if (e.current) return { ok: false, reason: "missing" };
+      const v = dated(e.end, f.inputType);
+      return v ? { ok: true, value: v, source: `${src}.end` } : { ok: false, reason: "missing" };
+    }
+    if (suffix === "description" || suffix === "duties") return e.description ? { ok: true, value: e.description, source: `${src}.description` } : { ok: false, reason: "missing" };
+    return { ok: false, reason: "missing" };
+  }
+  const e = [...ctx.profile.education].sort((a, b) => (b.year ?? 0) - (a.year ?? 0))[index];
+  if (!e) return { ok: false, reason: "missing" };
+  const src = `education.${index}`;
+  if (suffix === "degreename" || suffix === "degree") {
+    const label = LEVEL_LABEL[e.level];
+    return label ? { ok: true, value: label, source: `${src}.level` } : { ok: false, reason: "missing" };
+  }
+  if (suffix === "majorname" || suffix === "major" || suffix === "field") return e.field ? { ok: true, value: e.field, source: `${src}.field` } : { ok: false, reason: "missing" };
+  if (suffix === "schoolname" || suffix === "school") return e.institution ? { ok: true, value: e.institution, source: `${src}.institution` } : { ok: false, reason: "missing" };
+  if (suffix === "countrycode" || suffix === "country") return e.country ? { ok: true, value: e.country, source: `${src}.country` } : { ok: false, reason: "missing" };
+  if (suffix === "notcompleted") {
+    if (e.completed === false) return { ok: true, value: true, source: `${src}.completed` };
+    if (e.completed === true) return { ok: true, value: false, source: `${src}.completed` };
+    return { ok: false, reason: "missing" };
+  }
+  if (suffix === "effectivestart" || suffix === "startdate") {
+    const v = e.year ? dated(String(e.year), f.inputType) : null;
+    return v ? { ok: true, value: v, source: `${src}.year` } : { ok: false, reason: "missing" };
+  }
+  return { ok: false, reason: "missing" };
+}
+
 export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
   const plan: Plan = { actions: [], questions: [], skipped: [], kept: [] };
   let resumeDone = false;
   for (const f of fields) {
     if (!f.visible && f.control !== "file") continue;
-    if (f.group) continue; // Workday work / education / skills panels: filled by the adapter
+    if (f.group && f.wdField) continue; // Workday panels: filled by the Workday adapter
     const key = fieldKey(f);
     if (ctx.handled?.has(key)) continue;
     let sem = classify(f);
@@ -565,6 +658,26 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
       else plan.actions.push(a);
       return null;
     };
+
+    const grouped = repeatingValue(f, ctx);
+    if (grouped || f.group) {
+      if (key in ctx.answers && ctx.answers[key] !== null && ctx.answers[key] !== "") {
+        const m = use(ctx.answers[key], "answer");
+        if (m && f.required) plan.questions.push(question(f, key, "no_matching_option", false, m.misfit));
+        continue;
+      }
+      if (f.group && f.wdField) continue;
+      if (!grouped || !grouped.ok) {
+        if (f.group && !grouped) continue;
+        const reason = grouped && !grouped.ok ? grouped.reason : "missing";
+        if (f.required) plan.questions.push(question(f, key, reason, false, grouped && !grouped.ok ? grouped.hint : null));
+        else plan.skipped.push({ key, label: f.label, reason });
+        continue;
+      }
+      const m = use(grouped.value, grouped.source);
+      if (m && f.required) plan.questions.push(question(f, key, "no_matching_option", false, m.misfit));
+      continue;
+    }
 
     // 1. this attempt's answers (the user typed or approved them)
     if (key in ctx.answers && ctx.answers[key] !== null && ctx.answers[key] !== "") {

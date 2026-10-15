@@ -63,7 +63,19 @@ export async function perform(page: Page, a: PlannedAction) {
   if (!(await loc.count())) throw new Error("stale_field");
   switch (a.kind) {
     case "fill":
-      await loc.fill(a.value);
+      // Set the value through the DOM property React listens to. A date input and an open menu
+      // both reject Playwright's fill().
+      await loc.evaluate((el, value) => {
+        const node = el as { value?: string; _valueTracker?: { setValue: (v: string) => void } };
+        const previous = node.value ?? "";
+        const proto = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value");
+        if (proto?.set) proto.set.call(el, value);
+        // The prototype setter updates React's tracker to the new value, which makes the
+        // following input event look like a no-op. Put the previous value back first.
+        if (node._valueTracker) node._valueTracker.setValue(previous);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }, a.value).catch(() => loc.fill(a.value));
       await loc.blur().catch(() => {});
       return;
     case "check":
@@ -137,9 +149,54 @@ export async function chooseListbox(page: Page, loc: Locator, label: string) {
   }
 }
 
+/** Option labels of a closed menu. Reads them and leaves the menu; does not choose one. */
+export async function readMenu(page: Page, ref: string): Promise<string[]> {
+  const loc = page.locator(`[data-ca-ref="${ref}"]`);
+  if (!(await loc.count().catch(() => 0))) return [];
+  const ant = await loc.evaluate((el) => !!el.closest(".ant-select")).catch(() => false);
+  if (ant) await openAntSelect(loc);
+  else await loc.click({ timeout: 3000 }).catch(() => {});
+  const texts: string[] = [];
+  for (let w = 0; w < 8 && !texts.length; w++) {
+    await sleep(200);
+    for (const o of await visibleOptions(page)) {
+      const tx = ((await o.textContent({ timeout: 1000 }).catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+      if (tx && !texts.includes(tx)) texts.push(tx);
+    }
+  }
+  await loc.press("Escape").catch(() => {});
+  await page.keyboard.press("Escape").catch(() => {});
+  // Escape often leaves an Ant Design menu open. A second mousedown closes it.
+  await loc.evaluate((el) => {
+    if (el.getAttribute("aria-expanded") !== "true") return;
+    const box = el.closest(".ant-select");
+    const sel = (box?.querySelector(".ant-select-selector") ?? box) as { dispatchEvent?: (e: Event) => void } | null;
+    const Mouse = (globalThis as { MouseEvent?: new (type: string, init: { bubbles: boolean; cancelable: boolean }) => Event }).MouseEvent;
+    if (sel?.dispatchEvent && Mouse) sel.dispatchEvent(new Mouse("mousedown", { bubbles: true, cancelable: true }));
+  }).catch(() => {});
+  return texts.slice(0, 30);
+}
+
+/** Ant Design opens a select on mousedown of its selector, not on a click of the wrapper. */
+async function openAntSelect(loc: Locator) {
+  await loc.evaluate((el) => {
+    const box = el.closest(".ant-select");
+    const sel = (box?.querySelector(".ant-select-selector") ?? box) as { dispatchEvent?: (e: Event) => void } | null;
+    const Mouse = (globalThis as { MouseEvent?: new (type: string, init: { bubbles: boolean; cancelable: boolean }) => Event }).MouseEvent;
+    if (sel?.dispatchEvent && Mouse) sel.dispatchEvent(new Mouse("mousedown", { bubbles: true, cancelable: true }));
+  });
+}
+
 export async function pickOption(page: Page, loc: Locator, text: string, fits: (normalizedLabel: string) => boolean, wait: number) {
-  await loc.click();
-  await loc.fill(text);
+  const ant = await loc.evaluate((el) => !!el.closest(".ant-select")).catch(() => false);
+  if (ant) await openAntSelect(loc);
+  else await loc.click();
+  const readOnly = await loc.evaluate((el) => "readOnly" in el && !!(el as { readOnly?: boolean }).readOnly).catch(() => false);
+  if (!readOnly) {
+    // A searchable select filters on keystrokes. Setting the value in one go often does not.
+    if (ant) await loc.pressSequentially(text, { delay: 15 }).catch(() => loc.fill(text).catch(() => {}));
+    else await loc.fill(text).catch(() => {});
+  }
   await sleep(wait);
   let opts = await visibleOptions(page);
   if (!opts.length) {
@@ -150,8 +207,13 @@ export async function pickOption(page: Page, loc: Locator, text: string, fits: (
   }
   const hits: Locator[] = [];
   for (const o of opts) if (fits(norm(await o.textContent({ timeout: 1000 })))) hits.push(o);
-  if (hits.length === 1) await hits[0].click();
+  const exact: Locator[] = [];
+  for (const o of hits) if (norm(await o.textContent({ timeout: 1000 })) === norm(text)) exact.push(o);
+  const chosen = exact.length === 1 ? exact : hits.length === 1 ? hits : [];
+  if (chosen.length === 1) await chosen[0].click();
   await sleep(150);
+  // Ant Design keeps the menu open after Escape on the page. Focus the control, then Escape.
+  await loc.press("Escape").catch(() => {});
   await page.keyboard.press("Escape").catch(() => {});
 }
 

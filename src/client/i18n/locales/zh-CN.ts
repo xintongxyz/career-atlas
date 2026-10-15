@@ -1155,6 +1155,10 @@ const zhCN: Messages = {
     recheck: "重新检查",
     aiNotice: "AI解析会使用在线服务，并占用你Claude订阅的用量额度。只有勾选“同时使用Claude AI”时才会运行，且只发送职位描述。",
     aiEnable: "导入职位时提供Claude AI选项",
+    codexReady: "已通过ChatGPT登录。不熟悉的申请页面可以询问它该操作哪个控件。档案内容仍留在这台Mac上。",
+    codexOff: "未登录。不熟悉的页面仍会按我的档案填写，只跳过无法确定的选项。",
+    codexApiKey: "当前是API密钥登录，Career Atlas不会使用它。",
+    codexMissing: "未安装Codex命令行。不熟悉的页面仍会按我的档案填写。",
   },
   profile: {
     title: "我的档案",
@@ -1632,7 +1636,7 @@ const zhCN: Messages = {
     confirmedByPage: "雇主网站已确认提交",
     confirmedByYou: "已由你确认提交",
     error: {
-      unsupported_site: "此页面上没有找到Greenhouse或Lever申请表，未填写任何内容。",
+      unsupported_site: "此页面没有申请表，也没有Apply按钮，未填写任何内容。",
       form_not_found: "没有找到申请表（职位可能已关闭）。",
       posting_gone: "该职位已不存在。",
       resume_unavailable: "所选简历已被删除。绝不会用其他简历代替。",
@@ -1672,6 +1676,7 @@ const zhCN: Messages = {
       visible_requested: "在可见的浏览器窗口中继续",
       manual_handoff: "已在浏览器窗口中交给你处理",
       submitted_by_user: "你在浏览器窗口中提交了表单",
+      opened_form: "已打开申请页面",
       next_step: "进入表单第{{step}}步",
       submit_clicked: "已点击提交",
       verified: "网站已确认提交",

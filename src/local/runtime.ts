@@ -9,6 +9,8 @@ import type { AppEnv, HonoEnv } from "../server/env";
 import { ApiError } from "../server/lib/errors";
 import { backupDue, backupSummary, createBackup, listBackups, verifyBackup } from "./backup";
 import { claudeCodeProvider, type ClaudeCodeProvider } from "./claude-code";
+import { codexProvider } from "./codex";
+import { chooseFromFacts, reasonClick } from "./apply/codex-agent";
 import { writeSettings, type LocalConfig } from "./config";
 import type { LocalD1 } from "./d1-sqlite";
 import { openDatabase, schemaVersion } from "./database";
@@ -33,6 +35,7 @@ export interface LocalRuntime {
   runner: TaskRunner;
   apply: ApplyRunner;
   claude: ClaudeCodeProvider;
+  codex: ReturnType<typeof codexProvider>;
   /** Full HTTP handler (firewall + API + static files). */
   fetch: (req: Request) => Promise<Response>;
   /** Hosts accepted in the Host header, e.g. 127.0.0.1:4310. */
@@ -109,6 +112,7 @@ export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: 
   if (migrated.length) console.log(`✓ Applied migrations: ${migrated.join(", ")}`);
 
   const claude = claudeCodeProvider({ path: cfg.settings.claude_path, model: cfg.settings.claude_model });
+  const codex = codexProvider();
   const files = localFileStore(cfg.documentsDir);
   const env: AppEnv = {
     DB: d1.asD1(),
@@ -135,11 +139,18 @@ export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: 
   });
   // Gmail verification e-mails: opt-in; the app password shares the same secure store.
   const mail = mailVerifier({ store: secrets, settings: () => ({ enabled: cfg.settings.gmail_verification === true, address: cfg.settings.gmail_address ?? null }) });
-  const apply = createApplyRunner({ getEnv: () => env, automationDir: join(cfg.dataDir, "automation"), allowLoopback: cfg.kind !== "personal", accounts, mail, aiAssist: () => (cfg.settings.apply_ai_assist === true && env.AI_PROVIDER === "claude_code" ? aiOptionMatcher(env) : null), ...opts.apply });
+  const apply = createApplyRunner({ getEnv: () => env, automationDir: join(cfg.dataDir, "automation"), allowLoopback: cfg.kind !== "personal", accounts, mail, aiAssist: () => (cfg.settings.apply_ai_assist === true && env.AI_PROVIDER === "claude_code" ? aiOptionMatcher(env) : null),   pageAgent: async (obs) => {
+    if (!obs.buttons.length) return null;
+    const provider = await codex.ready();
+    return provider ? reasonClick(provider, obs) : null;
+  }, chooseOption: async (label, options, facts) => {
+    const provider = await codex.ready();
+    return provider ? chooseFromFacts(provider, label, options, facts) : null;
+  }, ...opts.apply });
   await apply.init();
   env.APPLY = apply;
 
-  const api = createApp((app) => registerLocalRoutes(app, { cfg, d1, env, claude, runner, apply }));
+  const api = createApp((app) => registerLocalRoutes(app, { cfg, d1, env, claude, codex, runner, apply }));
 
   const allowedHosts = new Set([`127.0.0.1:${cfg.port}`, `localhost:${cfg.port}`, ...(opts.extraHosts ?? [])]);
   const clientDir = join(cfg.appRoot, "dist", "client");
@@ -175,6 +186,7 @@ export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: 
     runner,
     apply,
     claude,
+    codex,
     allowedHosts,
     fetch: async (req) => outer.fetch(req),
     close() {
@@ -207,7 +219,7 @@ export function scheduleBackups(rt: LocalRuntime, log = console.log) {
   };
 }
 
-function registerLocalRoutes(app: Hono<HonoEnv>, rt: { cfg: LocalConfig; d1: LocalD1; env: AppEnv; claude: ClaudeCodeProvider; runner: TaskRunner; apply: ApplyRunner }) {
+function registerLocalRoutes(app: Hono<HonoEnv>, rt: { cfg: LocalConfig; d1: LocalD1; env: AppEnv; claude: ClaudeCodeProvider; codex: ReturnType<typeof codexProvider>; runner: TaskRunner; apply: ApplyRunner }) {
   const { cfg } = rt;
   app.get("/api/local/status", async (c) => {
     userOf(c);
@@ -219,7 +231,7 @@ function registerLocalRoutes(app: Hono<HonoEnv>, rt: { cfg: LocalConfig; d1: Loc
       schema_version: schemaVersion(rt.d1),
       backup: backupSummary(cfg),
       tasks: rt.runner.stats(),
-      ai: { provider: rt.env.AI_PROVIDER, claude: await rt.claude.status() },
+      ai: { provider: rt.env.AI_PROVIDER, claude: await rt.claude.status(), codex: await rt.codex.status() },
     });
   });
   app.post("/api/local/backup", async (c) => {

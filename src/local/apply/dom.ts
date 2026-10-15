@@ -63,6 +63,11 @@ export const SCAN_FIELDS = String.raw`(() => {
   const panelBlocks = new Map();
   const panelCount = {};
   const panelOf = (el) => {
+    const gid = (el.id || '').match(/(workHistory|educationHistory|websites|languages)_(\d+)_/i);
+    if (gid) {
+      const map = { workhistory: 'work', educationhistory: 'education', websites: 'websites', languages: 'languages' };
+      return { group: map[gid[1].toLowerCase()], groupIndex: Number(gid[2]) };
+    }
     let a = el;
     while (a && a !== document.body) {
       const m = (a.getAttribute && a.getAttribute('data-automation-id') || '').match(/^([A-Za-z]+)-(\d+)$/);
@@ -129,11 +134,15 @@ export const SCAN_FIELDS = String.raw`(() => {
     const type = el.tagName === 'BUTTON' ? 'listbox' : (el.getAttribute('type') || el.tagName).toLowerCase();
     // (type="search" is kept: Workday's searchable prompts and the skills box may use it.)
     if (['hidden', 'submit', 'button', 'reset', 'image', 'password'].includes(type)) continue;
+    if (el.id === 'lang-select' || el.name === 'g-recaptcha-response' || el.id === 'g-recaptcha-response') continue;
     // Never touch honeypots ("for robots only") or sign-in / account forms.
     if (el.closest('[data-automation-id="beecatcher"]') || el.getAttribute('data-automation-id') === 'beecatcher') continue;
     if (el.closest('[data-automation-id="signInContent"], form[data-automation-id^="signInForm"]')) continue;
     if (el.closest('[data-automation-id="selectedItemList"]')) continue;
-    if (el.disabled || el.readOnly && type !== 'file') continue;
+    // Ant Design marks searchable selects read-only until they open. They are still fields.
+    // A disabled control (for example State before Country) stays skipped until it is enabled.
+    if (el.disabled) continue;
+    if (el.readOnly && type !== 'file' && el.getAttribute('role') !== 'combobox' && !el.closest('.ant-select')) continue;
     if (el.closest('[aria-hidden="true"]') && type !== 'file') continue;
     const panel = panelOf(el);
     const invalid = el.getAttribute('aria-invalid') === 'true' || !!(wdField(el) && wdField(el).querySelector('[data-automation-id="inputAlert"], [data-automation-id="errorMessage"]'));
@@ -170,6 +179,15 @@ export const SCAN_FIELDS = String.raw`(() => {
       out.push({ ...base, ref: ref(el), control: 'combobox', asyncOptions: true, label, required: requiredOf(el, label), value: chips, visible: visible(el) || visible(holder) });
       continue;
     }
+    // Ant Design (and similar) searchable selects: the input is only the search box; the chosen
+    // text lives in .ant-select-selection-item. Options load after typing.
+    if (el.closest('.ant-select')) {
+      const label = labelFor(el);
+      const holder = el.closest('.ant-select');
+      const selected = holder ? textOf(holder.querySelector('.ant-select-selection-item')) : '';
+      out.push({ ...base, ref: ref(el), control: 'combobox', asyncOptions: true, label, required: requiredOf(el, label), value: selected ? [selected] : [], visible: visible(el) || (holder ? visible(holder) : false) });
+      continue;
+    }
     if (type === 'radio' || (type === 'checkbox' && el.name && (el.name.endsWith('[]') || root.querySelectorAll('input[type="checkbox"][name="' + CSS.escape(el.name) + '"]').length > 1))) {
       const gname = el.name || el.id;
       if (seenGroups.has(type + gname)) continue;
@@ -194,7 +212,16 @@ export const SCAN_FIELDS = String.raw`(() => {
     }
     const label = labelFor(el);
     if (type === 'file') {
-      out.push({ ...base, ref: ref(el), control: 'file', label, required: requiredOf(el, label), value: [...(el.files || [])].map((f) => f.name), visible: true });
+      const wrap = el.closest('.ant-upload-wrapper');
+      const names = [...(el.files || [])].map((f) => f.name);
+      if (wrap) {
+        for (const item of wrap.querySelectorAll('.ant-upload-list-item-name')) {
+          const t = textOf(item);
+          if (t && !names.includes(t)) names.push(t);
+        }
+      }
+      const button = wrap && wrap.querySelector('button, [role="button"]');
+      out.push({ ...base, ref: ref(el), control: 'file', label, required: requiredOf(el, label), value: names, visible: !button || visible(button) || names.length > 0 });
       continue;
     }
     if (el.tagName === 'SELECT') {

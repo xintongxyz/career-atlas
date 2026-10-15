@@ -1175,6 +1175,10 @@ const en = {
     recheck: "Check again",
     aiNotice: "AI extraction uses an online service and your Claude plan's usage allowance. It runs only when you tick “Also use Claude AI”, and only the job description is sent.",
     aiEnable: "Offer Claude AI when importing jobs",
+    codexReady: "Signed in with ChatGPT. Unfamiliar application pages can ask it which control to use. Your profile values stay on this Mac.",
+    codexOff: "Not signed in. Unfamiliar pages are still filled from My Profile; only unclear choices are skipped.",
+    codexApiKey: "Signed in with an API key, which Career Atlas will not use.",
+    codexMissing: "Codex CLI is not installed. Unfamiliar pages are still filled from My Profile.",
   },  profile: {
     title: "My Profile",
     subtitle: "Your background, used to check how well each saved job fits. Stored only on this computer and saved automatically.",
@@ -1655,7 +1659,7 @@ const en = {
     confirmedByPage: "Submission confirmed by the employer's site",
     confirmedByYou: "Submission confirmed by you",
     error: {
-      unsupported_site: "No Greenhouse or Lever application form was found on this page. Nothing was filled in.",
+      unsupported_site: "This page has no application form and no Apply button. Nothing was filled in.",
       form_not_found: "The application form was not found (the posting may be closed).",
       posting_gone: "The posting no longer exists.",
       resume_unavailable: "The selected resume was deleted. Another resume is never used in its place.",
@@ -1695,6 +1699,7 @@ const en = {
       visible_requested: "Continuing in a visible browser window",
       manual_handoff: "Handed over to you in the browser window",
       submitted_by_user: "You submitted the form in the browser window",
+      opened_form: "Opened the application page",
       next_step: "Moved to form step {{step}}",
       submit_clicked: "Clicked Submit",
       verified: "The site confirmed the submission",

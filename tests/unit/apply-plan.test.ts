@@ -31,7 +31,11 @@ describe("field classification", () => {
     expect(classify(f({ name: "urls[LinkedIn]", label: "LinkedIn URL" }))).toBe("linkedin");
     expect(classify(f({ name: "email", inputType: "email" }))).toBe("email");
     expect(classify(f({ control: "file", id: "resume", label: "Resume/CV" }))).toBe("resume");
+    expect(classify(f({ control: "file", id: "jobPostingApplication_files_resume", label: "Attachment:" }))).toBe("resume");
     expect(classify(f({ control: "file", id: "cover_letter", label: "Cover Letter" }))).toBe("cover_letter");
+    expect(classify(f({ control: "combobox", label: "Country dialing code" }))).toBe("phone_country");
+    expect(classify(f({ control: "combobox", label: "Preferred Contact Method" }))).toBe("contact_method");
+    expect(classify(f({ control: "combobox", label: "How did you hear about this job?" }))).not.toBe("phone_country");
   });
   it("voluntary self-identification and legal declarations are never treated as ordinary fields", () => {
     expect(classify(f({ control: "select", name: "eeo[gender]", label: "Gender" }))).toBe("demographic");
