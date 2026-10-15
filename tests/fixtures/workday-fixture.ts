@@ -369,6 +369,7 @@ function validate() {
     need('countryRegion', v.region, 'Province or Territory'); need('emailAddress', v.email, 'Email Address'); need('phoneType', v.phoneType, 'Phone Device Type');
     need('countryPhoneCode', v.phoneCode, 'Country Phone Code'); need('phoneNumber', v.phone, 'Phone Number');
     if (has('validate') && v.phone && /[^0-9]/.test(v.phone)) e.push({ name: 'phoneNumber', msg: 'Phone number must contain only digits.' });
+    if (has('validate') && v.postalCode && !/^[A-Z]\d[A-Z] \d[A-Z]\d$/.test(v.postalCode)) e.push({ name: 'postalCode', msg: 'Postal code must be in the format A1A 1A1.' });
   }
   if (step === 1 && has('rich')) {
     S.work.forEach((w) => { need('jobTitle', w.jobTitle, 'Job Title'); need('companyName', w.companyName, 'Company'); });

@@ -11,7 +11,7 @@
 // its surroundings), with wording only as supporting context — never by a site-specific selector.
 // Labels and headings only; values are never read.
 
-export type WidgetKind = "search" | "subscription" | "chrome" | "cookie";
+export type WidgetKind = "search" | "subscription" | "matching" | "chrome" | "cookie";
 
 export interface PageWidget {
   kind: WidgetKind;
@@ -47,6 +47,19 @@ export interface PageMap {
 }
 
 export type PageState = "posting" | "application" | "questions" | "login" | "unknown";
+
+/**
+ * A cookie-banner control by what it does: "private" (reject / necessary only — the choice Career Atlas
+ * makes), "settings" (opens the preferences; no consent given), "consent" (accepts, including "closing
+ * means you accept"), or "other".
+ */
+export function cookieChoice(text: string): "private" | "settings" | "consent" | "other" {
+  const t = text.replace(/\s+/g, " ").trim().toLowerCase();
+  if (/\b(reject|decline|deny|refuse|disallow|opt[- ]?out|do not (accept|allow|sell))\b|\b(necessary|essential|required|strictly necessary)( cookies)?( only)?\b|\bonly (necessary|essential|required)\b|continue without (accepting|cookies)/.test(t) && !/\ball\b.*\b(accept|allow)|\b(accept|allow) all\b/.test(t)) return "private";
+  if (/\b(accept|agree|allow|consent|accepted)\b/.test(t)) return "consent";
+  if (/\b(settings|preferences|manage|customi[sz]e|options|choices|details)\b/.test(t)) return "settings";
+  return "other";
+}
 
 /** A control that starts an application (accessible names often append the job title: "Apply Now <title>"). */
 export const APPLY_CTA_RE = /^(apply\b(?!(ing)?\s*(filters?|to (all|selected)))|start (my |your |an )?application\b|begin (my |your |an )?application\b)/i;
@@ -174,6 +187,37 @@ export const PAGE_MAP = String.raw`(() => {
     const lone = isEmail(el) && others.every((x) => /name/i.test(desc(x)) && !isEmail(x)) && !inBox.some((x) => /tel|phone/i.test(desc(x)) || (x.getAttribute('type') || '') === 'file');
     const ownForm = !!el.form && fieldsIn(el.form).length <= 2;
     if (lone && (ALERT_WORDS.test(words) || el.closest('aside, [role="complementary"]') || (ownForm && applyOnPage))) { mark(el.form && !box.contains(el.form) ? el.form : box, 'subscription'); continue; }
+  }
+  // Sign-up forms (talent community, newsletter, job alerts) that ask only for a name and an e-mail: not the
+  // application — when they say so, or when the page offers Apply outside them.
+  const SIGNUP_WORDS = /talent (community|network|pool)|join (our|the) (team|community|network)|newsletter|subscri|job alert|sign up|stay (connected|in touch)|get (updates|notified)|keep me (posted|informed)/i;
+  const blocks = [...document.querySelectorAll('form'), ...document.querySelectorAll('[class*="talent" i], [class*="community" i], [class*="newsletter" i], [class*="subscribe" i], [id*="talent" i], [id*="newsletter" i]')];
+  for (const b of blocks) {
+    if (b.closest('[data-ca-outside]')) continue;
+    const fs = fieldsIn(b).filter((e) => !e.closest('[data-ca-outside]'));
+    if (!fs.length || fs.length > 4) continue;
+    const sems = fs.map(semOf);
+    if (!sems.includes('email') || sems.some((x) => x && !['first_name', 'last_name', 'full_name', 'email'].includes(x)) || fs.some((e) => !semOf(e) && !/name/i.test(desc(e)))) continue;
+    const words = clean(headingOf(b) + ' ' + (b.innerText || '').slice(0, 400));
+    const applyOutside = buttonsIn(document).some((x) => !b.contains(x) && /^apply\b|^start (my |your |an )?application/i.test(nameOf(x)));
+    if (SIGNUP_WORDS.test(words) || ALERT_WORDS.test(words) || applyOutside) mark(b, 'subscription');
+  }
+  // Job-matching tools ("Upload your resume to see how well you match"): a lone upload on a posting is not
+  // the application — when it says so, or when it is the page's only field and Apply is offered elsewhere.
+  const MATCH_WORDS = /how well you match|match(es|ing)? (you|your)|see (jobs|roles) (that|which) match|recommend(ed|ations)?|personali[sz]ed jobs|find (jobs|roles) for you|job match/i;
+  const remaining = all.filter((e) => !e.closest('[data-ca-outside]'));
+  for (const up of remaining.filter((e) => (e.getAttribute('type') || '').toLowerCase() === 'file')) {
+    let box = up.parentElement;
+    for (let x = box, d = 0; x && x !== document.body && d < 6; x = x.parentElement, d++) {
+      if (fieldsIn(x).length > 1 || x.querySelector('h1')) break;
+      box = x;
+      if (vis(x) && (x.innerText || '').trim().length > 20) break;
+    }
+    if (!box) continue;
+    const words = clean(headingOf(box) + ' ' + (box.innerText || '').slice(0, 300));
+    const alone = remaining.length === 1;
+    const applyOutside = buttonsIn(document).some((x) => !box.contains(x) && /^apply\b|^start (my |your |an )?application/i.test(nameOf(x)));
+    if (MATCH_WORDS.test(words) || (alone && applyOutside)) mark(box, 'matching');
   }
   // Site chrome (page header / navigation / footer): only when it shares no block with the remaining
   // fields — an application's own footer (with its Next button) is part of the application.

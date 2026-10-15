@@ -21,6 +21,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:lab": "CA_LAB_N=${CA_LAB_N:-16} vitest run tests/integration/lab-batch.test.ts",
     "test:e2e:live": "LIVE=1 playwright test live",
     "check:secrets": "node scripts/check-secrets.mjs",
     "db:generate": "drizzle-kit generate && node scripts/check-migrations.mjs",

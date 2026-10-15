@@ -17,8 +17,9 @@ import type { Profile } from "@shared/profile";
 import type { Page } from "playwright-core";
 import { isIndeedOwnedHost } from "./indeed";
 import { checkSet, listSelect, scan, searchSelect, shownMatches, textSet, valuesOf, type Finder } from "./interact";
-import { PAGE_MAP, pageState, type PageMap, type PageState, type PageWidget, type WidgetKind } from "./page-intent";
-import { classify, fieldKey, norm, planForm, profileValue, question, toAction, type FieldDescriptor, type PlanContext, type Semantic } from "./plan";
+import { APPLY_CTA_RE, cookieChoice, PAGE_MAP, pageState, type PageMap, type PageState, type PageWidget, type WidgetKind } from "./page-intent";
+import { classify, datePartOf, fieldKey, MONTH_NAMES, norm, parseDateAnswer, planForm, profileValue, question, screeningValue, toAction, type FieldDescriptor, type PlanContext, type Semantic } from "./plan";
+import { phoneAccepted, type CanonicalPhone } from "@shared/phone";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -45,6 +46,15 @@ export interface AgentField {
   answer_on_file?: boolean;
   /** Already asked in this run: do not ask again. */
   asked_applicant?: boolean;
+  /** The group / fieldset heading the control sits in (e.g. "Graduation date" for a bare "Month"). */
+  group?: string;
+  /** The site's placeholder text (an example format, never a saved value). */
+  placeholder?: string;
+  /** The site's help or error text for the control. */
+  help?: string;
+  invalid?: boolean;
+  /** Related controls: for a phone, the separate country-code control / widget and the code it shows. */
+  related?: string;
 }
 export interface AgentObservation {
   /** What the applicant wants done (job title and employer — not personal data). */
@@ -53,6 +63,8 @@ export interface AgentObservation {
   page_state: PageState;
   /** Site widgets that are NOT part of the application (search, job alerts, chrome, cookie banners). */
   widgets: PageWidget[];
+  /** Large embedded documents (host, share of the screen): an application may live inside one — Career Atlas opens it. */
+  frames: { host: string; share: number }[];
   url: string;
   title: string;
   headings: string[];
@@ -117,12 +129,13 @@ export async function observeForModel(page: Page, c: ObserveContext): Promise<{ 
   const asked = c.asked ?? new Set<string>();
   // Page purpose first: widgets are marked (and left out of the fields) before anything is described.
   const map = (await page.evaluate(PAGE_MAP)) as PageMap;
-  const base = (await page.evaluate(OBSERVE_JS)) as Omit<AgentObservation, "fields" | "goal" | "page_state" | "widgets">;
+  const base = (await page.evaluate(OBSERVE_JS)) as Omit<AgentObservation, "fields" | "goal" | "page_state" | "widgets" | "frames">;
   const fields = (await scan(page)).filter((f) => f.visible || f.control === "file");
   const obs: AgentObservation = {
     goal: c.goal,
     page_state: pageState(map, { inWorkflow: !!c.inWorkflow, login: base.password_field }),
     widgets: map.widgets.filter((w) => w.kind !== "chrome" || w.inputs > 0).slice(0, 8),
+    frames: map.frames.map((f) => ({ host: (() => { try { return new URL(f.src).host; } catch { return ""; } })(), share: Math.round(f.area * 100) / 100 })).slice(0, 4),
     ...base,
     fields: fields.slice(0, 80).map((f) => ({
       ref: f.ref,
@@ -135,6 +148,11 @@ export async function observeForModel(page: Page, c: ObserveContext): Promise<{ 
       ...(f.demographic || DEMO_RE.test(f.label) ? { identity: true } : {}),
       ...(answered(answers, f) ? { answer_on_file: true } : {}),
       ...(asked.has(fieldKey(f)) ? { asked_applicant: true } : {}),
+      ...(f.section && norm(f.section) !== norm(f.label) ? { group: f.section.slice(0, 120) } : {}),
+      ...(f.placeholder && f.control !== "combobox" ? { placeholder: f.placeholder.slice(0, 60) } : {}),
+      ...(f.help ? { help: f.help } : {}),
+      ...(f.invalid ? { invalid: true } : {}),
+      ...(f.phone?.widget ? { related: f.phone.widget === "split" ? `separate country-code control beside it${f.phone.dial ? ` (shows ${f.phone.dial})` : " (nothing chosen)"}` : `international phone widget${f.phone.dial ? ` (shows ${f.phone.dial})` : ""}` } : {}),
     })),
   };
   return { obs, fields, map };
@@ -171,9 +189,15 @@ const FACTS: Record<string, Semantic | "default"> = {
   "driver_licence": "driver_licence",
   "current_employer": "current_company",
   "current_title": "current_title",
+  "education.graduation": "default",
 };
 /** Preferences whose VALUES are not personal facts and help the model map a question. */
 const PREFS = ["preferred_contact_method", "prior_employment", "relocation", "travel", "shift_work", "referral", "enrolled_student", "coop_program", "source"] as const;
+
+/** What the profile holds in bulk (counts only) — context for the model, not facts it can ask to enter. */
+export function profileSummary(p: Profile): Record<string, number> {
+  return { experience_entries: p.experience.length, education_entries: p.education.length, skills: p.skills.length, languages: p.languages.length };
+}
 
 export function factCatalog(p: Profile): Record<string, unknown> {
   const c = p.contact;
@@ -201,10 +225,8 @@ export function factCatalog(p: Profile): Record<string, unknown> {
     driver_licence: p.driver_licence.has !== null,
     current_employer: p.experience.some((e) => e.current && e.organization),
     current_title: p.experience.some((e) => e.current),
-    experience_entries: p.experience.length,
-    education_entries: p.education.length,
-    skills: p.skills.length,
-    languages: p.languages.length,
+    // One completed degree (its end date) or an expected graduation; several completed degrees are ambiguous.
+    "education.graduation": !!p.application_defaults.expected_graduation || p.education.filter((e) => e.completed !== false && (e.end || e.year)).length === 1 || p.education.some((e) => e.completed === false && e.year),
     applicant_answer: "for fields marked answer_on_file: the applicant's own answer to that question",
   };
   for (const k of PREFS) {
@@ -258,9 +280,11 @@ Rules:
 - Identity / self-identification questions (gender, race, disability, veteran, Indigenous, pronouns) → ask_user unless the page already has them done.
 - Agreements, declarations, privacy consents → ask_user (Career Atlas may already have handled routine notices).
 - Repeated sections (work history, education) and long standard forms → run_autofill first; it fills everything the profile covers and verifies it.
+- Composite controls: a field's "group" names the question its part belongs to (a bare "Month" under "Graduation date"); "related" tells how a phone is split. For a phone number use fact contact.phone on the number box and location.phone_country on a separate country-code control — Career Atlas formats the number for that layout. A placeholder is only an example format, never a value.
 - To start: click the button that opens the application (Apply, Start, Begin, Continue as guest…). Never create an account or sign in; if the page requires it, finish with needs_user.
 - Informational pop-ups (OK, Got it, Close) → dismiss_dialog with that button's ref. Cookie banners: only a reject / necessary-only choice, or leave the banner alone.
-- Never act on buttons whose area is search or subscription; they are not part of the application.
+- Never act on buttons whose area is search, subscription or matching; they are not part of the application. Buttons with area "chrome" are the site's navigation: only use one that starts this job's application.
+- "frames" lists embedded documents: if the application appears to live in one (a large frame from a career / applicant system), finish with status needs_user — Career Atlas opens frames itself. Do not click unrelated links hoping to find it.
 - After filling a step, click the button that moves to the next step (Next, Continue, Save and continue, Proceed…).
 - NEVER click the final submit button (Submit, Submit application, Send…). When the page is the final review / submit step, finish with status review_ready.
 - CAPTCHA or bot check → finish with needs_user.
@@ -283,7 +307,7 @@ export interface ValidationContext {
   asked?: Set<string>;
 }
 
-const COOKIE_PRIVATE_RE = /^(reject|decline|refuse|necessary|essential|only necessary|use necessary|accept necessary|agree to necessary|close)\b/i;
+
 
 /** Trusted checks: what the model may NOT do, whatever it proposes. Returns a refusal reason or null. */
 export function validate(a: AgentAction, v: ValidationContext): string | null {
@@ -295,8 +319,11 @@ export function validate(a: AgentAction, v: ValidationContext): string | null {
       if (!btn && !field) return "unknown ref — use a ref from the current observation";
       const text = btn?.text ?? field?.label ?? "";
       // Purpose, not wording: a control inside a site widget is not part of this application.
-      if (btn?.area === "search" || btn?.area === "subscription") return `this control belongs to the site's ${btn.area === "search" ? "job search" : "job-alert / newsletter sign-up"}, not to the application for this job`;
-      if (btn?.area === "cookie" && !COOKIE_PRIVATE_RE.test(text)) return "cookie banners: only a reject / necessary-only choice (or leave it)";
+      if (btn?.area === "search" || btn?.area === "subscription" || btn?.area === "matching") return `this control belongs to the site's ${btn.area === "search" ? "job search" : btn.area === "matching" ? "job-matching tool" : "job-alert / newsletter sign-up"}, not to the application for this job`;
+      // Cookie banners by what the control does: reject / necessary-only or opening the settings — never consent.
+      if (btn?.area === "cookie" && cookieChoice(text) === "consent") return "cookie banners: never accept — choose reject / necessary-only, open the settings, or leave the banner";
+      // The site's navigation (header, menus, footer) is not part of the application, unless it starts one.
+      if (btn?.area === "chrome" && !APPLY_CTA_RE.test(text) && cookieChoice(text) !== "private") return "this is the site's navigation (header / menu / footer), not part of the application for this job";
       if (SUBMIT_RE.test(text)) return "the final submit button is never clicked by the agent — finish with review_ready";
       if (ACCOUNT_RE.test(text) && !/guest|without (an )?account/i.test(text)) return "creating accounts and signing in are not done by the agent — finish with needs_user";
       if (field && (field.control === "checkbox" || field.control === "radio" || field.control === "checkboxes")) return "use set_checkbox / choose_* for form controls";
@@ -309,7 +336,7 @@ export function validate(a: AgentAction, v: ValidationContext): string | null {
       if (field.inputType === "password") return "password fields are never touched by the agent";
       // The applicant's own answer to this very question: allowed for any question, identity and declarations included.
       if (a.fact === "applicant_answer") return answered(v.answers ?? {}, field) ? null : "the applicant has not answered this question — ask_user";
-      if (!(a.fact in FACTS) && !a.fact.startsWith("defaults.")) return `unknown fact "${a.fact}" — use a key from available_facts`;
+      if (!(a.fact in FACTS) && !a.fact.startsWith("defaults.")) return `unknown fact "${a.fact}" — use a key from available_facts (profile_summary holds counts, not facts)`;
       if (a.fact.startsWith("defaults.") && !(PREFS as readonly string[]).includes(a.fact.slice(9))) return `unknown preference "${a.fact}"`;
       if (field.demographic || DEMO_RE.test(field.label)) return "identity questions are answered only by the applicant — ask_user";
       if (LEGAL_RE.test(field.label) && CHOICE.has(field.control)) return "declarations need the applicant's approval — ask_user";
@@ -426,6 +453,21 @@ export function createAgent(host: AgentHost) {
   let n = 0;
   const out = (page: Page, status: AgentOutcome["status"], reason: string): AgentOutcome => ({ status, reason, questions, steps: n, page });
 
+  /**
+   * One decision without acting: observe → the model proposes → Career Atlas validates. `step` acts on it;
+   * the reasoning evaluation (tests/lab) grades it against ground truth.
+   */
+  async function decide(page: Page, o: { lastResult?: string; history?: string[] } = {}) {
+    const { obs, fields } = await observeForModel(page, { goal: host.goal, answers: host.planCtx.answers, asked, inWorkflow: host.inWorkflow?.() });
+    const user = JSON.stringify({ step: n, last_action_result: o.lastResult ?? lastResult, recent_actions: (o.history ?? history).slice(-6), available_facts: factCatalog(host.planCtx.profile), profile_summary: profileSummary(host.planCtx.profile), page: obs });
+    const raw = await host.propose(AGENT_SYSTEM, user.slice(0, 30_000), PROPOSAL_SCHEMA);
+    const action = toAgentAction(raw);
+    const reasoning = String(raw.reasoning ?? "").slice(0, 240);
+    const target = action && "ref" in action && action.ref ? (obs.buttons.find((b) => b.ref === action.ref)?.text ?? obs.fields.find((f) => f.ref === action.ref)?.label ?? action.ref) : "";
+    const refusal = action ? validate(action, { obs, fields, profile: host.planCtx.profile, employer: host.planCtx.employer ?? null, answers: host.planCtx.answers, asked }) : "invalid proposal";
+    return { obs, fields, raw, action, reasoning, target: String(target), refusal };
+  }
+
   async function step(page: Page): Promise<AgentStep> {
     n++;
     await host.guard();
@@ -438,18 +480,14 @@ export function createAgent(host: AgentHost) {
       }
     })();
     if (isIndeedOwnedHost(at)) return { kind: "stop", outcome: out(page, "blocked", "Indeed pages are never automated") };
-    // OBSERVE (purpose first: widgets are marked and described as such)
-    const { obs, fields } = await observeForModel(page, { goal: host.goal, answers: host.planCtx.answers, asked, inWorkflow: host.inWorkflow?.() });
-    // PLAN (the model)
-    const user = JSON.stringify({ step: n, last_action_result: lastResult, recent_actions: history.slice(-6), available_facts: factCatalog(host.planCtx.profile), page: obs });
-    let raw: Record<string, unknown>;
+    // OBSERVE (purpose first: widgets are marked and described as such) → PLAN (the model) → VALIDATE
+    let d: Awaited<ReturnType<typeof decide>>;
     try {
-      raw = await host.propose(AGENT_SYSTEM, user.slice(0, 30_000), PROPOSAL_SCHEMA);
+      d = await decide(page);
     } catch {
       return { kind: "stop", outcome: out(page, "blocked", "the AI provider did not answer") };
     }
-    const a = toAgentAction(raw);
-    const reasoning = String(raw.reasoning ?? "").slice(0, 240);
+    const { obs, fields, action: a, reasoning, refusal } = d;
     const observed = { url: obs.url, page_state: obs.page_state, headings: obs.headings.slice(0, 4), widgets: obs.widgets.map((w) => `${w.kind}: ${w.heading || w.buttons.slice(0, 2).join(" / ")}`), buttons: obs.buttons.length, fields: obs.fields.length };
     if (!a) {
       lastResult = "invalid proposal — use the schema";
@@ -457,10 +495,8 @@ export function createAgent(host: AgentHost) {
       if (++failures >= 3) return { kind: "stop", outcome: out(page, "failed_repeatedly", "invalid proposals") };
       return { kind: "refused", reason: "invalid proposal", action: { action: "wait" }, target: "", reasoning };
     }
-    const target = "ref" in a && a.ref ? (obs.buttons.find((b) => b.ref === a.ref)?.text ?? obs.fields.find((f) => f.ref === a.ref)?.label ?? a.ref) : "";
+    const target = d.target;
     await host.event("agent_proposed", { action: a.action, target: String(target).slice(0, 60) });
-    // VALIDATE (trusted)
-    const refusal = validate(a, { obs, fields, profile: host.planCtx.profile, employer: host.planCtx.employer ?? null, answers: host.planCtx.answers, asked });
     host.trace?.({ step: n, observation: observed, reasoning, proposal: { action: a.action, target: String(target).slice(0, 80) }, check: refusal ? `refused: ${refusal}` : "allowed" });
     // Asking again about a question already recorded: the model is waiting for the applicant — stop here.
     if (refusal && a.action === "ask_user" && questions.length) return { kind: "stop", outcome: out(page, "needs_user", "waiting for the applicant's answers") };
@@ -500,7 +536,7 @@ export function createAgent(host: AgentHost) {
     return out(page, "step_limit", "step limit reached");
   }
 
-  return { step, run, questions, asked };
+  return { step, run, decide, questions, asked };
 }
 
 export async function runBrowserAgent(page: Page, host: AgentHost, maxSteps = 30): Promise<AgentOutcome> {
@@ -543,7 +579,15 @@ async function act(page: Page, a: AgentAction, fields: FieldDescriptor[], host: 
       const act1 = toAction(field, fieldKey(field), v.value, v.source);
       if ("misfit" in act1) return { ok: false, note: "the profile's answer matches none of this field's options — ask_user" };
       let ok = false;
-      if (act1.kind === "fill") ok = await textSet(page, find, act1.value);
+      if (act1.kind === "fill") {
+        ok = await textSet(page, find, act1.value);
+        // A phone counts only as THIS number in THIS country (widgets reformat what was typed).
+        if (v.phone) {
+          await sleep(300);
+          const now = (await scan(page)).find((x) => x.ref === field.ref);
+          ok = !!now && phoneAccepted(String(now.value ?? ""), v.phone, now.phone?.dial);
+        }
+      }
       else if (act1.kind === "check") ok = await checkSet(page, find, act1.value);
       else if (act1.kind === "choose" || act1.kind === "search") {
         const want = act1.kind === "choose" ? act1.values[0] : act1.value;
@@ -604,7 +648,7 @@ async function act(page: Page, a: AgentAction, fields: FieldDescriptor[], host: 
 }
 
 /** A value from My Profile for a fact key, resolved by Career Atlas (never by the model). */
-function resolve(fact: string, f: FieldDescriptor, ctx: PlanContext): { ok: true; value: unknown; source: string } | { ok: false; note: string } {
+function resolve(fact: string, f: FieldDescriptor, ctx: PlanContext): { ok: true; value: unknown; source: string; phone?: CanonicalPhone } | { ok: false; note: string } {
   if (fact === "applicant_answer") {
     const v = ctx.answers[fieldKey(f)];
     return v === undefined || v === null || v === "" ? { ok: false, note: "no answer on file — ask_user" } : { ok: true, value: v, source: "answer" };
@@ -619,10 +663,19 @@ function resolve(fact: string, f: FieldDescriptor, ctx: PlanContext): { ok: true
     if (a && (a.kind === "choose" || a.kind === "fill" || a.kind === "check" || a.kind === "search")) return { ok: true, value: a.kind === "choose" ? a.values[0] : a.kind === "check" ? a.value : a.value, source: `defaults.${String(k)}` };
     return { ok: true, value: k === "preferred_contact_method" ? (v === "email" ? "Email" : v === "phone" ? "Phone" : "Text") : v, source: `defaults.${String(k)}` };
   }
+  if (fact === "education.graduation") {
+    const sv = screeningValue({ ...questionMeaning("graduation date", null), meaning: "graduation_date" }, ctx, f.label);
+    if (!sv?.ok) return { ok: false, note: (sv && !sv.ok && sv.hint) || "graduation not in the profile — ask_user" };
+    // One part of a composite date (a bare Month / Year control) gets that part only.
+    const part = datePartOf(f);
+    if (!part) return { ok: true, value: sv.value, source: sv.source };
+    const v = parseDateAnswer(String(sv.value))?.[part];
+    return v ? { ok: true, value: part === "month" ? MONTH_NAMES[Number(v) - 1] : v, source: sv.source } : { ok: false, note: `the profile has no ${part} for it — ask_user` };
+  }
   const sem = FACTS[fact];
   if (!sem || sem === "default") return { ok: false, note: "unknown fact" };
   const r = profileValue(sem, f, ctx);
-  return r.ok ? { ok: true, value: r.value, source: r.source } : { ok: false, note: r.reason === "sensitive" ? "eligibility not on file for this question — ask_user" : "not in the profile — ask_user" };
+  return r.ok ? { ok: true, value: r.value, source: r.source, phone: r.phone } : { ok: false, note: r.reason === "sensitive" ? "eligibility not on file for this question — ask_user" : r.hint || "not in the profile — ask_user" };
 }
 
 async function signature(page: Page): Promise<string> {

@@ -35,6 +35,15 @@ that choice is offered, so no account is created) and fills from My Profile. A r
 that is not in My Profile pauses the attempt. When the form can be completed, it stops on the
 review page until you approve Submit. LinkedIn stays manual. Indeed is never automated.
 
+**Phone numbers.** Your number is handled as a number in a country (`src/shared/phone.ts`): the country
+comes from the saved number itself ("+44 …"), else the phone country code in Application Defaults, else
+your own country — never the employer's location. Next to a separate country-code control Career Atlas
+types the local number (and picks your country's code, by name — "+1" alone also means other
+countries); in an international phone widget it types the full "+1…" form; a plain field gets the local
+number for a job in your country, otherwise the "+1…" form. A number counts as entered only when the page
+shows exactly that number with that country code (formatting is ignored; "+61 …" is never accepted for a
+Canadian number). Phone type (mobile / home / work) is a separate setting.
+
 **Runtime browser agent (pages the built-in flows don't understand).** When a signed-in Codex
 (your ChatGPT subscription; no API key) is available, Career Atlas describes the page to it — labels,
 buttons, options, which fields are filled, and *which* profile facts exist, never their values — and

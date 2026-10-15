@@ -2,6 +2,7 @@
 // section handlers. Every helper re-reads the page instead of trusting earlier element handles:
 // React re-renders replace nodes, so a control is found again (by its field identity) before
 // each action, and every action is checked against what the page shows afterwards.
+import { phoneAccepted } from "@shared/phone";
 import type { Locator, Page } from "playwright-core";
 import { SCAN_FIELDS } from "./dom";
 import { fieldKey, norm, type FieldDescriptor, type PlannedAction } from "./plan";
@@ -74,19 +75,45 @@ export async function visibleOptions(page: Page): Promise<Locator[]> {
   return (await readOptions(page)).map((o) => page.locator(`[data-ca-opt="${o.i}"]`));
 }
 
+/** Marks the options already showing before a control is opened: they belong to another control (a list still closing). */
+async function markStaleOptions(page: Page) {
+  await page
+    .evaluate(`(() => { document.querySelectorAll('[data-ca-stale]').forEach((e) => e.removeAttribute('data-ca-stale')); document.querySelectorAll(${JSON.stringify(OPTION_SEL)}).forEach((e) => { const r = e.getBoundingClientRect(); if (r.width > 0 && r.height > 0) e.setAttribute('data-ca-stale', '1'); }); })()`)
+    .catch(() => {});
+}
+
+/** The options that belong to THIS control: inside the list it points to (aria-controls / aria-owns), and not showing before it was opened (one page call). */
+async function ownOptions(page: Page, loc: Locator): Promise<Locator[]> {
+  const shown = await readOptions(page);
+  if (!shown.length) return [];
+  const mine = (await loc
+    .evaluate((el) => {
+      const listId = el.getAttribute("aria-controls") || el.getAttribute("aria-owns");
+      const host = listId ? el.ownerDocument.getElementById(listId) : null;
+      return [...el.ownerDocument.querySelectorAll("[data-ca-opt]")].filter((e) => !e.hasAttribute("data-ca-stale") && (!host || host.contains(e))).map((e) => e.getAttribute("data-ca-opt"));
+    })
+    .catch(() => null)) as (string | null)[] | null;
+  const keep = mine ? new Set(mine) : null;
+  return shown.filter((o) => !keep || keep.has(String(o.i))).map((o) => page.locator(`[data-ca-opt="${o.i}"]`));
+}
+
 /** Reads the options of comboboxes / listboxes (they exist only while the menu is open). */
 export async function enrichOptions(page: Page, fields: FieldDescriptor[], guard?: () => Promise<void>): Promise<FieldDescriptor[]> {
   for (const f of fields) {
     if ((f.control !== "combobox" && f.control !== "listbox") || !f.visible || f.options.length || (f.control === "combobox" && f.asyncOptions)) continue;
+    // An answered typeahead (its own text is the committed choice): opening it again only to read options
+    // would put it back in "searching" state. Button-style lists (which show placeholders) are still read.
+    if (f.control === "combobox" && valuesOf(f).length) continue;
     await guard?.();
     const loc = page.locator(`[data-ca-ref="${f.ref}"]`);
     try {
+      await markStaleOptions(page);
       await loc.click({ timeout: 3000 });
-      // Options may load after the menu opens: wait for them (up to 3 s) before reading.
-      let found = await visibleOptions(page);
+      // Options may load after the menu opens: wait for them (up to 3 s) before reading — this control's own only.
+      let found = await ownOptions(page, loc);
       for (let w = 0; w < 12 && !found.length; w++) {
         await sleep(250);
-        found = await visibleOptions(page);
+        found = await ownOptions(page, loc);
       }
       const texts: string[] = [];
       for (const o of found) {
@@ -189,6 +216,7 @@ async function comboPick(page: Page, a: PlannedAction, query: string, decide: (l
   };
   const committed = (x: FieldDescriptor, p: string) => shownMatches(valuesOf(x), p);
   let r = await searchSelect(page, find, { queries: [query], choose: decide, committed });
+  if (process.env.CA_APPLY_DEBUG) process.stderr.write(`COMBO ${a.label.slice(0, 40)} search=${r.ok ? "ok" : r.reason} seen=${r.seen.length}\n`);
   if (!r.ok) r = await listSelect(page, find, decide, committed);
   if (r.ok) picked.set(a.key, r.picked[r.picked.length - 1]);
 }
@@ -233,12 +261,13 @@ export async function readMenu(page: Page, ref: string): Promise<string[]> {
   const loc = page.locator(`[data-ca-ref="${ref}"]`);
   if (!(await loc.count().catch(() => 0))) return [];
   const ant = await loc.evaluate((el) => !!el.closest(".ant-select")).catch(() => false);
+  await markStaleOptions(page);
   if (ant) await openAntSelect(loc);
   else await loc.click({ timeout: 3000 }).catch(() => {});
   const texts: string[] = [];
   for (let w = 0; w < 8 && !texts.length; w++) {
     await sleep(200);
-    for (const o of await visibleOptions(page)) {
+    for (const o of await ownOptions(page, loc)) {
       const tx = ((await o.textContent({ timeout: 1000 }).catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
       if (tx && !texts.includes(tx)) texts.push(tx);
     }
@@ -319,7 +348,8 @@ export function verify(actions: PlannedAction[], after: FieldDescriptor[], resum
         good = list.includes(norm(resume.name));
         break;
       case "fill":
-        good = /phone|tel/.test(`${f.name} ${f.id} ${f.inputType}`.toLowerCase()) ? digits(String(v)).endsWith(digits(a.value).slice(-7)) && digits(a.value).length > 0 : norm(String(v)) === norm(a.value);
+        // Phones: the normalised number including its country (and the code shown beside it), never a suffix.
+        good = a.phone ? phoneAccepted(String(v ?? ""), a.phone, f.phone?.dial) : /phone|tel/.test(`${f.name} ${f.id} ${f.inputType}`.toLowerCase()) ? digits(String(v)) === digits(a.value) && digits(a.value).length > 0 : norm(String(v)) === norm(a.value);
         break;
       case "check":
         good = v === a.value;
@@ -333,7 +363,8 @@ export function verify(actions: PlannedAction[], after: FieldDescriptor[], resum
         good = a.values.every((x) => list.includes(norm(x))) || (picked.has(a.key) && shownMatches(valuesOf(f), picked.get(a.key)!));
         break;
       case "search":
-        good = list.some((x) => a.match.every((m) => x.includes(norm(m)))) || (picked.has(a.key) && shownMatches(valuesOf(f), picked.get(a.key)!));
+        // A suggestion that was clicked must be what the control shows (typed query text is not a choice).
+        good = picked.has(a.key) ? shownMatches(valuesOf(f), picked.get(a.key)!) : list.some((x) => a.match.every((m) => x.includes(norm(m))));
         break;
     }
     if (good) ok.add(a.ref);
@@ -474,8 +505,8 @@ export async function searchSelect(
         return !!now && o.committed(now.f, pick);
       });
       if (ok) {
-        const now = await find();
-        await closeMenu(page, now?.loc);
+        // Close the list only: in a plain combobox the box itself holds the committed choice.
+        await closeMenu(page);
         return { ok: true, picked: [pick], seen };
       }
     }

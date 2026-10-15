@@ -59,3 +59,11 @@ describe("unfamiliar application pages", () => {
     expect(addPanelButton(["Add Employment History", "Add Cover Letter"], "work")).toBe("Add Employment History");
   });
 });
+
+describe("guest routes by meaning", () => {
+  it("chooses the account-free route however it is worded, never sign-in", () => {
+    for (const g of ["Apply as a guest", "Apply manually", "Continue without an account", "Apply without an Account", "Continue as guest", "Proceed without signing in"])
+      expect(decideNavigation({ names: ["Sign in to apply", g], applicationFields: 0, labels: [] }, { password: false, challenge: false, cookieDismissed: true })).toMatchObject({ action: "click", why: "guest", name: g });
+    expect(decideNavigation({ names: ["Sign in to apply", "Create an account"], applicationFields: 0, labels: [] }, { password: false, challenge: false, cookieDismissed: true }).action).not.toBe("click");
+  });
+});

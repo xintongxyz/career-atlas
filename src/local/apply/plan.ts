@@ -10,6 +10,7 @@
 //
 // Ideas (not code) from the MIT-licensed projects devdattatalele/auto-apply,
 // andrewmillercode/Autofill-Jobs and Br1an67/OpenJobAutofill; see docs/AUTO_APPLY.md.
+import { canonicalPhone, phoneAccepted, phoneLayout, phoneValue, type CanonicalPhone } from "@shared/phone";
 import type { FilledField, PendingQuestion } from "@shared/apply";
 import { SOURCE_QUERY } from "@shared/apply-match";
 import { domainForLabel, englishCountry, englishRegion, matchOptionSemantic, questionMeaning, type QuestionMeaning } from "@shared/apply-semantic";
@@ -54,6 +55,13 @@ export interface FieldDescriptor {
   invalid?: boolean;
   /** Date fields typed as separate month / day / year inputs (refs). */
   parts?: { month?: string; day?: string; year?: string };
+  /**
+   * Phone inputs: the widget around them ("intl" = an international phone widget, "split" = a separate
+   * country-code control beside the number) and the calling code it currently shows ("+1").
+   */
+  phone?: { widget: "intl" | "split" | null; dial: string | null } | null;
+  /** The site's help / error text tied to the control (aria-describedby). */
+  help?: string;
 }
 
 export type Semantic =
@@ -108,7 +116,7 @@ export interface PlanContext {
 }
 
 export type PlannedAction =
-  | { ref: string; key: string; label: string; control: Control; kind: "fill"; value: string; source: string }
+  | { ref: string; key: string; label: string; control: Control; kind: "fill"; value: string; source: string; phone?: CanonicalPhone }
   | { ref: string; key: string; label: string; control: Control; kind: "choose"; values: string[]; source: string; optionRefs?: string[] }
   | { ref: string; key: string; label: string; control: Control; kind: "check"; value: boolean; source: string }
   | { ref: string; key: string; label: string; control: Control; kind: "upload"; source: "resume" }
@@ -180,7 +188,7 @@ function classifyStandard(f: FieldDescriptor, name: string, id: string, ac: stri
   if (/confirm e-?mail|re-?enter e-?mail|e-?mail address again/.test(label) || /confirmemail|emailconfirm|email_confirm/.test(keys)) return "email";
   if (ac === "email" || f.inputType === "email" || /(^|[^a-z])e?-?mail/.test(keys) || /^e ?mail/.test(label)) return "email";
   if (/preferred contact (method|type)/.test(label)) return "contact_method";
-  if ((f.control === "combobox" || f.control === "select") && /dialing code|calling code/.test(label)) return "phone_country";
+  if ((f.control === "combobox" || f.control === "select") && /dialing code|dialling code|calling code|dial code|(country )?phone code|phone country|country code/.test(label)) return "phone_country";
   // A dropdown labelled "Phone" next to the number is its dialing country — but never "Phone (Device) Type".
   if ((f.control === "combobox" || f.control === "select") && /^(phone|mobile|cell)/.test(label) && !/\btype\b/.test(label) && !/phone|mobile/.test(id)) return "phone_country";
   if (/phone (device )?type|type of phone|phone device/.test(label)) return "phone_type";
@@ -201,21 +209,30 @@ function classifyStandard(f: FieldDescriptor, name: string, id: string, ac: stri
   if (id === "degree" || /^degree|highest (level of )?education/.test(label)) return "degree";
   if (id === "discipline" || /^discipline|^(field of study|major)/.test(label)) return "discipline";
   if (ac === "postal-code" || /postal|zip/.test(all)) return "postal_code";
-  if (ac.startsWith("street-address") || ac.startsWith("address-line") || /^(street )?address/.test(label)) return "address";
+  // The applicant's street address, however it is introduced ("Home address", "Start typing your address") —
+  // not an e-mail / web / IP address, nor the second address line.
+  if (ac.startsWith("street-address") || ac.startsWith("address-line1") || (/^(street )?address|\b(home|street|mailing|residential|current|postal|your) address\b|\byour address$/.test(label) && !/e ?mail|web|ip address|line 2|address 2|second/.test(label))) return "address";
   if (id === "candidate-location" || name === "location" || /^(current )?location|^where are you (located|based)/.test(label)) return "location";
   if (ac === "address-level2" || /^city|^town/.test(label)) return "city";
   if (ac === "address-level1" || /^(state|province|region)/.test(label)) return "region";
-  if (ac === "country" || ac === "country-name" || /^country/.test(label)) return id === "country" && /phone/.test(f.section.toLowerCase()) ? "phone_country" : "country";
+  // The applicant's country, however it is asked ("Current country", "Country of residence", "Where do you live?").
+  if (ac === "country" || ac === "country-name" || /^country|^(current|home|residence|residential) country|country of (residence|domicile)|^where do you (live|reside)\b|^in which country do you (live|reside)/.test(label)) return id === "country" && /phone/.test(f.section.toLowerCase()) ? "phone_country" : "country";
   return "unknown";
 }
 
 // ---------------------------------------------------------------- profile values
 
 type Resolved =
-  | { ok: true; value: string | string[] | boolean; source: string }
+  | { ok: true; value: string | string[] | boolean; source: string; phone?: CanonicalPhone; alt?: string }
   | { ok: false; reason: "missing" | "sensitive" | "legal" | "demographic" | "open_ended" | "unsupported"; hint?: string | null };
 
 const has = (v: unknown) => v !== null && v !== undefined && v !== "";
+
+/** The applicant's phone in canonical form (see src/shared/phone.ts). */
+export function applicantPhone(ctx: PlanContext): CanonicalPhone | null {
+  const p = ctx.profile;
+  return canonicalPhone(p.contact.phone, { countryCode: p.application_defaults.phone_country_code, country: p.based_in.country });
+}
 const yes = (source: string): Resolved => ({ ok: true, value: "yes", source });
 const no = (source: string): Resolved => ({ ok: true, value: "no", source });
 const LEVEL_RANK: Record<string, number> = { basic: 1, intermediate: 2, professional: 3, fluent: 4, native: 5 };
@@ -257,8 +274,13 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
       return has(c.first_name) && has(c.last_name) ? { ok: true, value: `${c.first_name} ${c.last_name}`, source: "contact.name" } : { ok: false, reason: "missing" };
     case "email":
       return has(c.email) ? { ok: true, value: c.email!, source: "contact.email" } : { ok: false, reason: "missing" };
-    case "phone":
-      return has(c.phone) ? { ok: true, value: c.phone!, source: "contact.phone" } : { ok: false, reason: "missing" };
+    case "phone": {
+      if (!has(c.phone)) return { ok: false, reason: "missing" };
+      const canon = applicantPhone(ctx);
+      // Without a known country the number is typed only where no country is involved (a plain local field).
+      if (!canon) return f.phone?.widget || /^\s*\+/.test(f.placeholder) ? { ok: false, reason: "missing", hint: "Phone country unknown — set the phone country code in Application Defaults." } : { ok: true, value: c.phone!.replace(/[^\d]/g, ""), source: "contact.phone" };
+      return { ok: true, value: phoneValue(canon, phoneLayout(f, canon, ctx.jobCountry)), source: "contact.phone", phone: canon };
+    }
     case "contact_method": {
       // Only the saved preference — never inferred from the phone type or from which details exist.
       const m = p.application_defaults.preferred_contact_method;
@@ -287,9 +309,13 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
       return has(p.based_in.region) ? { ok: true, value: englishRegion(p.based_in.region!), source: "based_in.region" } : { ok: false, reason: "missing" };
     case "country":
       return has(p.based_in.country) ? { ok: true, value: englishCountry(p.based_in.country!), source: "based_in.country" } : { ok: false, reason: "missing" };
-    case "phone_country":
-      if (has(p.based_in.country)) return { ok: true, value: englishCountry(p.based_in.country!), source: "based_in.country" };
-      return has(p.application_defaults.phone_country_code) ? { ok: true, value: p.application_defaults.phone_country_code!, source: "defaults.phone_country_code" } : { ok: false, reason: "missing" };
+    case "phone_country": {
+      // The phone's own country (saved number / phone country code / the applicant's country) — never the job's.
+      const canon = applicantPhone(ctx);
+      if (canon?.country) return { ok: true, value: canon.country, source: "contact.phone", alt: `+${canon.cc}` };
+      if (canon) return { ok: true, value: `+${canon.cc}`, source: "contact.phone" };
+      return has(p.based_in.country) ? { ok: true, value: englishCountry(p.based_in.country!), source: "based_in.country" } : { ok: false, reason: "missing" };
+    }
     case "location": {
       const parts = [p.based_in.city, p.based_in.region ? englishRegion(p.based_in.region) : null, p.based_in.country ? englishCountry(p.based_in.country) : null].filter(has) as string[];
       if (!has(p.based_in.city)) return { ok: false, reason: "missing" };
@@ -460,7 +486,11 @@ export function screeningValue(qm: QuestionMeaning, ctx: PlanContext, label = ""
   if (qm.meaning === "graduation_date") {
     if (d.expected_graduation) return ok(d.expected_graduation, "defaults.expected_graduation");
     const e = ctx.profile.education.find((x) => x.completed === false && x.year);
-    return e ? ok(String(e.year), "education.in_progress") : { ok: false, reason: "missing" };
+    if (e) return ok(String(e.year), "education.in_progress");
+    // A completed degree: only when there is exactly one — with several, "when did you graduate" is ambiguous.
+    const done = ctx.profile.education.filter((x) => x.completed !== false && (x.end || x.year));
+    if (done.length === 1) return ok(done[0].end ?? String(done[0].year), done[0].end ? "education.end" : "education.year");
+    return { ok: false, reason: "missing", hint: done.length > 1 ? "Several completed degrees — which graduation is meant?" : null };
   }
   if (qm.meaning === "placement_duration") {
     // "Available for a four-month placement?" — yes only when every length asked is one the user listed.
@@ -529,7 +559,8 @@ export function toAction(f: FieldDescriptor, key: string, value: unknown, source
     }
     case "combobox": {
       const answer = typeof value === "boolean" ? (value ? "yes" : "no") : String(value);
-      if (f.asyncOptions) {
+      // A typeahead that lists nothing until something is typed: type, then pick the suggestion that matches.
+      if (f.asyncOptions || !f.options.some((o) => !isPlaceholderOption(o))) {
         const parts = answer.split(",").map((x) => x.trim()).filter(Boolean);
         return { ...base, kind: "search", value: parts[0] ?? answer, match: parts.length ? parts : [answer], source };
       }
@@ -571,13 +602,25 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
       continue;
     }
     // Meaning of a screening question (Workday's "previous worker" field is prior employment by definition).
-    const qm: QuestionMeaning = f.wdField === "candidateIsPreviousWorker" ? { ...questionMeaning("", ctx.employer ?? null), meaning: "prior_employment", employerScoped: true, reusable: true } : questionMeaning(f.label || f.placeholder, ctx.employer ?? null);
+    // A bare "Month" / "Year" / "Day" control is one part of a composite date: its question is the group's.
+    const part = datePartOf(f);
+    const qText = part && f.section ? `${f.section} ${part}` : f.label || f.placeholder;
+    const qm: QuestionMeaning = f.wdField === "candidateIsPreviousWorker" ? { ...questionMeaning("", ctx.employer ?? null), meaning: "prior_employment", employerScoped: true, reusable: true } : questionMeaning(qText, ctx.employer ?? null);
     if (qm.meaning === "identity") sem = "demographic";
     else if (qm.approval && (CLOSED.includes(f.control) || sem === "legal")) sem = "legal";
     const sensitive = SENSITIVE_SEMANTICS.has(sem) || qm.sensitivity !== "normal";
-    const use = (value: unknown, source: string) => {
+    const use = (value: unknown, source: string, phone?: CanonicalPhone) => {
+      // A dropdown that already SHOWS this answer (its option list not read — it was not re-opened) is kept.
+      if (["combobox", "listbox", "select"].includes(f.control) && !f.options.some((o) => !isPlaceholderOption(o)) && typeof value === "string") {
+        const shown = (Array.isArray(f.value) ? f.value : [String(f.value ?? "")]).filter(Boolean);
+        if (shown.length === 1 && matchOptionSemantic([{ label: shown[0], value: shown[0] }], value, domainForLabel(f.label, classify(f)))) {
+          plan.kept.push({ ref: f.ref, key, label: f.label, source });
+          return null;
+        }
+      }
       const a = toAction(f, key, value, source);
       if ("misfit" in a) return a;
+      if (phone && a.kind === "fill") a.phone = phone;
       // Already right on the page (e.g. filled by Workday's resume parsing): keep it, don't re-type it.
       // The user's own answer must be there exactly as given (it may correct a rejected format).
       const same = source === "answer" && a.kind === "fill" ? norm(String(f.value ?? "")) === norm(a.value) && String(f.value ?? "").trim() === a.value.trim() : holds(f, a);
@@ -607,11 +650,19 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
     }
     // 3. Application Defaults, by meaning (prior employment, co-op, start date, …)
     let sv = qm.meaning !== "unknown" ? screeningValue(qm, ctx, f.label) : null;
+    // One part of a composite date: the month (by name, else by number), day or year of the answer.
+    if (part && sv?.ok && typeof sv.value === "string") {
+      const d = parseDateAnswer(sv.value);
+      const v = d?.[part];
+      sv = v ? { ok: true, value: part === "month" ? MONTH_NAMES[Number(v) - 1] : v, source: sv.source, alt: part === "month" ? v : undefined } : { ok: false, reason: "missing" };
+    }
     // A yes/no default only answers a closed question (never typed into a free-text box).
     if (sv?.ok && (sv.value === "yes" || sv.value === "no") && !CLOSED.includes(f.control)) sv = { ok: false, reason: "open_ended" };
     const r = sv ?? profileValue(sem, f, ctx);
     if (r.ok) {
-      const m = use(r.value, r.source);
+      // A calling-code list may name countries ("Canada (+1)") or show codes only ("+1").
+      let m = use(r.value, r.source, r.phone);
+      if (m && r.alt) m = use(r.alt, r.source, r.phone);
       if (!m) continue;
       if (f.required) plan.questions.push(question(f, key, "no_matching_option", sensitive, m.misfit, qm));
       else plan.skipped.push({ key, label: f.label, reason: "no_matching_option" });
@@ -631,7 +682,9 @@ export function holds(f: FieldDescriptor, a: PlannedAction): boolean {
   const digits = (x: string) => x.replace(/\D+/g, "");
   switch (a.kind) {
     case "fill":
-      if (/phone|tel/.test(`${f.name} ${f.id} ${f.inputType} ${f.wdField ?? ""}`.toLowerCase())) return !!digits(String(v ?? "")) && digits(String(v)).endsWith(digits(a.value).slice(-7));
+      // A phone already on the page counts only if it is THIS number in THIS country (never a suffix match).
+      if (a.phone) return phoneAccepted(String(v ?? ""), a.phone, f.phone?.dial);
+      if (/phone|tel/.test(`${f.name} ${f.id} ${f.inputType} ${f.wdField ?? ""}`.toLowerCase())) return !!digits(String(v ?? "")) && digits(String(v)) === digits(a.value);
       return norm(String(v ?? "")) === norm(a.value) && !!norm(a.value);
     case "check":
       return v === a.value;
@@ -650,6 +703,16 @@ export function holds(f: FieldDescriptor, a: PlannedAction): boolean {
 
 export function filledSummary(actions: PlannedAction[], verified: Set<string>): FilledField[] {
   return actions.map((a) => ({ label: (a.label || a.key).slice(0, 300), source: a.source, verified: verified.has(a.ref) }));
+}
+
+export const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/** "Month" / "Year" / "Day" (with or without a required mark): one part of a composite date. */
+export function datePartOf(f: FieldDescriptor): "month" | "day" | "year" | null {
+  if (f.control === "date") return null;
+  const m = norm(f.label || f.placeholder).match(/^(month|mm|day|dd|year|yyyy)( required)?$/);
+  if (!m) return null;
+  return /^m/.test(m[1]) ? "month" : /^d/.test(m[1]) ? "day" : "year";
 }
 
 /** Accepts YYYY-MM-DD, YYYY-MM, YYYY, MM/DD/YYYY, MM/YYYY. Never guesses a missing part. */

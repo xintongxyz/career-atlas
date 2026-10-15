@@ -479,7 +479,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       await set({ stage: STAGE_OF[state] });
       const decision = decideNavigation(navView(obs, state), { password: s.password || loginPage, challenge: s.challenge, cookieDismissed });
       if (process.env.CA_APPLY_DEBUG) process.stderr.write(`GENERIC step=${step} url=${page.url().slice(0, 90)} state=${state} fields=${obs.applicationFields} sem=${obs.semantics.join(",")} widgets=${obs.widgets.map((w) => w.kind).join(",")} decision=${JSON.stringify(decision)} names=${JSON.stringify(obs.names.slice(0, 12))}\n`);
-      const sig = `${decision.action}:${"name" in decision ? decision.name : ""}:${page.url()}`;
+      // "Same situation again" means the same decision on the same CONTENT (single-page forms keep one URL).
+      const sig = `${decision.action}:${"name" in decision ? decision.name : ""}:${page.url()}:${contentSig(obs)}`;
       repeats = sig === lastSig ? repeats + 1 : 0;
       lastSig = sig;
       if (decision.action === "captcha") return visible ? manual(page, null, "captcha") : pause("captcha");
@@ -594,11 +595,12 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
             }
           }
           if (adv.action === "click") {
-            const beforeUrl = page.url();
+            const before = `${page.url()}:${contentSig(now)}`;
             const tabs = ctx!.pages().length;
             await clickNamed(page, adv.name);
             page = await adoptNewTab(page, tabs);
-            if (page.url() === beforeUrl && repeats >= 2) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+            await sleep(400);
+            if (`${page.url()}:${contentSig(await observe(page))}` === before && repeats >= 2) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
             await set({}, "next_step", { step: step + 2 });
             continue;
           }
@@ -626,11 +628,16 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     return agentOrStop(page, fromIndeed);
   }
 
+  /** What the page shows (headings, controls, fields) — how a step change is recognised without a new URL. */
+  function contentSig(m: PageMap): string {
+    return `${m.headings.join("|")}#${m.names.join("|")}#${m.labels.join("|")}#${m.applicationFields}`;
+  }
+
   /** The controls the fixed rules may act on, given what the page is: a posting has no application fields. */
   function navView(m: PageMap, state: PageState): PageObservation {
     const fields = state === "posting" ? 0 : m.applicationFields;
     const applyNames = m.names.some((n) => APPLY_CTA_RE.test(n)) ? [] : m.chromeNames.filter((n) => APPLY_CTA_RE.test(n));
-    return { names: [...m.names, ...applyNames, ...m.cookieNames], applicationFields: fields, applicantFields: state === "posting" ? 0 : m.semantics.length, labels: m.labels, frames: m.frames };
+    return { names: [...m.names, ...applyNames, ...m.cookieNames], cookieNames: m.cookieNames, applicationFields: fields, applicantFields: state === "posting" ? 0 : m.semantics.length, labels: m.labels, frames: m.frames };
   }
 
   /** The GPT agent for this run (one per run, so its memory of asked questions and failures is kept). */
@@ -1131,7 +1138,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
    * already holds correctly are kept (never erased and re-typed); a pre-filled value that My Profile
    * contradicts is corrected; pre-filled values My Profile can't confirm are kept and listed for Review.
    */
-  async function fillPage(page: Page, opts: { uploadInPlan: boolean; parsedMode?: boolean }): Promise<{ questions: PendingQuestion[] }> {
+  async function fillPage(page: Page, opts: { uploadInPlan: boolean; parsedMode?: boolean; retried?: boolean }): Promise<{ questions: PendingQuestion[] }> {
     const questions: PendingQuestion[] = [];
     const handled = new Set<string>();
     let uploaded = false;
@@ -1271,6 +1278,14 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         const labels = await readMenu(page, f.ref).catch(() => []);
         if (labels.length) q.options = labels;
       }
+    }
+    // A value the site cleared after it was verified (a re-render or a reset), or a control that appeared
+    // or became enabled only after the passes (State after Country): one more round — only then a question.
+    if (!opts.retried) {
+      await sleep(700);
+      const verifiedLabels = new Set(allFilled.filter((x) => x.verified).map((x) => x.label));
+      const again = (await scan(page)).filter((f) => f.visible && f.required && isEmpty(f.value) && !f.group && f.control !== "file" && (!handled.has(fieldKey(f)) || verifiedLabels.has((f.label || fieldKey(f)).slice(0, 300))));
+      if (again.length) return fillPage(page, { ...opts, retried: true });
     }
     // Before moving on: every visible required field must have a value (nothing left for the site to reject).
     // A second copy of the same control (Dayforce renders some inputs twice) does not count when the other holds the value.

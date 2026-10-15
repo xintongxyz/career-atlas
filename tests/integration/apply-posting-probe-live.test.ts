@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAgent } from "../../src/local/apply/browser-agent";
 import { chooseBrowser, launchBrowser } from "../../src/local/apply/browser";
+import { frameView } from "../../src/local/apply/interact";
 import { PAGE_MAP, pageState, type PageMap } from "../../src/local/apply/page-intent";
 import { codexProvider } from "../../src/local/codex";
 import { profileSchema } from "../../src/shared/profile";
@@ -59,6 +60,15 @@ describe.skipIf(!live)("live posting probe (opt-in, navigation only)", () => {
           await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
           await new Promise((res) => setTimeout(res, 2500));
           after = (await page.evaluate(PAGE_MAP)) as PageMap;
+          // As the engine does: an application inside a large embedded frame is worked on inside that frame.
+          const frame = after.semantics.length === 0 ? [...after.frames].sort((a, b) => b.area - a.area)[0] : undefined;
+          const f = frame ? page.frames().find((x) => x.url() === frame.src) : undefined;
+          if (f) {
+            page = frameView(page, f);
+            await new Promise((res) => setTimeout(res, 1500));
+            after = (await page.evaluate(PAGE_MAP)) as PageMap;
+            evidence({ kind: "entered_frame", host: new URL(frame!.src).host });
+          }
           const st = pageState(after, { inWorkflow: true, login: false });
           evidence({ kind: "after_action", action: r.action.action, target: r.target, verified: r.note, url: after.url, state: st, headings: after.headings, semantics: after.semantics, fields: after.applicationFields, widgets: after.widgets.map((w) => w.kind) });
           if (st === "application" || st === "questions" || st === "login") {

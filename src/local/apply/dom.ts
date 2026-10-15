@@ -165,7 +165,9 @@ export const SCAN_FIELDS = String.raw`(() => {
     if (el.closest('[aria-hidden="true"]') && type !== 'file') continue;
     const panel = panelOf(el);
     const invalid = el.getAttribute('aria-invalid') === 'true' || !!(wdField(el) && wdField(el).querySelector('[data-automation-id="inputAlert"], [data-automation-id="errorMessage"]'));
-    const base = { invalid, inputType: type, name: el.name || fieldName(el), id: el.id || '', placeholder: clean(el.getAttribute('placeholder')), autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(), section: sectionOf(el), demographic: isDemo(el), options: [], wdField: fieldName(el), group: panel.group, groupIndex: panel.groupIndex };
+    // The site's own help / error text tied to the control (aria-describedby) — site wording, not values.
+    const help = clean((el.getAttribute('aria-describedby') || '').split(/\s+/).map((i) => { const h = i && document.getElementById(i); return h ? h.textContent : ''; }).join(' ')).slice(0, 200);
+    const base = { invalid, inputType: type, name: el.name || fieldName(el), id: el.id || '', placeholder: clean(el.getAttribute('placeholder')), autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(), section: sectionOf(el), demographic: isDemo(el), options: [], wdField: fieldName(el), group: panel.group, groupIndex: panel.groupIndex, help };
     // Workday date: month / day / year inputs typed separately -> one field.
     const dai = el.getAttribute('data-automation-id') || '';
     const datePart = (dai.match(/^dateSection(Month|Day|Year)-input$/) || [])[1];
@@ -256,7 +258,10 @@ export const SCAN_FIELDS = String.raw`(() => {
       const single = holder && holder.querySelector('.select__single-value, [class*="singleValue"], [class*="single-value"], .ant-select-single .ant-select-selection-item, .MuiSelect-select');
       const multi = holder ? [...holder.querySelectorAll('.select__multi-value__label, [class*="multiValue"] [class*="label"], .ant-select-selection-item-content, .MuiChip-label')].map(textOf).filter(Boolean) : [];
       const typed = (el.value || '').trim();
-      const shownValue = single ? [clean(single.getAttribute('title') || textOf(single))] : multi.length ? multi : (el.getAttribute('aria-autocomplete') === 'none' && typed ? [typed] : []);
+      // A plain combobox (no component library) shows its committed value in the box itself — but only
+      // once its suggestion list is closed; text typed while the list is open is a search query.
+      const plain = !el.closest('.select__control, [class*="-control"], [class*="select__control"], .ant-select, [class*="MuiAutocomplete"], [class*="MuiSelect"], [data-automation-id]');
+      const shownValue = single ? [clean(single.getAttribute('title') || textOf(single))] : multi.length ? multi : typed && (el.getAttribute('aria-autocomplete') === 'none' || (plain && el.getAttribute('aria-expanded') !== 'true')) ? [typed] : [];
       out.push({ ...base, ref: ref(el), control: 'combobox', label, required: requiredOf(el, label), value: shownValue, visible: visible(ctl || el) });
       continue;
     }
@@ -264,7 +269,40 @@ export const SCAN_FIELDS = String.raw`(() => {
       out.push({ ...base, ref: ref(el), control: 'checkbox', label, required: requiredOf(el, label), value: el.checked, visible: visible(el) || (el.closest('label') ? visible(el.closest('label')) : false) });
       continue;
     }
-    out.push({ ...base, ref: ref(el), control: el.tagName === 'TEXTAREA' ? 'textarea' : 'text', label, required: requiredOf(el, label), value: el.value, visible: visible(el) });
+    // Phone inputs: which widget holds them and which calling code is shown beside them (a separate
+    // country-code control, or an international phone widget's selected country).
+    let phone = null;
+    if (type === 'tel' || /phone|mobile|\btel\b/i.test([el.name, el.id, el.getAttribute('autocomplete'), label].join(' '))) {
+      const dialOf = (t) => { const m = String(t || '').match(/\+\s?\d{1,4}/); return m ? m[0].replace(/\s/g, '') : null; };
+      const widget = el.closest('.iti, .intl-tel-input, .react-tel-input, .PhoneInput, [class*="phone-input" i], [class*="phoneinput" i], [data-phone-widget]');
+      let kind = null, dial = null;
+      if (widget) {
+        kind = 'intl';
+        const d = widget.querySelector('.iti__selected-dial-code, .selected-dial-code, [class*="dial-code" i], .iti__selected-flag, .iti__selected-country, .selected-flag, [data-dial-code]');
+        dial = dialOf(d && (d.textContent || '')) || dialOf(d && d.getAttribute('title')) || dialOf(d && d.getAttribute('aria-label')) || (d && d.getAttribute('data-dial-code') ? '+' + d.getAttribute('data-dial-code') : null);
+      }
+      const isDial = (c) => {
+        if (c === el) return false;
+        const lab = c.id ? (document.querySelector('label[for="' + CSS.escape(c.id) + '"]') || {}).textContent || '' : '';
+        const words = [c.id, c.name, c.getAttribute('aria-label'), lab].join(' ');
+        const opts = c.tagName === 'SELECT' ? [...c.options].slice(0, 8).map((o) => o.text).join(' ') : '';
+        return /dial|calling|country.?(phone.?)?code|phone.?code|phone.?country/i.test(words) || (/\+\d/.test(opts) && /country|code/i.test(words + ' ' + opts));
+      };
+      if (!dial) {
+        for (let x = el.parentElement, k = 0; x && x !== document.body && k < 4; x = x.parentElement, k++) {
+          const ctl = [...x.querySelectorAll('select, input[role="combobox"], [role="combobox"], button[aria-haspopup="listbox"]')].find(isDial);
+          if (ctl) {
+            kind = kind || 'split';
+            const shown = ctl.tagName === 'SELECT' ? (ctl.options[ctl.selectedIndex] || {}).text : (ctl.value || ctl.textContent || (ctl.parentElement && ctl.parentElement.textContent));
+            dial = dialOf(shown);
+            break;
+          }
+          if (x.querySelectorAll('input, select, textarea').length > 5) break;
+        }
+      }
+      if (kind) phone = { widget: kind, dial };
+    }
+    out.push({ ...base, ref: ref(el), control: el.tagName === 'TEXTAREA' ? 'textarea' : 'text', label, required: requiredOf(el, label), value: el.value, visible: visible(el), phone });
   }
   document.documentElement.setAttribute('data-ca-seq', String(n));
   return out;

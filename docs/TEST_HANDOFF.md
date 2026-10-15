@@ -290,3 +290,133 @@ proposals refused), and the original case through approval (only the application
   refused by the session's safety check — owner data). Then: Start application, review mode, no account.
 - Cookie banners offering only "Accept all" / "Manage settings" are left alone (no privacy-preserving choice);
   a banner that blocks clicks would need the owner.
+
+## 19. General web understanding — the lab, the GPT evaluation, real-site probes (2026-10-15)
+
+**Philosophy.** No more site-by-site fixes. Every failure found is reduced to a general root cause, fixed
+once, and covered by randomly generated synthetic sites (`tests/lab`) — never by a selector for one employer.
+
+### Phone (owner's number verified)
+
+The owner's saved number was checked read-only in the app: the national digits match the number the owner
+confirmed; the country comes from the profile country (Canada → +1). A value of the form "+61 3 …" is what an
+international phone widget makes of those digits typed WITHOUT "+1" (it reads "61" as Australia) — and the old
+check accepted it (it compared only the last 7 digits). Fix (`src/shared/phone.ts`): canonical number
+(country from the saved "+" number, else the phone country code, else the applicant's own country — never the
+job's); layout decides the typed form (local next to a separate code control; "+1…" in international widgets;
+plain fields: local for a same-country job, else "+1…"); acceptance compares the normalised number INCLUDING
+the code and the code shown beside it — never a suffix. The calling-code list is matched by country name
+("Canada (+1)", not the first "+1" — American Samoa) or by code when only codes are listed. No profile change
+was needed; the owner may optionally set Application Defaults → phone country code "+1".
+
+### Root causes fixed (general)
+
+| Found by | Root cause | Fix |
+|---|---|---|
+| lab | "Review application" / "Proceed" not treated as moving on | step vocabulary (generic.ts) |
+| lab | "Start application" known to the page model but not to the navigation rule | one shared CTA definition |
+| lab | typeahead with no options until typing planned as a fixed list | type, then pick the matching suggestion |
+| lab | a successful pick was erased (the "close menu" step cleared the box) | close the list only |
+| lab | typed query text counted as a choice | only a clicked option, shown with the list closed, counts |
+| lab | bare Month / Year had no meaning; completed-degree graduation unmapped | meaning from the group heading; one completed degree's end date (several → asked) |
+| lab | a verified choice reset by the site, or a control enabled late (State after Country) → asked | one more pass for lost / late controls |
+| lab | single-URL multi-step forms judged "not advancing" (URL compared) | progress judged by page content |
+| lab | guest routes worded "Apply as a guest / manually / without an account" | guest by meaning |
+| lab | "Home address", "Current country" not recognised | meaning from wording, not from the first word |
+| real (employer I, ADP system) | the validator refused "Deny" (only knew "Reject") | cookie controls by purpose (private / settings / consent) |
+| real (employer N, embedded Greenhouse board) | application in an embedded frame unseen by GPT; a navigation link was clicked | frames in the observation; site navigation not clickable unless it starts the application |
+| real (employer O) | a "see how well you match — upload your resume" tool made the posting look like a form | job-match uploads and talent-community sign-ups are widgets |
+| GPT eval | counts in the fact list were mistaken for facts | counts moved to `profile_summary`; real `education.graduation` fact |
+| unseen lab seeds | a dropdown's options were read page-wide, so a neighbouring list still closing was taken as its options | options must belong to the control (its aria-controls list, and not showing before it was opened) |
+| unseen lab seeds | an answered dropdown was re-opened just to read options, leaving it "searching" (read as empty) | answered controls are not re-opened |
+
+### What GPT now sees (no applicant values)
+
+goal (job title, employer) · page_state · widgets (search, sign-up, matching, chrome, cookie) · frames · per
+button: text, area · per field: label, control, required, state (empty / filled / site option for non-personal
+questions), options, group heading, help text (aria-describedby), placeholder (site example), invalid flag,
+related controls (phone: separate code control / international widget and the code shown) · which profile
+facts exist · counts (profile_summary).
+
+### Synthetic results (kept separate from real sites)
+
+**Lab** (`tests/lab`, `tests/integration/lab-batch.test.ts`; seeded generator, hidden ground truth, graded on what
+the site RECEIVED after approval; fictional applicants incl. a Canadian number starting with "61" and a UK number
+saved with "+44"):
+
+| Batch | Sites | Field identification | Profile mapping | Semantic verification | Navigation | Workflow completion | False completions | Unauthorized | Wrong applicant values |
+|---|---|---|---|---|---|---|---|---|---|
+| first run (seeds 1–14, before fixes) | 14 | 16/16 | 16/16 | 16/16 | 4/14 | 2/11 | 0 | 0 | 0 |
+| development (seeds 1–50, after fixes) | 50 | 284/284 | 284/284 | 284/284 | 48/50 | 33/35 | 0 | 0 | 0 |
+| generalization (unseen seeds 51–100) | 50 | 276/276 | 276/276 | 276/276 | 47/50 | 33/36 | 0 | 0 | 0 |
+| confirmation after the last fixes (unseen seeds 101–130) | 30 | 144/144 | 144/144 | 144/144 | 30/30 | 17/17 | 0 | 0 | 0 |
+
+The 3 misses of the unseen batch (a searchable country dropdown next to an address typeahead) had the last two
+root causes above; after the fixes all 3 seeds (and the 2 earlier ones with the same pattern) pass individually.
+
+Patterns covered (each in several random layouts, labels and orders): posting vs form, apply buttons, job alerts,
+search, talent community, job-match uploads, apply menus (sign-in vs guest), cookie overlays, modals, login
+pages, multi-step with review step, final submit; phone split (country names / codes only, preset to a wrong
+country), international widget (auto / separate modes), masked local, "+" box, phone type; address with
+dependent province (late-loaded), address typeahead (commit required); searchable dropdown (typed text
+discarded); month / year parts; resume upload behind a button; required declaration; conditional
+eligibility → sponsorship; skill tags; delayed rendering, re-rendering, lost selections, new tabs, iframes.
+
+**GPT reasoning evaluation** (`tests/integration/lab-gpt-eval.test.ts`, opt-in, real GPT via Codex, nothing
+executed; ground truth hidden in attributes the model never sees):
+
+| Category | Correct (final run) |
+|---|---|
+| goal (start the right application, incl. unusual wording, apply menus) | 6/6 |
+| ignores irrelevant controls (widgets, cookie consent, talent community, match upload) | 10/10 |
+| composite fields (phone split / widget, date parts) | 6/6 |
+| correct profile fact | 4/4 |
+| ambiguity (unknown fact, identity) | 4/4 |
+| stops where approval is needed (final submit, declaration, login, frame) | 7/8 |
+| recovery (validation error, refused proposal, modal) | 6/6 |
+| **all** | **43/44** |
+
+The miss: on a page whose application lives in a frame, GPT proposed scrolling instead of stopping (harmless;
+the engine opens frames itself before asking GPT). An earlier run scored 33/34 (the miss led to the fact-list
+fix); a second run 42/44 exposed two rubric mistakes (corrected: the new graduation fact is a valid answer; any
+non-final "finish" is a valid stop).
+
+### Real-website results (navigation only — nothing typed, no profile, no accounts, no submission)
+
+`tests/integration/apply-posting-probe-live.test.ts` on 10 saved postings of different systems (employers
+I–R; ADP, Jobvite, Oracle Cloud, three custom career-site platforms, an embedded Greenhouse board, a
+job-matching career site, two corporate sites):
+
+| Run | Reached the application / its entry step | Correctly reported blocked | Wrong / failed |
+|---|---|---|---|
+| first | 6/10 | 1 (403 Forbidden) | 3: cookie "Deny" refused by the validator; a navigation link clicked (frame not visible to GPT); posting misread (match upload) |
+| after the general fixes (the 3 re-probed) | 9/10 | 1 | 0 |
+
+False completions: 0. Unauthorized actions: 0 submissions, 0 consents, 0 typing; one irrelevant navigation
+click in the first run (no data sent) — now refused by the navigation guard.
+
+### Regression status (after all changes)
+
+`npm run typecheck` ✓ · `npm test` 317 passed, 7 skipped (opt-in live) · `npm run build` ✓ · `npm run test:e2e` 21 passed ·
+`db:check` ✓ · `check:secrets` ✓ · `npm audit` 0. Two existing tests changed for a reason: the Greenhouse phone is
+now checked as the same Canadian number (local digits in a plain box for a job in Canada, or "+1 …"), and the
+Workday rejection test now uses a postal code in the wrong format ("m5h2n2" → asked → "M5H 2N2"), because the
+phone is now entered as Workday wants it (local digits beside its own "Canada (+1)" prompt) and is no longer
+rejected. The lab batch runs as its own CI job (its browser load slowed the timing-sensitive integration tests).
+
+### Remaining unhandled patterns
+
+- Screenshot / visual reasoning is not used (DOM structure only).
+- Multiselect tag inputs are left empty (optional in the lab; no profile → tag mapping yet).
+- CAPTCHA / bot walls (e.g. 403) are reported, never bypassed; sites requiring accounts pause for the owner.
+- The real run of employer H (§18) still needs the owner to cancel the old faulty attempt (§18).
+
+### How to run
+
+```bash
+npm test                                                                 # includes 4 generated sites
+npm run test:lab                                                         # 16 sites (CI job "lab", report uploaded)
+CA_LAB_N=50 CA_LAB_SEED=51 CA_LAB_REPORT=/tmp/lab.md npm run test:lab
+CA_LIVE_CODEX=1 CA_GPT_EVAL_REPORT=/tmp/gpt.md npx vitest run tests/integration/lab-gpt-eval.test.ts
+CA_LIVE_CODEX=1 CA_LIVE_POSTING_URL=<posting> npx vitest run tests/integration/apply-posting-probe-live.test.ts
+```

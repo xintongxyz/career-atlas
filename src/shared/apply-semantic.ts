@@ -290,7 +290,7 @@ const RULES: { meaning: Meaning; re: RegExp; not?: RegExp; sensitivity?: Sensiti
   { meaning: "placement_duration", re: /\b(4|four|8|eight|12|twelve|16|sixteen) ?(months?|month) (placement|work term|term|co ?op|internship)|\bwork term (length|duration)|available for (a|an) \w+ month/ },
   { meaning: "return_to_school", re: /\breturn(ing)? to (school|studies|university|college)|\bfull ?time studies after/ },
   { meaning: "full_time_student", re: /\bfull ?time (student|studies)|\bpart ?time (student|studies)/ },
-  { meaning: "graduation_date", re: /\b(expected |anticipated )?graduation (date|year)|\bwhen (will|do) you graduate|\bexpected to graduate/ },
+  { meaning: "graduation_date", re: /\b(expected |anticipated )?graduation (date|year|month)|\bdate of graduation|\bwhen (will|do|did) you graduate|\bexpected to graduate|\byear graduated/ },
   { meaning: "enrolled_student", re: /\b(currently )?(enrolled|registered|attending|a student)\b.*\b(school|university|college|post ?secondary|program|studies|degree)|\bare you (currently )?a student\b/, not: /co ?op|cooperative education/ },
   // logistics
   { meaning: "relocation", re: /\brelocat/ },

@@ -22,6 +22,7 @@ const obs: AgentObservation = {
   goal: 'Apply for "Analyst" at Northwind',
   page_state: "application",
   widgets: [],
+  frames: [],
   url: "https://careers.example.test/apply",
   title: "Apply",
   headings: [],
@@ -42,6 +43,11 @@ const obs: AgentObservation = {
     { ref: "b9", text: "Accept All Cookies", area: "cookie" },
     { ref: "b10", text: "Reject All", area: "cookie" },
     { ref: "b11", text: "Get updates", area: "subscription" },
+    { ref: "b12", text: "Deny", area: "cookie" },
+    { ref: "b13", text: "Close - By closing this dialog, you have accepted all cookies.", area: "cookie" },
+    { ref: "b14", text: "Media and entertainment", area: "chrome" },
+    { ref: "b15", text: "Apply now", area: "chrome" },
+    { ref: "b16", text: "Cookie settings", area: "cookie" },
   ],
 };
 const ctx: ValidationContext = { obs, fields, profile, employer: null };
@@ -65,6 +71,11 @@ describe("browser agent: trusted validation", () => {
     expect(v({ action: "click", ref: "b7" })).toMatch(/job-alert|final submit/);
     expect(v({ action: "dismiss_dialog", ref: "b9" })).toMatch(/cookie/);
     expect(v({ action: "dismiss_dialog", ref: "b10" })).toBeNull();
+    expect(v({ action: "click", ref: "b12" })).toBeNull(); // "Deny" is the private choice
+    expect(v({ action: "click", ref: "b16" })).toBeNull(); // opening the settings is not consent
+    expect(v({ action: "dismiss_dialog", ref: "b13" })).toMatch(/never accept/); // closing = accepting
+    expect(v({ action: "click", ref: "b14" })).toMatch(/navigation/);
+    expect(v({ action: "click", ref: "b15" })).toBeNull(); // an Apply link in the header starts the application
   });
   it("never creates accounts or signs in, and never touches passwords", () => {
     expect(v({ action: "click", ref: "b3" })).toMatch(/accounts/);

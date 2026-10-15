@@ -211,14 +211,22 @@ describe.skipIf(!ready)("Workday (synthetic multi-step wizard)", () => {
 
   it("the site rejects a value on Save and Continue: the exact field is asked (live Workday error text); province codes match", async () => {
     fx.workday.signedIn = true;
+    // A postal code saved in a form this site rejects (it wants "A1A 1A1").
+    await api("/api/profile", { method: "PUT", json: { profile: { ...PROFILE, contact: { ...PROFILE.contact, postal_code: "m5h2n2" } } } });
     const id = await job(wd("validate+codes", 5), "Workday validation");
     let a = await settled((await start(id, { resume_document_id: resumeB, entry_mode: "manual" })).body.id);
     a = await answerKnown(a, COMMON);
-    expect(a.questions.map((q) => q.key)).toEqual(["wd:phoneNumber"]);
+    expect(a.questions.map((q) => q.key)).toEqual(["wd:postalCode"]);
     expect(a.questions[0]).toMatchObject({ reason: "not_accepted" });
-    expect(a.error_message).toMatch(/only digits/);
+    expect(a.error_message).toMatch(/A1A 1A1/);
     const v = (fx.workday.saves.at(-1)?.v ?? {}) as Record<string, string>;
-    a = await settled((await answer(a.id, { "wd:phoneNumber": "4165550142" })).id);
+    a = await settled((await answer(a.id, { "wd:postalCode": "M5H 2N2" })).id);
+    // The phone went in as Workday wants it: local digits, Canada (+1) in its own code prompt — never rejected.
+    const saved = (fx.workday.saves.at(-1)?.v ?? {}) as Record<string, string>;
+    expect(saved.phone).toBe("4165550142");
+    expect(saved.phoneCode).toBe("Canada (+1)");
+    expect(saved.postalCode).toBe("M5H 2N2");
+    await api("/api/profile", { method: "PUT", json: { profile: PROFILE } });
     expect(a.steps.filter((s) => s.code === "workday_step").map((s) => s.params?.step)).toContain("My Experience");
     expect(((fx.workday.saves.at(-1)?.v ?? v) as Record<string, string>).region).toBe("ON"); // Ontario ↔ ON in a province field
     await api(`/api/apply/attempts/${a.id}/cancel`, { method: "POST" });
