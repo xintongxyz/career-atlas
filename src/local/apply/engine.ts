@@ -34,6 +34,7 @@ import { launchBrowser, type BrowserChoice } from "./browser";
 import { tenantOf, type AccountManager } from "./credentials";
 import { questionMeaning } from "@shared/apply-semantic";
 import type { PublicFacts } from "./codex-agent";
+import { runBrowserAgent, type Proposer } from "./browser-agent";
 import { PAGE_SIGNALS } from "./dom";
 import { PAGE_CONTROLS, decideAdvance, decideNavigation, safeClickName, type PageObservation } from "./generic";
 import { commitOpenSections, enrichOptions, frameView, handleNotices, navigationSafe, perform, readMenu, scan, verify } from "./interact";
@@ -71,6 +72,13 @@ export interface EngineDeps {
   pageAgent?: ((obs: { buttons: string[]; labels: string[] }) => Promise<string | null>) | null;
   /** Unfamiliar closed questions: pick an option from boolean facts (has email, has phone, job source). Never profile values. */
   chooseOption?: ((label: string, options: string[], facts: PublicFacts) => Promise<string | null>) | null;
+  /**
+   * Runtime browser agent for pages the built-in flows do not understand: returns the action proposer
+   * (the authorised GPT provider, no tools) when one is available. See browser-agent.ts.
+   */
+  browserAgent?: (() => Promise<Proposer | null>) | null;
+  /** Tests: fewer agent steps. */
+  agentMaxSteps?: number;
 }
 
 class Stop extends Error {
@@ -112,6 +120,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   const visible = !!row.visible;
   const evidence = new Set<string>((row.evidence as string[] | null) ?? []);
   let clickedThisRun = false;
+  let agentRan = false;
   let ctx: BrowserContext | null = null;
   let allFilled: FilledField[] = [];
   let resumeFile = { name: "", mimeType: "", buffer: Buffer.alloc(0) };
@@ -498,25 +507,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
             await set({}, "next_step", { step: step + 2 });
             continue;
           }
-          if (adv.action === "review") {
-            await shot(page, "filled");
-            const submit = submitButton(page, null);
-            if (!(await submit.isVisible().catch(() => false))) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page");
-            const gate = await submitGate(page, null);
-            if (gate) return gate;
-            const posts = trackSubmissions(page);
-            await markSubmitting();
-            await submit.click();
-            const outcome = await waitForOutcome(page, null, posts, t.afterSubmit);
-            if (outcome.kind === "verified") return verified(page, outcome.text, outcome.url, "page");
-            if (outcome.kind === "validation_errors") {
-              await shot(page, "rejected");
-              return visible ? manual(page, null, "validation_errors") : pause("validation_errors", [], { errorCode: "validation_errors", errorMessage: outcome.errors.join(" | ").slice(0, 600) });
-            }
-            if (outcome.kind === "challenge" && !posts.posted()) return visible ? manual(page, null, "captcha") : pause("captcha");
-            if (visible) return manual(page, null, outcome.kind === "email_code" ? "login_required" : "unexpected_page");
-            return unconfirmed(page, outcome.kind === "email_code" ? "verification_code_required" : outcome.kind === "challenge" ? "captcha_after_submit" : "no_confirmation");
-          }
+          if (adv.action === "review") return reviewPage(page);
         }
         if (questions.length) {
           await shot(page, `step-${step + 1}`);
@@ -547,11 +538,85 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           continue;
         }
       }
+      return agentOrStop(page, fromIndeed);
+    }
+    return agentOrStop(page, fromIndeed);
+  }
+
+  /**
+   * A page the built-in flows do not understand: the runtime browser agent (browser-agent.ts). The
+   * authorised GPT provider proposes one action at a time from a description of the page; Career Atlas
+   * validates it (never Submit, sign-in, passwords, declarations or identity answers), enters profile
+   * values itself, executes it and verifies the result. Its "this is the final step" is checked here:
+   * only a page that really shows Submit goes on to the usual approval gate.
+   */
+  async function agentOrStop(page: Page, fromIndeed: boolean): Promise<AttemptState> {
+    const propose = deps.browserAgent && !agentRan ? await deps.browserAgent().catch(() => null) : null;
+    if (!propose) {
       if (fromIndeed && visible) return employerManual(page);
       throw new Stop("unsupported_site");
     }
+    agentRan = true;
+    await set({ state: "filling", stage: "ai_agent" }, "agent_started");
+    let open: PendingQuestion[] = [];
+    const out = await runBrowserAgent(
+      page,
+      {
+        planCtx,
+        resume: resumeFile,
+        propose,
+        autofill: async (p) => {
+          const rows = await fillRows(rowsCtx(p));
+          const { questions } = await fillPage(p, { uploadInPlan: true });
+          if (await commitOpenSections(p)) await set({}, "sections_saved");
+          open = [...rows.questions, ...questions.filter((q) => !rows.questions.some((r) => r.key === q.key))].filter((q) => q.required);
+          return { verified: allFilled.filter((f) => f.verified).length, open: open.map((q) => q.label.slice(0, 80)) };
+        },
+        guard: checkCancel,
+        event: async (code, params) => {
+          await set({ filled: allFilled }, code, params);
+        },
+        record: (f) => {
+          allFilled.push(f);
+        },
+        trace: process.env.CA_APPLY_DEBUG ? (e) => process.stderr.write(`AGENT ${JSON.stringify(e)}\n`) : undefined,
+      },
+      deps.agentMaxSteps ?? 30,
+    );
+    page = out.page;
+    await set({ filled: allFilled }, "agent_finished", { status: out.status, steps: out.steps });
+    const s = await signals(page);
+    if (s.challenge) return visible ? manual(page, null, "captcha") : pause("captcha");
+    const questions = [...out.questions, ...open.filter((q) => !out.questions.some((x) => x.key === q.key))];
+    // "Final step" is checked, not believed: reviewPage needs a visible Submit. Only optional questions left
+    // on a page that shows Submit: the usual approval gate.
+    if (!questions.some((q) => q.required) && (out.status === "review_ready" || (await submitButton(page, null).isVisible().catch(() => false)))) return reviewPage(page);
+    if (s.password) return visible ? manual(page, null, "login_required") : pause("login_required", [], { stage: "sign_in" });
+    await shot(page, "agent");
+    if (questions.length) return visible ? manual(page, null, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
     if (fromIndeed && visible) return employerManual(page);
-    throw new Stop("unsupported_site");
+    return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: `agent_${out.status}` });
+  }
+
+  /** A generic page that shows the final Submit: stop for approval, or submit when authorised. */
+  async function reviewPage(page: Page): Promise<AttemptState> {
+    await shot(page, "filled");
+    const submit = submitButton(page, null);
+    if (!(await submit.isVisible().catch(() => false))) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page");
+    const gate = await submitGate(page, null);
+    if (gate) return gate;
+    const posts = trackSubmissions(page);
+    await markSubmitting();
+    await submit.click();
+    const outcome = await waitForOutcome(page, null, posts, t.afterSubmit);
+    if (outcome.kind === "verified") return verified(page, outcome.text, outcome.url, "page");
+    if (outcome.kind === "validation_errors") {
+      await shot(page, "rejected");
+      return visible ? manual(page, null, "validation_errors") : pause("validation_errors", [], { errorCode: "validation_errors", errorMessage: outcome.errors.join(" | ").slice(0, 600) });
+    }
+    if (outcome.kind === "challenge" && !posts.posted()) return visible ? manual(page, null, "captcha") : pause("captcha");
+    if (visible) return manual(page, null, outcome.kind === "email_code" ? "login_required" : "unexpected_page");
+    return unconfirmed(page, outcome.kind === "email_code" ? "verification_code_required" : outcome.kind === "challenge" ? "captcha_after_submit" : "no_confirmation");
   }
 
   /** The application form itself: Workday wizard, or a single-page Greenhouse / Lever form. */

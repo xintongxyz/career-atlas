@@ -146,6 +146,11 @@ export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: 
   }, chooseOption: async (label, options, facts) => {
     const provider = await codex.ready();
     return provider ? chooseFromFacts(provider, label, options, facts) : null;
+  }, browserAgent: async () => {
+    // The owner's ChatGPT sign-in through the local Codex CLI, with every Codex tool switched off:
+    // the model only proposes; Career Atlas validates and executes (src/local/apply/browser-agent.ts).
+    const provider = await codex.ready();
+    return provider ? async (system, user, schema) => (await provider.completeJson({ system, user, jsonSchema: schema })) as Record<string, unknown> : null;
   }, ...opts.apply });
   await apply.init();
   env.APPLY = apply;

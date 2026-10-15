@@ -15,7 +15,7 @@ live employer page actually showed.
 | Tool | Where | Callable from the Career Atlas runtime? | Notes |
 |---|---|---|---|
 | Playwright (`playwright-core` 1.56) + system Chrome | `src/local/apply/*` | **Yes** — the application engine | Own persistent profile in the data folder |
-| Codex CLI 0.144.6, ChatGPT sign-in | `~/.local/bin/codex` | **Yes** for single JSON decisions (`src/local/codex.ts`) | Can reach an in-app MCP tool server (tested with a dummy tool): it initialises and lists tools, but tool *calls* need an approval setting — see §10 |
+| Codex CLI 0.144.6, ChatGPT sign-in | `~/.local/bin/codex` | **Yes** — structured JSON decisions with every Codex tool switched off (`src/local/codex.ts › execArgs`); drives the runtime browser agent (§17) | Runs without Claude Desktop or Cursor; no API key, no separate billing |
 | Claude Code CLI 2.1.295 (desktop bundle) | `~/Library/Application Support/Claude/claude-code/…` | **No** — not signed in for headless use (`auth status: loggedIn false`) | Development session's own sign-in is host-provided and not usable by the app |
 | Workspace MCP (`~/Innovation/.mcp.json`) | trendradar only | No browser capability | — |
 | `scrape` skill (curl → Scrapling → Playwright) | `~/Innovation/.claude/skills/scrape` | Not installed (documentation only) | — |
@@ -35,19 +35,21 @@ live employer page actually showed.
 | Pop-ups / interruptions: routine notices acknowledged; "leave page / unsaved changes" → stay; consent / declarations never auto-clicked (paused with the text); plain privacy notices accepted only with the new standing preference (`accept_privacy_notices`); browser alerts accepted, confirms dismissed | Implemented · Passed synthetic tests | `interact.ts` (`handleNotices`, `commitOpenSections`), `engine.ts` (`notices`) |
 | Inline section editors saved with their own Update/Save before Next | Implemented · Passed synthetic tests | `interact.ts`, `engine.ts` |
 | Progress labels: the attempt's `stage` shows the field being worked on (label only) | Implemented | `engine.ts`, `rows.ts` |
-| Runtime AI agent with browser tools (Codex + in-app MCP server) | **Blocked** — see §10 | draft kept outside the repo |
+| Runtime browser agent: observe → GPT proposes one structured action → Career Atlas validates → trusted Playwright tools execute → verify → repeat (§17) | Implemented · Passed synthetic tests · **Verified live with the real GPT provider on a synthetic site** · Not yet run on a real employer site | `src/local/apply/browser-agent.ts`, `engine.ts › agentOrStop`, `src/local/runtime.ts`, `src/local/codex.ts` |
 
 ## 4. Tests executed
 
 - `npm run typecheck`, `npm test` (unit + integration), `npm run build`, `npm run test:e2e`, `npm run db:check`, `npm run check:secrets` — results in §5.
 - New: `tests/integration/apply-dayforce.test.ts` with `tests/fixtures/dayforce-fixture.ts` (synthetic Dayforce-style portal built from the live page's structure).
 - Unit: `tests/unit/apply-plan.test.ts` (preferred contact method, phone-type regression), `tests/unit/apply-generic.test.ts` (row roles by meaning).
+- Runtime agent: `tests/unit/apply-agent.test.ts` (trusted validation, fact catalog, field state), `tests/unit/codex-args.test.ts` (no tools, read-only), `tests/integration/apply-agent.test.ts` (scripted proposer on the unfamiliar synthetic site), `tests/integration/apply-agent-live.test.ts` (opt-in, real GPT, synthetic).
 
 ## 5. Synthetic results (2026-10-15, branch head)
 
-- `npm run typecheck` ✓ · `npm run build` ✓ · `npm run db:check` ✓ (8 migrations, no schema change) · `npm run check:secrets` ✓
-- `npm test`: 29 files passed, 1 skipped — 258 tests passed, 3 skipped (opt-in live tests)
+- `npm run typecheck` ✓ · `npm run build` ✓ · `npm run db:check` ✓ (8 migrations, no schema change) · `npm run check:secrets` ✓ · `npm audit` 0 vulnerabilities
+- `npm test`: 34 files passed, 2 skipped — 280 tests passed, 4 skipped (opt-in live tests)
 - `npm run test:e2e`: 21 passed, 2 skipped
+- Opt-in live: `apply-agent-live.test.ts` with the real GPT provider — passed (§17)
 
 ## 6. Real website results
 
@@ -124,19 +126,20 @@ Structure observed on employer A's form (development browser, no personal data t
 
 ## 10. Remaining limitations / blocked
 
-- **Runtime AI browser agent — Blocked.** Codex reaches an in-app MCP server (initialize + tools/list verified with a dummy tool), but executing tools unattended requires `mcp_servers.<name>.default_tools_approval_mode="approve"` (or equivalent). The development environment's safety policy refused that step twice ("Create Unsafe Agents") — once for Claude Code with `--permission-mode dontAsk`, once for Codex tool auto-approval. A scoped tool design exists (observe, click, type, choose, search_select, set_checkbox, set_date, upload_resume, autofill_page, account_info, type_password via Keychain, email_verification, get_profile / get_job, ask_user, finish; hard checks: no final Submit, no plain password typing, identity / legal guarded, no Indeed, no local network). It is **not** in the repository. The owner must decide whether to allow unattended tool execution for this agent (and add the corresponding permission in their Claude Code settings) before it can be connected and tested.
+- **Runtime browser agent — built without giving the model tools (§17).** Earlier, Codex-with-MCP-tools needed unattended tool approval (`default_tools_approval_mode="approve"`, or Claude Code `--permission-mode dontAsk`); the development environment's safety policy refused both ("Create Unsafe Agents"). Not pursued. Instead the model only *proposes* JSON actions and Career Atlas executes them with its own checks — no approval setting, no unsafe flag, no model access to the shell or browser.
+- The agent does **not** sign in, create accounts, type passwords, read e-mail codes, tick declarations, answer identity questions or click the final Submit (all refused in `validate()`). Sites needing these still pause for the owner (existing flows handle saved-password sign-in and Workday accounts).
 - Education start / end months are now optional fields in My Profile (filled for one entry so far); other entries still ask when a site requires a date.
 - reCAPTCHA on Dayforce may gate Next / Submit on some runs; never bypassed.
 
 ## 11. Needs local authentication or the owner's consent
 
-- Allowing the runtime agent to execute tools unattended (§10).
+- First real-site run of the runtime agent (review mode, saved job, guest / no account) — when the owner chooses a posting.
 - Answers to genuinely unknown facts asked by employer A's form (§6).
 - Any real submission (never done in testing).
 
 ## 12. Recommended next steps
 
-1. Owner decision on §10.
+1. Run the runtime agent (§17) on real saved jobs that end in `unsupported_site` / "unexpected page", review mode; add a synthetic fixture per new pattern.
 2. (Done) Education start / end months in My Profile.
 3. Live tests on other ATSs (Ashby, SmartRecruiters, iCIMS, Taleo) using saved jobs only, review mode, no accounts.
 
@@ -189,13 +192,34 @@ job's status and that attempt record must be corrected (not changed without the 
 | Indeed | routing / assisted only (`apply-workday-indeed.test.ts`) | Never automated (by rule) |
 | Ashby, SmartRecruiters, iCIMS, Recruitee, SuccessFactors | patterns in `apply-patterns.test.ts` / `apply-signin-sites.test.ts` (iframe + login step, new tab, Apply tab, repeated blocks with split dates, sign-in) | **Real runs** — see §6b (each ends at a correct, explained stop) |
 | Taleo | Not tested (no saved job) | Not tested |
+| Unfamiliar site (no Apply button, odd step names, pop-up, identity question) — runtime agent | scripted proposer: reach Submit, refusals, ask → answer → resume, bad model stopped (`apply-agent.test.ts`) | Real GPT on the synthetic site: **passed** (§17); real employer site: Not tested |
 
 Known flake: `apply-workday-indeed.test.ts` "resume-first" timed out once inside a full parallel run (a re-run
 stayed at "opening"); it passes alone and as a file (12/12). Watch for it in CI.
 
 ## 16. Hand-off for Cursor (only what is unresolved)
 
-1. **Runtime AI agent (Blocked on the owner's decision, §10).** Do not wire an unattended agent without that decision. If approved: serve the scoped tools over a per-run MCP endpoint (127.0.0.1, random port + bearer token), run `codex exec` with its own shell / browser / web tools disabled, and keep every hard limit in the tool layer (not the prompt).
+1. **Runtime browser agent (§17).** Extend by adding *actions* in `browser-agent.ts` (schema + `toAgentAction` + `validate` + `act`), never by giving the model tools or loosening `validate()`. Every new action needs a refusal test in `tests/unit/apply-agent.test.ts`.
 2. **Remove Cursor's Dayforce-specific code paths in `fillPage`** (`commit("workHistory_")`, `panelActions`, the "Dayforce renders some inputs twice" required-field exception) — they are now inert because `rows.ts` owns repeated rows; deleting them needs a careful regression run.
 3. **More real-site runs** on saved jobs from other ATSs (Ashby, SmartRecruiters, iCIMS, Taleo, Greenhouse, Lever) in review mode, guest / no account, and a synthetic fixture per new interaction pattern found.
 4. Privacy-consent and informational pop-ups were exercised only synthetically; capture the first real one (structure only) when it appears.
+
+## 17. Runtime browser agent (GPT proposes, Career Atlas acts)
+
+**Where it runs.** `genericFlow` → when the built-in flows cannot go further (would have been `unsupported_site`), `agentOrStop` starts `runBrowserAgent` once per run if the GPT provider is ready (`codex.ready()`: the owner's ChatGPT sign-in through the local Codex CLI; Claude Desktop / Cursor not needed). Without it: unchanged behaviour.
+
+**Loop (per step).** OBSERVE (`observeForModel`: URL, headings, dialogs, errors, buttons `b…`, fields `f…` with label / control / required / options / state, CAPTCHA and password flags) → PROPOSE (`codex exec`, tools off, JSON schema `PROPOSAL_SCHEMA`) → VALIDATE (`validate()`, trusted) → ACT (`interact.ts` primitives; profile values resolved by Career Atlas) → VERIFY (value read back / page changed / file attached) → result fed into the next observation. Recovery: failures reported to the model; 4 failures or refusals stop the run; a repeated ask ends it with the questions.
+
+**What the model sees about the applicant.** Only which facts exist (`factCatalog`: true / false / counts) and non-personal preferences (e.g. preferred contact method). Typed values show as `filled`; a selected option is shown only for questions that are not about the applicant. Never: names, e-mail, phone, address, documents, passwords, codes, eligibility answers.
+
+**Hard limits (code, not prompt).** No final Submit (any wording) · no account creation / sign-in · no password fields · declarations / agreements only with the applicant's answer · identity questions only with the applicant's answer · eligibility questions not answered by free option choice · refs must be in the current observation · options must be offered · facts must be in the catalog. The agent's "final step" claim is checked: only a page with a visible Submit goes to the normal approval gate (`reviewPage` → `submitGate`), and only an application-level approval lets Career Atlas — never the model — click Submit.
+
+**Evidence (2026-10-15, live, `apply-agent-live.test.ts`, synthetic site + fictional applicant, review mode).**
+Run 1: GPT clicked "I'm interested" (no Apply button) → dismissed the tip pop-up → filled given name, family name, e-mail from facts (each verified on the page) → judged "Which office?" the applicant's choice → `ask_user` → attached the resume → `finish needs_user`. Career Atlas paused with the site's question (3–6 s per proposal).
+Run 2 (after the answer): same path, `choose_from_profile applicant_answer` for the office (verified) → resume → clicked "Onward" → `finish review_ready` → Career Atlas confirmed Submit was visible → paused `submit_approval`. Nothing submitted; no applicant value in any prompt (asserted).
+An earlier version looped on the same question until the step limit; fixed (asked fields marked, repeat ask ends the run, answers usable as `applicant_answer`).
+
+**Next agent.**
+1. Reproduce: `npx vitest run tests/unit/apply-agent.test.ts tests/integration/apply-agent.test.ts`; live (owner's ChatGPT sign-in, synthetic only): `CA_LIVE_CODEX=1 CA_AGENT_EVIDENCE=/tmp/agent.jsonl npx vitest run tests/integration/apply-agent-live.test.ts`.
+2. Trace a run: `CA_APPLY_DEBUG=1` prints `AGENT {step, url, counts, proposal}` lines (structure only).
+3. Not done: date pickers and multi-select tag inputs as agent actions; frames (the agent works on the current page / frame view only); real-site runs. Do not add sign-in, account creation, e-mail codes or Submit to the agent — those stay in the dedicated, owner-authorised flows.

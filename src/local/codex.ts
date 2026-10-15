@@ -11,7 +11,15 @@ import { join } from "node:path";
 import { AiError, type AiProvider } from "../server/ai/provider";
 
 const TIMEOUT_MS = 90_000;
+
+/** Codex features that would let the model act on its own; all off for Career Atlas's calls. */
+const NO_TOOLS = ["shell_tool", "unified_exec", "browser_use", "browser_use_external", "computer_use", "in_app_browser", "apps", "image_generation", "js_repl"].flatMap((f) => ["-c", `features.${f}=false`]).concat(["-c", 'web_search="disabled"']);
 const AUTH_TTL_MS = 5 * 60_000;
+
+/** `codex exec` arguments: ephemeral, read-only sandbox, no user config, no tools, structured output only. */
+export function execArgs(schemaFile: string, outFile: string, prompt: string): string[] {
+  return ["exec", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--sandbox", "read-only", ...NO_TOOLS, "--color", "never", "--output-schema", schemaFile, "--output-last-message", outFile, prompt];
+}
 
 export interface CodexStatus {
   available: boolean;
@@ -135,7 +143,9 @@ export function codexProvider() {
           const prompt = `${req.system}\n\n${req.user}\n\nReply with JSON matching the schema. Do not use tools.`;
           const result = await run(
             st.path!,
-            ["exec", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--sandbox", "read-only", "--color", "never", "--output-schema", schema, "--output-last-message", out, prompt],
+            // No tools for the model: shell, code execution, browsing, apps and web search are switched off,
+            // and the sandbox stays read-only. Career Atlas executes anything that happens in a browser.
+            execArgs(schema, out, prompt),
             work,
             TIMEOUT_MS,
           );

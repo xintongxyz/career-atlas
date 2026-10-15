@@ -33,9 +33,17 @@ Sites that are not Workday, Greenhouse or Lever are filled the same way when the
 ordinary application form: Career Atlas clicks **Apply** (and **Apply without an account** when
 that choice is offered, so no account is created) and fills from My Profile. A required answer
 that is not in My Profile pauses the attempt. When the form can be completed, it stops on the
-review page until you approve Submit. A signed-in Codex (ChatGPT) can choose the next control or
-an unclear option; it is not given your profile values. LinkedIn, Ashby and SmartRecruiters stay
-manual. Indeed is never automated.
+review page until you approve Submit. LinkedIn stays manual. Indeed is never automated.
+
+**Runtime browser agent (pages the built-in flows don't understand).** When a signed-in Codex
+(your ChatGPT subscription; no API key) is available, Career Atlas describes the page to it — labels,
+buttons, options, which fields are filled, and *which* profile facts exist, never their values — and
+the model proposes one action at a time (click, fill from a named profile fact, choose a site option,
+attach the resume, ask you, finish). Career Atlas checks every proposal in code before acting: it
+never clicks the final Submit, signs in, creates accounts, touches passwords, ticks declarations or
+answers identity questions for the model; it types profile values itself and verifies each result on
+the page. Codex runs with all of its own tools off (no shell, browser or web). Details:
+`src/local/apply/browser-agent.ts`, docs/TEST_HANDOFF.md §17.
 
 ## Workday
 

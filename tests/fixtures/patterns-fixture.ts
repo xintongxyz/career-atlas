@@ -5,6 +5,8 @@
 //   /pat/inline — "Job details" / "Apply" tabs on the posting; the form appears only after "Apply"
 //   /pat/emp    — repeated employment / education blocks marked by their container ("employment-form"),
 //                 ids "company-name-0", split month / year dates, "Current role", a bare "Add another"
+//   /pat/agent  — an UNFAMILIAR site for the runtime browser agent: "I'm interested" instead of Apply, a tip
+//                 pop-up, an "Onward" step button, a self-identification question, then Submit
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 const page = (title: string, body: string, script = "") => `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${title}</title>
@@ -82,6 +84,31 @@ export async function patternsRoute(_req: IncomingMessage, res: ServerResponse, 
         <button type="submit">Submit application</button></form>`,
         `const tpl = ${JSON.stringify(block(0))};
          document.getElementById('addEmp').onclick = () => { const i = document.querySelectorAll('.employment-form').length; const d = document.createElement('div'); d.innerHTML = tpl.replace(/-0\\b/g, '-' + i).replace(/_0\\b/g, '_' + i).replace(/data-i="0"/, 'data-i="' + i + '"').replace(/-0_1/g, '-' + i + '_1'); document.getElementById('emp').appendChild(d.firstElementChild); };`,
+      ),
+    );
+  // ---- unfamiliar vocabulary: only the runtime browser agent gets through it
+  if (p === "/pat/agent/1") return html(page("Opening", `<h1>Analyst (synthetic)</h1><p>Description.</p><button id="go">I'm interested</button>`, `document.getElementById('go').onclick = () => { location.href = '/pat/agent/1/form'; };`));
+  if (p === "/pat/agent/1/form")
+    return html(
+      page(
+        "Your details",
+        `<div role="dialog" aria-modal="true" id="tip"><p>Tip: this takes about three minutes.</p><button type="button" id="ok">Got it</button></div>
+        <form id="f" method="post" action="/pat/agent/1/submit" enctype="multipart/form-data">
+        <section id="a"><h2>About you</h2>
+        <div class="field"><label for="gn">Given name *</label><input id="gn" name="given" required></div>
+        <div class="field"><label for="fam">Family name *</label><input id="fam" name="family" required></div>
+        <div class="field"><label for="mail">E-mail address *</label><input id="mail" name="mail" type="email" required></div>
+        <div class="field"><label for="office">Which office are you applying to? *</label><select id="office" name="office" required><option value="">Choose</option><option>Toronto</option><option>Montreal</option></select></div>
+        <div class="field"><label for="g">Gender (optional)</label><select id="g" name="gender"><option value="">Choose</option><option>Woman</option><option>Man</option><option>Prefer not to say</option></select></div>
+        <div id="err" role="alert" hidden>Please complete the required fields.</div>
+        <button type="button" id="on">Onward</button></section>
+        <section id="b" hidden><h2>Check and send</h2><div class="field"><label for="cv">CV</label><input id="cv" name="resume" type="file"></div><button type="submit">Submit application</button></section></form>`,
+        `document.getElementById('ok').onclick = () => document.getElementById('tip').remove();
+         document.getElementById('on').onclick = () => {
+           const ok = ['gn', 'fam', 'mail', 'office'].every((id) => document.getElementById(id).value);
+           document.getElementById('err').hidden = ok;
+           if (ok) { document.getElementById('a').hidden = true; document.getElementById('b').hidden = false; }
+         };`,
       ),
     );
   res.writeHead(404);
