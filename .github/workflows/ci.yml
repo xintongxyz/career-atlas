@@ -37,6 +37,29 @@ jobs:
       - name: Dependency audit (runtime dependencies)
         run: npm audit --omit=dev --audit-level=high
 
+  # Generated, never-seen synthetic career sites graded on what the site received (tests/lab).
+  # Runs on its own so its browser load does not starve the timing-sensitive integration tests.
+  lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:lab
+        env:
+          CA_LAB_REPORT: lab-report.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lab-report
+          path: lab-report.md
+          retention-days: 7 # synthetic data only
+
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 20

@@ -33,9 +33,26 @@ Sites that are not Workday, Greenhouse or Lever are filled the same way when the
 ordinary application form: Career Atlas clicks **Apply** (and **Apply without an account** when
 that choice is offered, so no account is created) and fills from My Profile. A required answer
 that is not in My Profile pauses the attempt. When the form can be completed, it stops on the
-review page until you approve Submit. A signed-in Codex (ChatGPT) can choose the next control or
-an unclear option; it is not given your profile values. LinkedIn, Ashby and SmartRecruiters stay
-manual. Indeed is never automated.
+review page until you approve Submit. LinkedIn stays manual. Indeed is never automated.
+
+**Phone numbers.** Your number is handled as a number in a country (`src/shared/phone.ts`): the country
+comes from the saved number itself ("+44 …"), else the phone country code in Application Defaults, else
+your own country — never the employer's location. Next to a separate country-code control Career Atlas
+types the local number (and picks your country's code, by name — "+1" alone also means other
+countries); in an international phone widget it types the full "+1…" form; a plain field gets the local
+number for a job in your country, otherwise the "+1…" form. A number counts as entered only when the page
+shows exactly that number with that country code (formatting is ignored; "+61 …" is never accepted for a
+Canadian number). Phone type (mobile / home / work) is a separate setting.
+
+**Runtime browser agent (pages the built-in flows don't understand).** When a signed-in Codex
+(your ChatGPT subscription; no API key) is available, Career Atlas describes the page to it — labels,
+buttons, options, which fields are filled, and *which* profile facts exist, never their values — and
+the model proposes one action at a time (click, fill from a named profile fact, choose a site option,
+attach the resume, ask you, finish). Career Atlas checks every proposal in code before acting: it
+never clicks the final Submit, signs in, creates accounts, touches passwords, ticks declarations or
+answers identity questions for the model; it types profile values itself and verifies each result on
+the page. Codex runs with all of its own tools off (no shell, browser or web). Details:
+`src/local/apply/browser-agent.ts`, docs/TEST_HANDOFF.md §17.
 
 ## Workday
 
@@ -132,6 +149,29 @@ read of the page (React re-renders replace elements; controls are found again be
 - A section that can't be completed leaves a local diagnostic snapshot (`attempts/<id>/diag-*.json`:
   labels, control kinds, whether a value is present, option counts — never values) and a screenshot.
 
+### Other employer sites (Dayforce and unfamiliar forms)
+
+Handled by behaviour, not by a list of sites (`src/local/apply/rows.ts`, `interact.ts`):
+
+- **Dropdowns of any component library** (Ant Design, react-select, MUI, plain selects): the chosen
+  value is read where the library shows it (next to an empty search box); options are read in one
+  page call (long lists such as 250 countries); duplicate accessibility copies of an option count as
+  one; read-only and disabled dropdowns are opened without typing (State waits for Country); a
+  shortened display after the choice ("🇨🇦 +1" for "🇨🇦 +1 Canada") counts as kept.
+- **Repeated rows** (employment, education): each entry from My Profile is recognised by meaning
+  (title, employer, dates, school, degree, major, country, completed), saved with the row's own
+  Update / Save button, verified as a summary, and the next one opened with that section's Add
+  button. Each school keeps its own degree and major. Dates: a month becomes the 1st of that month on
+  a calendar-date input (noted at Review); a year alone is never turned into a date — a required
+  start date the profile doesn't hold is asked.
+- **Sections with their own Update / Save** are saved before Next.
+- **Pop-ups**: routine notices ("Got it", "I understand", "Close", resume-upload confirmations) are
+  acknowledged; "leave this page / unsaved changes" → stay; consent and declarations are never clicked
+  automatically — the application pauses with the text, unless it is a plain recruitment privacy
+  notice and My Profile → Application Defaults allows acknowledging those.
+- **Preferred contact method** comes from My Profile → Application Defaults (Email / Phone / Text),
+  never from the phone type.
+
 ### Application Defaults (My Profile)
 
 Reusable answers by **meaning** (every field can stay *Not specified* — never treated as "No"):
@@ -156,8 +196,11 @@ Optional, per application, authorised in the start dialog:
   employer). Uses the e-mail in *My Profile → Contact details* and either a **new strong password
   for each employer** (default) or **your shared password** (opt-in in Settings; typed once into a
   password field, never shown again). Agreements on the registration form are shown to you first
-  and ticked only with your approval. "Account already exists" → no duplicate; you sign in or use
-  *Forgot your password?*. CAPTCHA, MFA via an authenticator app and SSO are always yours. E-mail
+  and ticked only with your approval. "Account already exists" → no duplicate; with the shared
+  password Career Atlas signs in once with it, otherwise you sign in or use *Forgot your password?*.
+  In shared mode the shared password also signs in to employer sites Career Atlas has no record of
+  (accounts you made yourself with it); the site is recorded before the try, so a failure is never
+  repeated. CAPTCHA, MFA via an authenticator app and SSO are always yours. E-mail
   verification is yours too unless you turn on *Verification e-mails (Gmail)* (below).
 - Passwords are stored only in the **macOS Keychain** (service "Career Atlas – Workday account";
   the shared one under "Career Atlas – Workday shared password"), written through `security`'s
@@ -172,6 +215,9 @@ Optional, per application, authorised in the start dialog:
   you made yourself) so the next application signs in for you.
 - **After signing in**, Workday sometimes forgets *Autofill with Resume* and opens the empty form;
   Career Atlas then returns once to the autofill address so the selected resume is uploaded and parsed.
+- **The account step** is recognised by its form, a visible password box or the progress bar naming it
+  ("Create Account/Sign In") — nothing is typed until the form is drawn; the form's own *Sign In* /
+  *Create Account* links and buttons (and the click layer over each) are used, never the site header's.
 - **Slow pages.** Each step is filled only after it has finished drawing (no spinner, same number of
   fields for about a second). "Continue" is clicked only when it is shown and enabled (Workday
   disables it while it reads the resume; up to 90 s). If the page moves on while it is being filled
@@ -247,7 +293,21 @@ actually uploaded, and the resume is linked to the application.
   experience are never inferred. An answer that doesn't match any option is asked again.
 - **Sensitive questions.** Voluntary demographic (EEO) questions are left blank — and asked only
   if a form makes one required. Legal declarations, consents and signatures are ticked only
-  with your explicit approval. Work-permit holders are asked about future sponsorship.
+  with your explicit approval — for this question, or as a standing authorisation in My Profile →
+  Application Defaults → Standing consents (recruitment privacy policies and the listed categories),
+  and only when EVERY category the statement touches is authorised (a privacy policy bundled with
+  arbitration, a waiver or a signature is always asked). An approved consent is ticked on the site
+  where the site draws its box (its label, the element it is labelled by, a custom control) with real
+  clicks, the keyboard or the control's own click, and counts only when the site shows it ticked and it
+  stays ticked; if the site still will not keep it, it is shown as "already approved — the site would
+  not keep it", never as a new approval. A typed certification ("I certify … [box]") is answered "I agree"
+  under the same rule; a signature box is never filled automatically. Work-permit holders are asked
+  about future sponsorship; "authorized to work for ANY employer" is chosen for a work permit only when
+  My Profile marks it as an open permit.
+- **Statement options.** Yes / No defaults (relocation, work authorization, contacting an employer, travel)
+  also answer options written as statements ("I am willing to relocate…"): the one statement about the
+  question's subject with the right polarity; "unknown" and statements about something else are never
+  chosen.
 - **The selected resume only.** The document id, SHA-256, file name and size are pinned when the
   attempt starts and re-checked before upload. If the file was deleted or changed, the attempt
   fails — another resume is never substituted. The file is uploaded byte for byte; it is never

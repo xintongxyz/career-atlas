@@ -38,6 +38,7 @@ const YES_NO_KEYS: Record<string, keyof Profile["application_defaults"]> = {
   prior_contractor: "prior_contractor",
   prior_affiliate: "prior_affiliate",
   referral: "referral",
+  contact_employer: "contact_employer",
   relocation: "relocation",
   travel: "travel",
   shift_work: "shift_work",
@@ -79,12 +80,39 @@ function rememberByMeaning(profile: Profile, q: PendingQuestion, answer: unknown
   }
   if (m === "start_date" && typeof answer === "string" && /^\d{4}-\d{2}-\d{2}$/.test(answer)) return (d.start_date = answer), true;
   if (m === "graduation_date" && typeof answer === "string" && /^\d{4}(-\d{2})?$/.test(answer)) return (d.expected_graduation = answer), true;
+  // Time-sensitive: stored with today's date, reused only while fresh.
+  if (m === "recruiting_deadline" && typeof answer === "string" && answer.trim()) return (d.recruiting_deadline = { answer: answer.trim().slice(0, 500), as_of: new Date().toISOString().slice(0, 10) }), true;
   if (TEXT_KEYS[m] && typeof answer === "string" && answer.trim()) return (d[TEXT_KEYS[m]] = answer.trim().slice(0, 200) as never), true;
   return false;
 }
+/** Education start dates answered per school (a month and a year question, or one date) → "YYYY-MM". */
+export function educationStarts(questions: PendingQuestion[], answers: Record<string, unknown>): { entry: string; start: string }[] {
+  const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+  const byEntry = new Map<string, { month?: number; year?: number }>();
+  for (const q of questions) {
+    if (q.meaning !== "education_start" || !q.entry || answers[q.key] === undefined) continue;
+    const v = String(answers[q.key]).trim();
+    const cur = byEntry.get(q.entry) ?? {};
+    const full = v.match(/^(\d{4})-(\d{1,2})/);
+    if (full) {
+      cur.year = Number(full[1]);
+      cur.month = Number(full[2]);
+    } else if (/year/i.test(q.label) && /^\d{4}$/.test(v)) cur.year = Number(v);
+    else if (/month/i.test(q.label)) {
+      const i = MONTHS.findIndex((m) => m.startsWith(v.toLowerCase().slice(0, 3)));
+      const n = i >= 0 ? i + 1 : Number(v);
+      if (n >= 1 && n <= 12) cur.month = n;
+    }
+    byEntry.set(q.entry, cur);
+  }
+  return [...byEntry].filter(([, d]) => d.year && d.month).map(([entry, d]) => ({ entry, start: `${d.year}-${String(d.month).padStart(2, "0")}` }));
+}
+
 export type AttemptRow = typeof applicationAttempts.$inferSelect;
 
-const MANUAL_PLATFORMS = new Set(["linkedin", "ashby", "smartrecruiters"]);
+// Sites whose terms rule out automation stay manual. Everything else is tried by the generic flow
+// (Ashby, SmartRecruiters, iCIMS, Dayforce, custom sites): it works from what the page shows.
+const MANUAL_PLATFORMS = new Set(["linkedin"]);
 const MAX_STEPS = 80;
 
 // ---------------------------------------------------------------- helpers
@@ -166,7 +194,7 @@ export function toDTO(r: AttemptRow, doc?: { deletedAt: number | null; sha256: s
     confirmation: { text: r.confirmationText, url: r.confirmationUrl, at: r.confirmedAt, source: (r.confirmationSource as "page" | "user" | null) ?? null },
     evidence: (r.evidence as string[] | null) ?? [],
     answered: Object.entries((r.answers as Record<string, unknown> | null) ?? {})
-      .filter(([k]) => k !== "__labels")
+      .filter(([k]) => !k.startsWith("__")) // __labels, __generated: internal (generated answers are listed from `filled`)
       .map(([key, value]) => ({ key, label: ((r.answers as Record<string, unknown>).__labels as Record<string, string> | undefined)?.[key] ?? key, value: value as string | string[] | boolean })),
     submit_clicked_at: r.submitClickedAt,
     created_at: r.createdAt,
@@ -354,6 +382,24 @@ export async function answerAttempt(db: Db, env: AppEnv, userId: string, id: str
     labels[k] = known.get(k)!.label.slice(0, 300);
   }
   answers.__labels = labels;
+  // A missing education start date answered for a school is that school's fact: saved to its entry.
+  const starts = educationStarts(questions, answers);
+  if (starts.length) {
+    const row = await getProfileRow(db, userId);
+    const parsed = profileSchema.safeParse(row?.data ?? {});
+    if (row && parsed.success) {
+      const profile = parsed.data;
+      let changed = false;
+      for (const s of starts) {
+        const e = profile.education.find((x) => x.institution && norm(x.institution) === norm(s.entry) && !x.start);
+        if (e) {
+          e.start = s.start;
+          changed = true;
+        }
+      }
+      if (changed) await db.update(userProfiles).set({ data: profileSchema.parse(profile) as unknown as Record<string, unknown>, updatedAt: now() }).where(eq(userProfiles.userId, userId));
+    }
+  }
   // Remember only what the user explicitly ticked, keyed by the exact question text.
   if (body.remember.length) {
     const row = await getProfileRow(db, userId);

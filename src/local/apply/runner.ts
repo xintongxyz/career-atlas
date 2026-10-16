@@ -38,6 +38,11 @@ export function createApplyRunner(opts: {
   /** Unfamiliar application pages. Sees labels only; never profile values. */
   pageAgent?: EngineDeps["pageAgent"];
   chooseOption?: EngineDeps["chooseOption"];
+  /** Runtime browser agent's action proposer (GPT provider, no tools), when available. */
+  browserAgent?: EngineDeps["browserAgent"];
+  agentMaxSteps?: number;
+  /** Answer writer for open questions / option equivalence (owner opt-in "AI answer writing"). */
+  answerWriter?: EngineDeps["answerWriter"];
 }): ApplyRunner {
   const queue: string[] = [];
   const cancelled = new Set<string>();
@@ -85,6 +90,9 @@ export function createApplyRunner(opts: {
             aiAssist: opts.aiAssist?.() ?? null,
             pageAgent: opts.pageAgent,
             chooseOption: opts.chooseOption,
+            browserAgent: opts.browserAgent,
+            agentMaxSteps: opts.agentMaxSteps,
+            answerWriter: opts.answerWriter,
           },
           id,
           ),

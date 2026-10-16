@@ -28,7 +28,7 @@ export const norm = (s: string | null | undefined) =>
 
 // ---------------------------------------------------------------- option domains
 
-export type OptionDomain = "yes_no" | "phone_type" | "country" | "region" | "degree" | "generic";
+export type OptionDomain = "yes_no" | "phone_type" | "country" | "region" | "degree" | "contact_method" | "generic";
 
 type Concept = { id: string; aliases: RegExp };
 const c = (id: string, aliases: RegExp): Concept => ({ id, aliases });
@@ -47,34 +47,57 @@ const YES_NO: Concept[] = [
   c("no", /^(no|n|false|negative|non|否)( i (am|do|have|will|can|would) not| i (havent|dont|wont|cant|wouldnt|m not|am not))?$/),
 ];
 
+// Names in English, ISO codes, and Chinese (My Profile may be written in either language).
 const COUNTRIES: Concept[] = [
-  c("canada", /^(canada|ca|can|canadian address)$/),
-  c("united states", /^(united states( of america)?|usa|us|u s( a)?|america)$/),
-  c("united kingdom", /^(united kingdom|uk|gb|great britain|england)$/),
-  c("china", /^(china|cn|chn|peoples republic of china|china mainland|mainland china|prc)$/),
-  c("india", /^(india|in|ind)$/),
-  c("france", /^(france|fr|fra)$/),
-  c("germany", /^(germany|de|deu)$/),
-  c("australia", /^(australia|au|aus)$/),
-  c("mexico", /^(mexico|mx|mex)$/),
+  c("canada", /^(canada|ca|can|canadian address|加拿大)$/),
+  c("united states", /^(united states( of america)?|usa|us|u s( a)?|america|美国|美利坚合众国)$/),
+  c("united kingdom", /^(united kingdom|uk|gb|great britain|england|英国|大不列颠)$/),
+  c("china", /^(china|cn|chn|peoples republic of china|china mainland|mainland china|prc|中国|中华人民共和国|中国大陆)$/),
+  c("india", /^(india|in|ind|印度)$/),
+  c("france", /^(france|fr|fra|法国)$/),
+  c("germany", /^(germany|de|deu|德国)$/),
+  c("australia", /^(australia|au|aus|澳大利亚|澳洲)$/),
+  c("mexico", /^(mexico|mx|mex|墨西哥)$/),
+  c("hong kong", /^(hong kong|hk|hkg|香港)$/),
+  c("taiwan", /^(taiwan|tw|twn|台湾)$/),
+  c("singapore", /^(singapore|sg|sgp|新加坡)$/),
+  c("japan", /^(japan|jp|jpn|日本)$/),
+  c("south korea", /^(south korea|korea|republic of korea|kr|kor|韩国)$/),
 ];
 
-const PROVINCES: [string, string][] = [
-  ["alberta", "ab"],
-  ["british columbia", "bc"],
-  ["manitoba", "mb"],
-  ["new brunswick", "nb"],
-  ["newfoundland and labrador", "nl"],
-  ["northwest territories", "nt"],
-  ["nova scotia", "ns"],
-  ["nunavut", "nu"],
-  ["ontario", "on"],
-  ["prince edward island", "pe"],
-  ["quebec", "qc"],
-  ["saskatchewan", "sk"],
-  ["yukon", "yt"],
+const COUNTRY_NAME: Record<string, string> = { canada: "Canada", "united states": "United States", "united kingdom": "United Kingdom", china: "China", india: "India", france: "France", germany: "Germany", australia: "Australia", mexico: "Mexico", "hong kong": "Hong Kong", taiwan: "Taiwan", singapore: "Singapore", japan: "Japan", "south korea": "South Korea" };
+
+/**
+ * The English name to search for on a form, for a country written any known way ("加拿大", "CA",
+ * "Canada" → "Canada"). Unknown spellings are returned unchanged (never guessed).
+ */
+export function englishCountry(value: string): string {
+  const ids = conceptsOf("country", value);
+  return ids.length === 1 && COUNTRY_NAME[ids[0]] ? COUNTRY_NAME[ids[0]] : value.trim();
+}
+
+const PROVINCES: [string, string, string][] = [
+  ["alberta", "ab", "阿尔伯塔省?|艾伯塔省?"],
+  ["british columbia", "bc", "不列颠哥伦比亚省?|卑诗省?"],
+  ["manitoba", "mb", "曼尼托巴省?"],
+  ["new brunswick", "nb", "新不伦瑞克省?"],
+  ["newfoundland and labrador", "nl", "纽芬兰与拉布拉多省?"],
+  ["northwest territories", "nt", "西北地区"],
+  ["nova scotia", "ns", "新斯科舍省?"],
+  ["nunavut", "nu", "努纳武特地区"],
+  ["ontario", "on", "安大略省?"],
+  ["prince edward island", "pe", "爱德华王子岛省?"],
+  ["quebec", "qc", "魁北克省?"],
+  ["saskatchewan", "sk", "萨斯喀彻温省?"],
+  ["yukon", "yt", "育空地区"],
 ];
-const REGIONS: Concept[] = PROVINCES.map(([name, code]) => c(name, new RegExp(`^(${name}|${code}|${name} \\(${code}\\)|${code} ${name}|${name} ${code})$`)));
+const REGIONS: Concept[] = PROVINCES.map(([name, code, zh]) => c(name, new RegExp(`^(${name}|${code}|${name} \\(${code}\\)|${code} ${name}|${name} ${code}|${zh})$`)));
+
+/** English name of a Canadian province / territory written any known way; unknown → unchanged. */
+export function englishRegion(value: string): string {
+  const ids = conceptsOf("region", value);
+  return ids.length === 1 ? ids[0].replace(/\b\w/g, (m) => m.toUpperCase()).replace(/\bAnd\b/, "and") : value.trim();
+}
 
 const DEGREES: Concept[] = [
   c("high_school", /^(high school( diploma)?|secondary( school)?( diploma)?|ged|high school or equivalent)$/),
@@ -84,7 +107,14 @@ const DEGREES: Concept[] = [
   c("doctorate", /^(doctorate|doctoral( degree)?|phd|ph d|doctor of philosophy)$/),
 ];
 
-const DOMAINS: Record<Exclude<OptionDomain, "generic">, Concept[]> = { yes_no: YES_NO, phone_type: PHONE_TYPES, country: COUNTRIES, region: REGIONS, degree: DEGREES };
+// "Preferred contact method" options. "Phone" never covers "Text" and vice versa.
+const CONTACT_METHODS: Concept[] = [
+  c("email", /^(e ?mail|e ?mail address|electronic mail|by e ?mail|via e ?mail|contact me (by|via) e ?mail|e ?mail me)$/),
+  c("phone", /^(phone|telephone|phone call|call|by phone|by telephone|contact me by phone|call me|voice)$/),
+  c("text", /^(text|sms|text message|text messaging|by text|by sms|contact me by text|text me)$/),
+];
+
+const DOMAINS: Record<Exclude<OptionDomain, "generic">, Concept[]> = { yes_no: YES_NO, phone_type: PHONE_TYPES, country: COUNTRIES, region: REGIONS, degree: DEGREES, contact_method: CONTACT_METHODS };
 
 /** The concept(s) a phrase belongs to within a domain. */
 export function conceptsOf(domain: OptionDomain, text: string): string[] {
@@ -151,6 +181,7 @@ export function matchOptionSemantic(options: FieldOption[], answer: string, doma
 /** Which option domain a field's label implies. */
 export function domainForLabel(label: string, semantic?: string): OptionDomain {
   const l = norm(label);
+  if (semantic === "contact_method" || /preferred contact type|preferred (method of |means of |way of |mode of )?(contact|communication)|contact (method|preference)|(method|way|means) (of|to) (contact|reach)|how (would|should|do) (you (like|prefer) (us to|us|to be)|we) (contact|reach)/.test(l)) return "contact_method";
   if (semantic === "phone_country" || /phone (device )?type|type of phone|phone type/.test(l)) return /country|code/.test(l) ? "country" : "phone_type";
   if (semantic === "country" || /^country\b|country (of|code|region)?$/.test(l)) return "country";
   if (semantic === "region" || /^(state|province|region|territory)|province or territory|state province/.test(l)) return "region";
@@ -164,6 +195,7 @@ export type Meaning =
   | "prior_employment"
   | "prior_contractor"
   | "prior_affiliate"
+  | "contact_employer"
   | "prior_application"
   | "prior_interview"
   | "current_employee"
@@ -187,6 +219,7 @@ export type Meaning =
   | "return_to_school"
   | "placement_duration"
   | "graduation_date"
+  | "recruiting_deadline"
   | "full_time_student"
   | "professional_licence"
   | "certification"
@@ -200,6 +233,7 @@ export type Meaning =
   | "criminal_record"
   | "references"
   | "source"
+  | "contact_method"
   | "motivation"
   | "identity"
   | "legal"
@@ -231,6 +265,8 @@ const RULES: { meaning: Meaning; re: RegExp; not?: RegExp; sensitivity?: Sensiti
   { meaning: "non_compete", re: /non ?compet|non ?solicit|restrictive covenant/, sensitivity: "legal", approval: true, reusable: false },
   { meaning: "conflict_of_interest", re: /conflict of interest/, sensitivity: "legal", approval: true, reusable: false },
   { meaning: "legal", re: /\b(i (hereby )?(certify|attest|declare|acknowledge|agree|consent)|terms (and|&) conditions|privacy (policy|notice)|electronic(ally)? sign|signature|true,? (accurate|correct) and complete)/, sensitivity: "legal", approval: true, reusable: false },
+  // permission to contact the applicant's (current / previous) employer — not employment history
+  { meaning: "contact_employer", re: /\b(may|can) (we|the employer|the company|the hiring team) contact your (current|present|previous|former|most recent)? ?employers?\b|\bpermission to contact your (current |present )?employers?\b|\bcontact your (current|present) employer\b/ },
   // employment history with the employer — distinct meanings, checked before the generic rule
   { meaning: "prior_contractor", re: /\b(contractor|consultant|contingent|temporary (worker|staff)|agency worker|freelance)/, not: /currently/, employerScoped: true },
   { meaning: "prior_affiliate", re: /\b(affiliate|subsidiar|sister company|parent company|related compan)/, employerScoped: true },
@@ -258,7 +294,8 @@ const RULES: { meaning: Meaning; re: RegExp; not?: RegExp; sensitivity?: Sensiti
   { meaning: "placement_duration", re: /\b(4|four|8|eight|12|twelve|16|sixteen) ?(months?|month) (placement|work term|term|co ?op|internship)|\bwork term (length|duration)|available for (a|an) \w+ month/ },
   { meaning: "return_to_school", re: /\breturn(ing)? to (school|studies|university|college)|\bfull ?time studies after/ },
   { meaning: "full_time_student", re: /\bfull ?time (student|studies)|\bpart ?time (student|studies)/ },
-  { meaning: "graduation_date", re: /\b(expected |anticipated )?graduation (date|year)|\bwhen (will|do) you graduate|\bexpected to graduate/ },
+  { meaning: "recruiting_deadline", re: /\boffer deadline|\brecruiting(-| )process deadline|\bdeadline\b.{0,60}\b(offer|recruit|interview|decision)|\b(other|competing) (offers?|interviews?|recruiting processes)\b.{0,60}\bdeadline|\bcompeting offer/ },
+  { meaning: "graduation_date", re: /\b(expected |anticipated )?graduation (date|year|month)|\bdate of graduation|\bwhen (will|do|did) you graduate|\bexpected to graduate|\byear graduated|\b(complete|completing|finish|finishing) (your|the) (degree|studies|program|programme)|\bdegree completion|\b(expected|anticipated) (completion|graduation)/ },
   { meaning: "enrolled_student", re: /\b(currently )?(enrolled|registered|attending|a student)\b.*\b(school|university|college|post ?secondary|program|studies|degree)|\bare you (currently )?a student\b/, not: /co ?op|cooperative education/ },
   // logistics
   { meaning: "relocation", re: /\brelocat/ },
@@ -276,6 +313,7 @@ const RULES: { meaning: Meaning; re: RegExp; not?: RegExp; sensitivity?: Sensiti
   { meaning: "language", re: /\b(speak|fluen|proficien|bilingual|language)\b/ },
   { meaning: "references", re: /\breferences?\b/, not: /referr/ },
   { meaning: "source", re: /\bhow did you (hear|find|learn)|\bwhere did you (hear|find|learn|see)|\bsource\b/ },
+  { meaning: "contact_method", re: /\bpreferred contact type\b|\bpreferred (method of |means of |way of |mode of )?(contact|communication)\b|\bcontact (method|preference)\b|\b(method|way|means) (of|to) (contact|reach)\b|\bhow (would|should|do) (you (like|prefer) (us to|us|to be)|we) (contact|reach)/ },
   { meaning: "motivation", re: /\bwhy (do you|are you)|cover letter|tell us|describe|what interests/ },
 ];
 
@@ -329,4 +367,32 @@ export function yesNoOf(answer: unknown): "yes" | "no" | null {
   const cs = conceptsOf("yes_no", answer);
   if (cs.length === 1) return cs[0] as "yes" | "no";
   return leadingYesNo(answer);
+}
+
+// ---------------------------------------------------------------- consent categories
+
+/**
+ * What a consent / declaration actually grants, by category. A text touches every category it mentions
+ * (an interview-recording notice that also allows internal training is two categories); "other_binding"
+ * (arbitration, waivers, signatures, drug tests …) never has a standing authorisation.
+ */
+export type ConsentCategory = "privacy_notice" | "routine_terms" | "read_information" | "accuracy_declaration" | "interview_recording" | "recording_training" | "background_check" | "third_party_sharing" | "other_binding";
+
+export function consentCategories(text: string): ConsentCategory[] {
+  const t = text.replace(/\s+/g, " ").toLowerCase();
+  const out = new Set<ConsentCategory>();
+  const recording = /\b(record(ed|ing|s)?|transcri(be|bed|bes|bing|ption|ptions))\b|brighthire|metaview|interview intelligence/.test(t) && /\binterview|conversation|call|meeting\b/.test(t);
+  if (recording) out.add("interview_recording");
+  if (recording && /\b(train(ing)?|improv(e|es|ing)|quality|internal (use|purposes|review)|machine learning|ai models?|research|calibrat)/.test(t)) out.add("recording_training");
+  if (/background (check|screening|investigation)|credit (check|history|report)|criminal (record|history|check|background)|reference checks?|consumer reports?|verify (your )?(employment|education) history|\b(make|conduct|carry out) an? investigation\b|\binvestigat\w* (of|into) (any of )?the (facts|information|statements)|\bcontact (any |my |the )?(provided |listed )?references\b/.test(t)) out.add("background_check");
+  if (/(share|disclose|transfer|sell)\b.{0,60}\b(third[- ]part(y|ies)|other (companies|employers|organi[sz]ations)|affiliates|partners)\b|for (marketing|advertising) purposes/.test(t)) out.add("third_party_sharing");
+  if (/privacy (policy|notice|statement)|personal (information|data)|data protection|\bgdpr\b|\bpipeda\b|candidate privacy/.test(t)) out.add("privacy_notice");
+  if (/terms (and|&) conditions|terms of (use|service)|application terms|candidate terms|\bterms\b.{0,20}\b(agree|accept)|\b(agree|accept)\b.{0,30}\bterms\b/.test(t)) out.add("routine_terms");
+  if (/\b(true|accurate|correct|complete|truthful)\b.{0,50}\b(information|answers|statements|application|responses)\b|\b(information|answers|statements)\b.{0,40}\b(true|accurate|correct|complete)\b|\bcertify\b|\battest\b|falsif|misrepresent/.test(t)) out.add("accuracy_declaration");
+  if (/\bi (have )?(read|reviewed)\b|\bi understand\b|\bi acknowledge\b|acknowledge (that )?i have read/.test(t) && !out.size) out.add("read_information");
+  // A release of liability for an authorised investigation / reference check of the application is part of
+  // that background-check consent (owner decision 2026-10-16); any other release or waiver stays binding.
+  const release = /\breleas\w*\b.{0,60}\bfrom (any|all)( and all)? (liabilit|claims)|release (of |from )?(all )?(liability|claims)/.test(t);
+  if (/arbitration|non-?compete|non-?solicit|drug (test|screen)|\bsignature\b|e-?sign|waive|waiver|indemn|salary history/.test(t) || (release && !out.has("background_check"))) out.add("other_binding");
+  return [...out];
 }

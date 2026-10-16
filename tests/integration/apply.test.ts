@@ -150,7 +150,6 @@ describe.skipIf(!ready)("automated applications (synthetic forms, headless brows
       first_name: "Alex",
       last_name: "Rivera",
       email: "alex.rivera@example.test",
-      phone: "+1 416 555 0142",
       "candidate-location": "Toronto, Ontario, Canada", // not "Toronto, Ohio"
       question_101: "https://www.linkedin.com/in/alex-rivera-example",
       question_103: "Yes", // permanent resident → authorised
@@ -159,6 +158,9 @@ describe.skipIf(!ready)("automated applications (synthetic forms, headless brows
       question_107: "Master's Degree",
       question_108: "1",
     });
+    // The saved Canadian number: the local number in a plain box for a job in Canada (or "+1 …"), never another country.
+    expect(String(s.fields.phone).replace(/\D/g, "")).toMatch(/^1?4165550142$/);
+    expect(String(s.fields.phone)).not.toMatch(/^\s*\+(?!1)/);
     // Voluntary self-identification is never answered; optional unknowns stay empty.
     expect(s.fields.gender).toBe("");
     expect(s.fields.veteran_status).toBe("");

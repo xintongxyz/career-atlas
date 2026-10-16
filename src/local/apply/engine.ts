@@ -19,9 +19,9 @@
 //
 // The Workday listbox handling (chooseListbox) and Workday field names follow MIT-licensed projects
 // listed in THIRD_PARTY_NOTICES.md (AutoApply, Autofill-Jobs); see src/local/apply/workday.ts.
-import { classificationUrl, type AttemptState, type FilledField, type InterventionReason, type PendingQuestion } from "@shared/apply";
+import { blockerOf, classificationUrl, type AttemptState, type FilledField, type InterventionReason, type PendingQuestion } from "@shared/apply";
 import { emptyProfile, profileSchema, type Profile } from "@shared/profile";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BrowserContext, Page } from "playwright-core";
 import { eq } from "drizzle-orm";
@@ -34,16 +34,21 @@ import { launchBrowser, type BrowserChoice } from "./browser";
 import { tenantOf, type AccountManager } from "./credentials";
 import { questionMeaning } from "@shared/apply-semantic";
 import type { PublicFacts } from "./codex-agent";
+import { createAgent, type Proposer } from "./browser-agent";
+import { codexUsage } from "../codex";
+import { judgeOption, openQuestion, writeAnswer, type Writer } from "./answer-engine";
+import { APPLY_CTA_RE, MARK_SUBMIT, PAGE_MAP, pageState, type PageMap, type PageState } from "./page-intent";
 import { PAGE_SIGNALS } from "./dom";
-import { PAGE_CONTROLS, addPanelButton, decideAdvance, decideNavigation, panelCount, safeClickName, type PageObservation } from "./generic";
-import { enrichOptions, perform, readMenu, scan, verify } from "./interact";
+import { decideAdvance, decideNavigation, safeClickName, type PageObservation } from "./generic";
+import { commitOpenSections, enrichOptions, frameView, handleNotices, navigationSafe, perform, readMenu, scan, textSet, verify } from "./interact";
 import { classifyIndeedUrl } from "./indeed";
-import { applicationUrl, atsFromSignals, classifyAfterSubmit, stripQuery, type Ats, type PageSignals } from "./outcome";
-import { fieldKey, norm, planForm, question, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
+import { applicationUrl, atsFromSignals, classifyAfterSubmit, stripQuery, successSentence, type Ats, type PageSignals } from "./outcome";
+import { fieldKey, norm, planForm, question, standingConsent, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
 import { fillSections } from "./wd-sections";
+import { fillRows } from "./rows";
 import { jobSourceOf, type JobSource } from "@shared/apply-match";
 import type { MailVerifier } from "./mail";
-import { accountTermsLabel, activeStep, clickNext, codeInput, declineCookies, enterApplyFlow, isAutofillUpload, nextButton, submitVerificationCode, uploadResume, wdReady, wdSettle, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
+import { accountTermsLabel, activeStep, clickNext, codeInput, declineCookies, enterApplyFlow, isAutofillUpload, nextButton, submitVerificationCode, uploadResume, wdAuthReady, wdReady, wdSettleStable, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
 
 const { applicationAttempts, documents, jobPostings, companies } = schema;
 
@@ -70,7 +75,31 @@ export interface EngineDeps {
   pageAgent?: ((obs: { buttons: string[]; labels: string[] }) => Promise<string | null>) | null;
   /** Unfamiliar closed questions: pick an option from boolean facts (has email, has phone, job source). Never profile values. */
   chooseOption?: ((label: string, options: string[], facts: PublicFacts) => Promise<string | null>) | null;
+  /**
+   * Runtime browser agent for pages the built-in flows do not understand: returns the action proposer
+   * (the authorised GPT provider, no tools) when one is available. See browser-agent.ts.
+   */
+  browserAgent?: (() => Promise<Proposer | null>) | null;
+  /** Tests: fewer agent steps. */
+  agentMaxSteps?: number;
+  /**
+   * Writes answers to open questions from verified facts (answer-engine.ts), used only when the owner turned
+   * on "AI answer writing". Returns the writer, or null when no provider is available.
+   */
+  answerWriter?: (() => Promise<Writer | null>) | null;
 }
+
+/** One remembered action of a solved take-over (replayed by visible text / label, re-validated). */
+interface PlaybookStep {
+  action: string;
+  target: string;
+  option?: string;
+  fact?: string;
+  checked?: boolean;
+}
+
+/** What the attempt shows while a generic site is being worked on. */
+const STAGE_OF: Record<PageState, string> = { posting: "on_posting", application: "filling", questions: "filling", review: "review", login: "sign_in", unknown: "reading_page" };
 
 class Stop extends Error {
   constructor(public code: string) {
@@ -111,11 +140,29 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   const visible = !!row.visible;
   const evidence = new Set<string>((row.evidence as string[] | null) ?? []);
   let clickedThisRun = false;
+  let agentRan = false;
+  /** Why the AI is currently in charge (what the deterministic flow expected) — shown to the agent. */
+  let situation: string | null = null;
+  let agent: ReturnType<typeof createAgent> | null = null;
+  let agentOpen: PendingQuestion[] = [];
+  let jobTitle: string | null = null;
+  let jobDescription: string | null = null;
+  /** Generic sites: an Apply / guest action led into the application (verified on the next page). */
+  let inWorkflow = false;
+  let lastState: PageState | null = null;
+  /** Application milestones reached in this run (posting → apply → application → form → review). */
+  const milestones = new Set<string>();
+  const milestone = async (m: "posting_identified" | "apply_clicked" | "application_entered" | "form_found" | "review_reached") => {
+    if (milestones.has(m)) return;
+    milestones.add(m);
+    await set({}, m);
+  };
   let ctx: BrowserContext | null = null;
   let allFilled: FilledField[] = [];
   let resumeFile = { name: "", mimeType: "", buffer: Buffer.alloc(0) };
   let planCtx: PlanContext = { profile: emptyProfile(), jobCountry: null, answers: {}, resume: { fileName: "" } };
   let jobSource: JobSource = null;
+  let genericSignInTried = false;
   const allow = deps.allowLoopback;
 
   const set = (patch: Partial<typeof applicationAttempts.$inferInsert>, code?: string, params?: Record<string, string | number>) => updateAttempt(db, attemptId, patch, code ? { code, params } : undefined);
@@ -147,6 +194,10 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     }
   };
   const pause = async (reason: InterventionReason, questions: PendingQuestion[] = [], extra: Partial<typeof applicationAttempts.$inferInsert> = {}) => {
+    // A consent the applicant already approved (here or by a standing authorisation) that the site would not
+    // keep is a control problem, never a new approval: it is shown as such, not as a question to approve again.
+    questions = questions.map((q) => (q.kind === "checkbox" && (q.reason === "not_accepted" || q.reason === "legal") && consentApproved(q.label, q.key) ? { ...q, reason: "approved_not_kept", blocker: "interaction" as const } : q));
+    questions = questions.map((q) => ({ ...q, blocker: q.blocker ?? blockerOf(q) }));
     await set({ state: "needs_review", intervention: reason, questions, visible: 0, stage: null, ...extra }, "paused", { reason });
     return "needs_review" as const;
   };
@@ -154,6 +205,10 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   const reasonFor = (questions: PendingQuestion[]): InterventionReason =>
     questions.some((q) => q.reason === "legal") ? "approval_needed" : questions.every((q) => q.reason === "unsupported") ? "unsupported_field" : "missing_information";
 
+  // Cost of this run: model calls / tokens / model time (Codex usage deltas), wall time, AI take-overs.
+  const usage0 = { ...codexUsage };
+  const t0run = Date.now();
+  const takeovers = { count: 0, resolved: 0 };
   try {
     await set({ state: "filling", startedAt: row.startedAt ?? Date.now(), stage: "opening", errorCode: null, errorMessage: null }, visible ? "started_visible" : "started");
 
@@ -168,20 +223,29 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     if (!bytes || bytes.byteLength !== row.resumeSizeBytes || (await sha256Hex(bytes.buffer as ArrayBuffer)) !== row.resumeSha256) throw new Stop("resume_changed");
     resumeFile = { name: row.resumeFileName, mimeType: row.resumeMimeType, buffer: Buffer.from(bytes) };
     const company = posting ? await db.query.companies.findFirst({ where: eq(companies.id, posting.companyId) }) : null;
+    jobTitle = posting?.title ?? null;
+    jobDescription = posting?.descriptionText ?? null;
     jobSource = jobSourceOf({ sourcePlatform: posting?.sourcePlatform, originalUrl: posting?.originalUrl, route: row.route, sourceUrl: row.sourceUrl });
     planCtx = { profile, jobCountry: posting?.country ?? null, answers: (row.answers as Record<string, unknown> | null) ?? {}, resume: { fileName: resumeFile.name }, employer: company?.name ?? null, jobSource };
 
     // ---- open
     await checkCancel();
     ctx = await launchBrowser({ profileDir: deps.profileDir, headless: !visible || !!deps.forceHeadless, choice: deps.choice, allowLoopback: allow });
-    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    const page = navigationSafe(ctx.pages()[0] ?? (await ctx.newPage()));
     page.setDefaultTimeout(15_000);
+    ctx.on("page", (p) => void navigationSafe(p)); // tabs a site opens (Apply in a new tab)
+    // Browser dialogs: "leave this page?" → stay; alerts → OK; confirmations → never accepted blindly.
+    page.on("dialog", (d) => {
+      void (d.type() === "alert" ? d.accept() : d.dismiss()).catch(() => {});
+    });
     await goto(page, row.targetUrl, t.navigation);
     if (classifyIndeedUrl(classificationUrl(page.url(), allow)) !== "external") return await indeedFlow(page);
     return await formFlow(page, row.route === "indeed_company_site");
   } catch (e) {
     if (e instanceof Superseded) return e.state; // a new run takes over; nothing is overwritten
     const code = e instanceof Stop ? e.code : errorCode(e);
+    // Developer diagnostics only (never on by default): the error's first line, no field values.
+    if (process.env.CA_APPLY_DEBUG && !(e instanceof Stop)) process.stderr.write(`ENGINE_ERROR ${String((e as Error)?.stack ?? e).split("\n").slice(0, 5).join(" | ")}\n`);
     if (code === "cancelled" && !clickedThisRun) {
       const r = await current();
       if (r?.state !== "cancelled") await set({ state: "cancelled", stage: null, finishedAt: Date.now(), intervention: null }, "cancelled");
@@ -197,6 +261,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   } finally {
     // Closing the browser must never block the queue (a hung close would stall every later attempt).
     if (ctx) await Promise.race([ctx.close().catch(() => {}), sleep(10_000)]);
+    // Run metrics as a step (append-only; never rewrites answers the user may be giving right now).
+    await updateAttempt(db, attemptId, {}, { code: "run_metrics", params: { model_calls: codexUsage.calls - usage0.calls, tokens: codexUsage.tokens - usage0.tokens, model_s: Math.round((codexUsage.ms - usage0.ms) / 1000), run_s: Math.round((Date.now() - t0run) / 1000), takeovers: takeovers.count, resolved: takeovers.resolved } }).catch(() => {});
   }
 
   // ================================================================ routes
@@ -243,15 +309,138 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     return indeedApply ? pause("confirm_result", [], { route: "indeed_apply" }) : pause("unexpected_page", [], { errorCode: "indeed_no_destination" });
   }
 
-  async function observe(page: Page): Promise<PageObservation> {
-    return (await page.evaluate(PAGE_CONTROLS)) as PageObservation;
+  /** Which control is being worked on (field label only — never a value); readable through the API. */
+  async function progress(label: string) {
+    await set({ stage: `filling: ${label.replace(/\s+/g, " ").slice(0, 80)}` });
+  }
+
+  function rowsCtx(page: Page) {
+    return {
+    page,
+    profile: planCtx.profile,
+    answers: planCtx.answers,
+    guard: checkCancel,
+    record: (f: FilledField) => {
+      allFilled.push(f);
+    },
+    event: async (code: string, params?: Record<string, string | number>) => {
+      await set({ filled: allFilled }, code, params);
+    },
+    progress,
+    // Option equivalence by AI only with the owner's "AI answer writing" on (it sends that one value).
+    judge:
+      planCtx.profile.application_defaults.ai_answer_writing === "on" && deps.answerWriter
+        ? async (value: string, options: string[], kind: "school" | "major" | "degree" | "other") => {
+            const w = await deps.answerWriter!().catch(() => null);
+            return w ? judgeOption(value, options, kind, w) : null;
+          }
+        : undefined,
+    };
+  }
+
+  /**
+   * Pop-ups read from the page: routine notices are acknowledged; a consent / declaration dialog is
+   * accepted only with the user's approval for it (or, for a plain recruitment privacy notice, the
+   * standing preference in Application Defaults) — otherwise the application pauses with it.
+   */
+  async function notices(page: Page): Promise<AttemptState | null> {
+    const seen = await handleNotices(page);
+    for (const n of seen) if (n.kind === "dismissed") await set({}, "notice_acknowledged", { button: n.button.slice(0, 40) });
+    const consent = seen.find((n) => n.kind === "consent") as { kind: "consent"; text: string; checkbox: boolean } | undefined;
+    if (!consent) return null;
+    const key = `notice:${norm(consent.text).slice(0, 120)}`;
+    const privacyOnly = /privacy|personal information|data protection/i.test(consent.text) && !/certif|attest|background|drug|criminal|signature|arbitration|non-?compete|true,? (accurate|correct)|authori[sz]e .*(contact|verify|release)/i.test(consent.text);
+    planCtx.consent = { accuracyVerified: accuracyVerified(), inspectedTerms: planCtx.consent?.inspectedTerms };
+    const standing = standingConsent(consent.text, key, planCtx);
+    const approved = planCtx.answers[key] === true || (privacyOnly && planCtx.profile.application_defaults.accept_privacy_notices === "yes") || !!standing;
+    if (approved && (await acceptConsentDialog(page))) {
+      await set({}, "consent_given", { kind: standing ? standing.join("+") : privacyOnly ? "privacy_notice" : "approved" });
+      return null;
+    }
+    const q: PendingQuestion = { key, label: consent.text.slice(0, 500), kind: "checkbox", required: true, options: [], reason: "legal", sensitive: true, hint: null, rememberable: false, meaning: privacyOnly ? "privacy_notice" : "declaration" };
+    await shot(page, "consent");
+    return visible ? manual(page, null, "approval_needed", [q]) : pause("approval_needed", [q]);
+  }
+
+  async function acceptConsentDialog(page: Page): Promise<boolean> {
+    const dlg = page.locator('[role="dialog"], [role="alertdialog"], [aria-modal="true"], .ant-modal, .modal.show').filter({ visible: true }).last();
+    if (!(await dlg.count())) return false;
+    for (const cb of await dlg.locator('input[type="checkbox"]').all()) if (!(await cb.isChecked().catch(() => true))) await cb.check({ force: true }).catch(() => {});
+    const btn = dlg.getByRole("button", { name: /^(i agree|agree|accept|i accept|continue|ok|confirm|i acknowledge|acknowledge)$/i }).first();
+    if (!(await btn.isVisible().catch(() => false))) return false;
+    await btn.click({ timeout: 5000 }).catch(() => {});
+    await sleep(500);
+    return true;
+  }
+
+  /**
+   * Sign-in with a saved password on any site (the Workday account store is per host, so it works
+   * for every employer site). One try per run; a rejected password is recorded and never retried.
+   */
+  async function genericSignIn(page: Page): Promise<"ok" | "failed" | "none"> {
+    const acc = deps.accounts;
+    const email = planCtx.profile.contact.email?.trim();
+    if (!acc?.available || !email || !row!.accountMode || row!.accountMode === "none" || genericSignInTried) return "none";
+    const site = tenantOf(page.url());
+    if (acc.blocked(site, email) || !(await acc.hasCredential(site, email))) return "none";
+    const pw = await acc.password(site, email);
+    const user = page.locator('input[type="email"], input[autocomplete="username"], input[name*="mail" i], input[id*="mail" i], input[name*="user" i], input[id*="user" i]').filter({ visible: true }).first();
+    const pass = page.locator('input[type="password"]').filter({ visible: true }).first();
+    if (!pw || !(await user.count()) || !(await pass.count())) return "none";
+    genericSignInTried = true;
+    await set({ stage: "sign_in" }, "sign_in_attempt", { site });
+    await user.fill(email).catch(() => {});
+    await pass.fill(pw).catch(() => {});
+    const btn = page.getByRole("button", { name: /^(sign in|log in|login|continue|next)$/i }).filter({ visible: true }).first();
+    if (await btn.count()) await btn.click({ timeout: 8000 }).catch(() => {});
+    else await pass.press("Enter").catch(() => {});
+    await page.waitForLoadState("domcontentloaded").catch(() => {});
+    // Signed in only when the password field stays gone on a page that has drawn its content (a
+    // redirect shows a blank page for a moment — that is not success).
+    let clear = 0;
+    for (let w = 0; w < 40; w++) {
+      await sleep(500);
+      const sig = await signals(page);
+      const drawn = (await observe(page)).names.length > 0;
+      clear = !sig.password && drawn ? clear + 1 : 0;
+      if (clear >= 4) {
+        acc.mark(site, email, { status: "signed_in", last_sign_in_at: Date.now(), last_failure_at: null, last_failure_code: null });
+        await set({ state: "filling", intervention: null, stage: "filling" }, "signed_in_auto", { site });
+        return "ok";
+      }
+    }
+    acc.mark(site, email, { last_failure_at: Date.now(), last_failure_code: "invalid" });
+    return "failed";
+  }
+
+  /** A click that opened the application in a new tab: continue in that tab (the old one stays open). */
+  async function adoptNewTab(current: Page, before: number): Promise<Page> {
+    await sleep(300);
+    const pages = ctx!.pages();
+    if (pages.length <= before) return current;
+    const fresh = pages[pages.length - 1];
+    await fresh.waitForLoadState("domcontentloaded", { timeout: 20_000 }).catch(() => {});
+    if (fresh.url() === "about:blank") return current;
+    await fresh.bringToFront().catch(() => {});
+    await set({}, "followed_new_tab");
+    return navigationSafe(fresh);
+  }
+
+  /** The page's structure and purpose (widgets marked out of the application) — see page-intent.ts. */
+  async function observe(page: Page): Promise<PageMap> {
+    return (await page.evaluate(PAGE_MAP)) as PageMap;
   }
 
   async function clickNamed(page: Page, name: string): Promise<boolean> {
     const re = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+    // Sites often render the same control twice (a hidden mobile copy first): click the first VISIBLE one.
     for (const role of ["button", "link"] as const) {
-      const loc = page.getByRole(role, { name: re }).first();
-      if (await loc.isVisible().catch(() => false)) {
+      const all = page.getByRole(role, { name: re });
+      const n = Math.min(await all.count().catch(() => 0), 10);
+      for (let i = 0; i < n; i++) {
+        const loc = all.nth(i);
+        if (!(await loc.isVisible().catch(() => false))) continue;
+        await loc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
         await loc.click({ timeout: 8000 });
         await page.waitForLoadState("domcontentloaded").catch(() => {});
         await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
@@ -269,15 +458,26 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   }
 
   /**
-   * A site that is not Workday, Greenhouse or Lever. Clicks Apply (and "Apply without an account"
-   * when that is offered — no account is created), fills from My Profile, adds work/education rows
-   * the profile has, and stops on the page that shows Submit unless submission was authorised.
+   * A site that is not Workday, Greenhouse or Lever.
+   *
+   * The page's PURPOSE is established before anything on it is touched (page-intent.ts): site search,
+   * job-alert sign-ups, cookie banners and site chrome are marked as not part of the application, and the
+   * page is read as a posting, an application step, a sign-in step or unknown. On a posting or an
+   * unfamiliar page the GPT agent (when available) decides the next step from that description; its action
+   * is validated, executed and verified by Career Atlas. Profile values are filled only once the
+   * application itself is on the page, and only inside it; the final Submit must belong to it.
    */
   async function genericFlow(page: Page, fromIndeed: boolean): Promise<AttemptState> {
     await set({ ats: null, stage: "opening" }, "opened_form");
     let cookieDismissed = false;
+    const framesOpened = new Set<string>();
+    const appliesClicked = new Set<string>();
     let lastSig = "";
     let repeats = 0;
+    let aiSteps = 0;
+    /** An Apply / guest action was taken from this address; the next page tells whether it led into the application. */
+    let entryFrom: string | null = null;
+    const propose = deps.browserAgent ? await deps.browserAgent().catch(() => null) : null;
     for (let step = 0; step < 16; step++) {
       await checkCancel();
       let s = await signals(page);
@@ -286,21 +486,118 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         s = await signals(page);
       }
       if (atsFromSignals(s, allow)) return formFlow(page, fromIndeed);
-      const obs = await observe(page);
-      const decision = decideNavigation(obs, { password: s.password, challenge: s.challenge, cookieDismissed });
-      const sig = `${decision.action}:${"name" in decision ? decision.name : ""}:${page.url()}`;
+      const consent = await notices(page);
+      if (consent) return consent;
+      let obs = await observe(page);
+      // A page that has not drawn its controls yet (scripts still rendering after a redirect): wait until
+      // it shows something and stops changing, instead of judging an empty page.
+      for (let w = 0, last = -1; w < 30; w++) {
+        const n = obs.names.length + obs.applicationFields;
+        if (n > 0 && n === last) break;
+        last = n;
+        await sleep(n > 0 ? 500 : 700);
+        obs = await observe(page);
+      }
+      s = await signals(page);
+      // A sign-in / registration step (an e-mail box on ".../login" before any application fields) is the
+      // candidate's account step: never filled with the profile here.
+      const loginPage = /\/(log-?in|sign-?in|signin|logon|register|registration|account\/(login|create|signin))(\/|$|\?)/i.test(new URL(page.url()).pathname) && obs.semantics.length <= 2;
+      let state = pageState(obs, { inWorkflow, login: s.password || loginPage });
+      // VERIFY the entry: after Apply, the page must have changed into the application (or its sign-in step).
+      if (entryFrom !== null) {
+        if (state === "application" || state === "questions" || state === "login" || (page.url() !== entryFrom && state !== "posting")) {
+          inWorkflow = true;
+          await milestone("application_entered");
+          state = pageState(obs, { inWorkflow, login: s.password || loginPage });
+        }
+        entryFrom = null;
+      }
+      if (state === "application") inWorkflow = true;
+      lastState = state;
+      if (state === "posting") await milestone("posting_identified");
+      if (state === "application" || state === "questions") await milestone("form_found");
+      await set({ stage: STAGE_OF[state] });
+      const decision = decideNavigation(navView(obs, state), { password: s.password || loginPage, challenge: s.challenge, cookieDismissed });
+      if (process.env.CA_APPLY_DEBUG) process.stderr.write(`GENERIC step=${step} url=${page.url().slice(0, 90)} state=${state} fields=${obs.applicationFields} sem=${obs.semantics.join(",")} widgets=${obs.widgets.map((w) => w.kind).join(",")} decision=${JSON.stringify(decision)} names=${JSON.stringify(obs.names.slice(0, 12))}\n`);
+      // "Same situation again" means the same decision on the same CONTENT (single-page forms keep one URL).
+      const sig = `${decision.action}:${"name" in decision ? decision.name : ""}:${page.url()}:${contentSig(obs)}`;
       repeats = sig === lastSig ? repeats + 1 : 0;
       lastSig = sig;
       if (decision.action === "captcha") return visible ? manual(page, null, "captcha") : pause("captcha");
-      if (decision.action === "login") return visible ? manual(page, null, "login_required") : pause("login_required");
-      if (decision.action === "click" && repeats < 2) {
+      if (decision.action === "login") {
+        // A sign-in page on any site: with a password saved for this site (Keychain) and sign-in
+        // allowed for this application, sign in once; otherwise the user signs in (or registers) in
+        // the visible window and filling continues. In the background it pauses for that.
+        const r = await genericSignIn(page);
+        if (r === "ok") continue;
+        if (r === "failed") return visible ? manual(page, null, "login_required") : pause("login_required", [], { stage: "sign_in", errorCode: "sign_in_failed" });
+        if (!visible) return pause("login_required", [], { stage: "sign_in" });
+        const ok = await waitForUser(page, async () => !(await signals(page)).password, "login_required");
+        if (!ok) return pause("login_required", [], { stage: "sign_in" });
+        await set({ state: "filling", intervention: null, stage: "filling" }, "signed_in_by_user");
+        continue;
+      }
+      // Privacy-preserving cookie choice and "apply without an account" are fixed rules (no account, no consent).
+      if (decision.action === "click" && decision.why !== "apply" && repeats < 2) {
         if (decision.why === "cookie") cookieDismissed = true;
+        const tabs = ctx!.pages().length;
+        const from = page.url();
         if (await clickNamed(page, decision.name)) {
+          page = await adoptNewTab(page, tabs);
+          if (decision.why === "guest") entryFrom = from;
+          await set({ stage: "opening" }, "opened_form");
+          continue;
+        }
+      }
+      // The posting may live inside a large embedded frame (iCIMS and many company sites): work inside it
+      // — once per frame — when this page itself offers nothing to apply with.
+      const frame = (obs.frames ?? []).sort((a, b) => b.area - a.area).find((f) => !framesOpened.has(f.src) && !/captcha|datadome|recaptcha|hcaptcha|turnstile|youtube|vimeo|maps\.google|googletagmanager|doubleclick/i.test(f.src));
+      if (frame && obs.semantics.length === 0 && state !== "posting") {
+        framesOpened.add(frame.src);
+        const real = page;
+        const f = real.frames().find((x) => x.url() === frame.src) ?? real.frames().find((x) => x !== real.mainFrame() && frame.src.startsWith(x.url().split("?")[0]));
+        if (f) {
+          page = frameView(real, f);
+          await set({ stage: "opening" }, "opened_embedded_form");
+          continue;
+        }
+      }
+      // UNDERSTAND + DECIDE on a posting or an unfamiliar page: the GPT agent reads the page (its widgets
+      // marked as such) against the goal and proposes the next action; Career Atlas validates, executes and
+      // verifies it. A refused or unhelpful proposal falls back to the fixed rules below.
+      if (propose && (state === "posting" || state === "unknown") && aiSteps < 8) {
+        aiSteps++;
+        const r = await agentFor(propose).step(page);
+        await set({}, "page_assessed", { state, by: "ai", action: r.kind === "acted" || r.kind === "refused" ? r.action.action : r.kind === "finish" ? `finish:${r.outcome.status}` : "stop", target: r.kind === "acted" || r.kind === "refused" ? r.target.slice(0, 60) : "" });
+        if (r.kind === "acted" && r.ok) {
+          const from = page.url();
+          page = r.page;
+          if (r.action.action === "click") {
+            await milestone("apply_clicked");
+            entryFrom = from;
+          }
+          continue;
+        }
+        if (r.kind === "stop" && r.outcome.status === "blocked" && /Indeed/.test(r.outcome.reason)) return fromIndeed && visible ? employerManual(page) : pause("unexpected_page", [], { errorCode: "indeed_not_automated" });
+        // Refused (e.g. a job-alert button): the model sees why on its next look, unless the fixed rules have a step.
+        if (r.kind === "refused" && decision.action !== "click") continue;
+      }
+      if (decision.action === "click" && repeats < 2) {
+        const tabs = ctx!.pages().length;
+        const from = page.url();
+        if (await clickNamed(page, decision.name)) {
+          page = await adoptNewTab(page, tabs);
+          await milestone("apply_clicked");
+          entryFrom = from;
           await set({ stage: "opening" }, "opened_form");
           continue;
         }
       } else if (decision.action === "fill") {
+        // Repeated rows (employment / education) entry by entry, then the rest of the page — inside the
+        // application only (widgets are marked out of scope and never scanned).
+        const rows = await fillRows(rowsCtx(page));
         let { questions } = await fillPage(page, { uploadInPlan: true });
+        questions = [...rows.questions, ...questions.filter((q) => !rows.questions.some((r) => r.key === q.key))];
         if (questions.some((q) => q.required && q.options.length) && deps.chooseOption) {
           let changed = false;
           let asked = 0;
@@ -315,70 +612,212 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           }
           if (changed) questions = (await fillPage(page, { uploadInPlan: true })).questions;
         }
-        const names = (await observe(page)).names;
-        const fields = await scan(page);
+        // Inline section editors keep edits only after their own Update / Save button.
+        if (await commitOpenSections(page)) await set({}, "sections_saved");
         if (!questions.some((q) => q.required)) {
-          const workHave = panelCount(fields, "work");
-          const eduHave = panelCount(fields, "education");
-          const addWork = workHave > 0 && workHave < planCtx.profile.experience.length ? addPanelButton(names, "work") : null;
-          const addEdu = !addWork && eduHave > 0 && eduHave < planCtx.profile.education.length ? addPanelButton(names, "education") : null;
-          const add = addWork ?? addEdu;
-          if (add) {
-            const group = addWork ? "work" : "education";
-            const before = addWork ? workHave : eduHave;
-            await clickNamed(page, add);
-            const after = panelCount(await scan(page), group);
-            if (after > before) {
-              await set({}, group === "work" ? "work_entry_added" : "education_entry_added", { n: after });
-              continue;
+          const now = await observe(page);
+          const adv = decideAdvance(now.names);
+          // Nothing to advance with yet, but an Apply control is still on the page (a tab or button
+          // that reveals the form, e.g. "Apply" next to "Job details"): open it once.
+          if (adv.action === "stuck") {
+            const apply = now.names.find((n) => APPLY_CTA_RE.test(n) && !appliesClicked.has(n));
+            if (apply) {
+              appliesClicked.add(apply);
+              const tabs = ctx!.pages().length;
+              const from = page.url();
+              if (await clickNamed(page, apply)) {
+                page = await adoptNewTab(page, tabs);
+                await milestone("apply_clicked");
+                entryFrom = from;
+                await set({ stage: "opening" }, "opened_form");
+                continue;
+              }
             }
           }
-          const adv = decideAdvance((await observe(page)).names);
           if (adv.action === "click") {
-            const beforeUrl = page.url();
+            const before = `${page.url()}:${contentSig(now)}`;
+            const tabs = ctx!.pages().length;
             await clickNamed(page, adv.name);
-            if (page.url() === beforeUrl && repeats >= 2) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+            page = await adoptNewTab(page, tabs);
+            await sleep(400);
+            if (`${page.url()}:${contentSig(await observe(page))}` === before && repeats >= 2) {
+              const t = await aiTakeover(page, `The form's "${adv.name}" button was pressed but the page did not move to another step and showed no clear error. Find out what the page still needs (an unfamiliar control, a hidden required answer, a different continue button) and move the application on.`, async (p) => `${p.url()}:${contentSig(await observe(p))}` !== before);
+              page = t.page;
+              if (t.result === "resolved") continue;
+              if (t.result === "review") return reviewPage(page);
+              if (t.questions.length) return visible ? manual(page, null, reasonFor(t.questions), t.questions) : pause(reasonFor(t.questions), t.questions);
+              return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+            }
             await set({}, "next_step", { step: step + 2 });
             continue;
           }
-          if (adv.action === "review") {
-            await shot(page, "filled");
-            const submit = submitButton(page, null);
-            if (!(await submit.isVisible().catch(() => false))) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page");
-            const gate = await submitGate(page, null);
-            if (gate) return gate;
-            const posts = trackSubmissions(page);
-            await markSubmitting();
-            await submit.click();
-            const outcome = await waitForOutcome(page, null, posts, t.afterSubmit);
-            if (outcome.kind === "verified") return verified(page, outcome.text, outcome.url, "page");
-            if (outcome.kind === "validation_errors") {
-              await shot(page, "rejected");
-              return visible ? manual(page, null, "validation_errors") : pause("validation_errors", [], { errorCode: "validation_errors", errorMessage: outcome.errors.join(" | ").slice(0, 600) });
-            }
-            if (outcome.kind === "challenge" && !posts.posted()) return visible ? manual(page, null, "captcha") : pause("captcha");
-            if (visible) return manual(page, null, outcome.kind === "email_code" ? "login_required" : "unexpected_page");
-            return unconfirmed(page, outcome.kind === "email_code" ? "verification_code_required" : outcome.kind === "challenge" ? "captcha_after_submit" : "no_confirmation");
-          }
+          if (adv.action === "review") return reviewPage(page);
         }
         if (questions.length) {
+          questions = await resolveInteractions(page, questions);
+          if (!questions.length) continue; // the AI operated the unfamiliar controls: look at the page again
           await shot(page, `step-${step + 1}`);
           return visible ? manual(page, null, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
         }
       }
-      if (deps.pageAgent && repeats < 3) {
+      if (deps.pageAgent && !propose && repeats < 3) {
         const suggestion = await deps.pageAgent({ buttons: obs.names, labels: obs.labels }).catch(() => null);
         const name = suggestion ? safeClickName(suggestion, obs.names) : null;
+        const tabs = ctx!.pages().length;
+        const from = page.url();
         if (name && (await clickNamed(page, name))) {
+          page = await adoptNewTab(page, tabs);
+          entryFrom = from;
           await set({}, "opened_form");
           continue;
         }
       }
+      return agentOrStop(page, fromIndeed);
+    }
+    return agentOrStop(page, fromIndeed);
+  }
+
+  /** A page's identity for replaying a solved take-over: its headings, field labels and buttons (no values). */
+  function pageSignature(m: PageMap): string {
+    return `${m.headings.slice(0, 6).join("|")}#${m.labels.slice(0, 20).join("|")}#${m.names.slice(0, 20).join("|")}`.slice(0, 2000);
+  }
+
+  /** What the page shows (headings, controls, fields) — how a step change is recognised without a new URL. */
+  function contentSig(m: PageMap): string {
+    return `${m.headings.join("|")}#${m.names.join("|")}#${m.labels.join("|")}#${m.applicationFields}`;
+  }
+
+  /** The controls the fixed rules may act on, given what the page is: a posting has no application fields. */
+  function navView(m: PageMap, state: PageState): PageObservation {
+    const fields = state === "posting" ? 0 : m.applicationFields;
+    const applyNames = m.names.some((n) => APPLY_CTA_RE.test(n)) ? [] : m.chromeNames.filter((n) => APPLY_CTA_RE.test(n));
+    return { names: [...m.names, ...applyNames, ...m.cookieNames], cookieNames: m.cookieNames, applicationFields: fields, applicantFields: state === "posting" ? 0 : m.semantics.length, labels: m.labels, frames: m.frames };
+  }
+
+  /** The GPT agent for this run (one per run, so its memory of asked questions and failures is kept). */
+  /**
+   * An agreement covered by the applicant's approval: their answer to this very question, or every category
+   * it touches authorised in Application Defaults (standingConsent — accuracy only over verified values,
+   * terms only when readable). Used by the agent's trusted checks; the model cannot widen it.
+   */
+  function consentApproved(text: string, key: string): boolean {
+    if (planCtx.answers[key] === true) return true;
+    planCtx.consent = { accuracyVerified: accuracyVerified(), inspectedTerms: planCtx.consent?.inspectedTerms };
+    return !!standingConsent(text, key, planCtx);
+  }
+
+  function agentFor(propose: Proposer) {
+    agent ??= createAgent({
+      goal: `Apply for "${jobTitle ?? "this job"}"${planCtx.employer ? ` at ${planCtx.employer}` : ""}`,
+      inWorkflow: () => inWorkflow,
+      situation: () => situation,
+      consentApproved,
+      writeAnswer: (p, f) => writeOne(p, f),
+      judge:
+        planCtx.profile.application_defaults.ai_answer_writing === "on" && deps.answerWriter
+          ? async (value, options) => {
+              const w = await deps.answerWriter!().catch(() => null);
+              return w ? ((await judgeOption(value, options, "other", w))?.pick ?? null) : null;
+            }
+          : null,
+      planCtx,
+      resume: resumeFile,
+      propose,
+      autofill: async (p) => {
+        await observe(p);
+        const rows = await fillRows(rowsCtx(p));
+        const { questions } = await fillPage(p, { uploadInPlan: true });
+        if (await commitOpenSections(p)) await set({}, "sections_saved");
+        agentOpen = [...rows.questions, ...questions.filter((q) => !rows.questions.some((r) => r.key === q.key))].filter((q) => q.required);
+        return { verified: allFilled.filter((f) => f.verified).length, open: agentOpen.map((q) => q.label.slice(0, 80)) };
+      },
+      guard: checkCancel,
+      event: async (code, params) => {
+        await set({ filled: allFilled }, code, params);
+      },
+      record: (f) => {
+        allFilled.push(f);
+      },
+      trace: (e) => {
+        // Structure and the model's reasoning only (labels, headings, actions) — never applicant values.
+        if (process.env.CA_APPLY_DEBUG) process.stderr.write(`AGENT ${JSON.stringify(e)}\n`);
+        try {
+          const dir = deps.evidenceDir(attemptId);
+          mkdirSync(dir, { recursive: true, mode: 0o700 });
+          appendFileSync(join(dir, "agent-trace.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), ...e })}\n`, { mode: 0o600 });
+        } catch {
+          /* best effort */
+        }
+      },
+    });
+    return agent;
+  }
+
+  /**
+   * A page the built-in flows do not understand: the runtime browser agent (browser-agent.ts). The
+   * authorised GPT provider proposes one action at a time from a description of the page; Career Atlas
+   * validates it (never Submit, sign-in, passwords, declarations or identity answers), enters profile
+   * values itself, executes it and verifies the result. Its "this is the final step" is checked here:
+   * only a page that really shows Submit goes on to the usual approval gate.
+   */
+  async function agentOrStop(page: Page, fromIndeed: boolean): Promise<AttemptState> {
+    const propose = deps.browserAgent && !agentRan ? await deps.browserAgent().catch(() => null) : null;
+    if (!propose) {
       if (fromIndeed && visible) return employerManual(page);
+      // Never "done" while the job posting is still what the page shows.
+      if (lastState === "posting") {
+        await shot(page, "posting");
+        return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: "still_on_posting" });
+      }
       throw new Stop("unsupported_site");
     }
+    agentRan = true;
+    await set({ state: "filling", stage: "ai_agent" }, "agent_started");
+    const out = await agentFor(propose).run(page, deps.agentMaxSteps ?? 30);
+    page = out.page;
+    await set({ filled: allFilled }, "agent_finished", { status: out.status, steps: out.steps });
+    const s = await signals(page);
+    if (s.challenge) return visible ? manual(page, null, "captcha") : pause("captcha");
+    const m = await observe(page);
+    const state = pageState(m, { inWorkflow, login: s.password });
+    lastState = state;
+    if (state === "application" || state === "questions") await milestone("form_found");
+    const questions = [...out.questions, ...agentOpen.filter((q) => !out.questions.some((x) => x.key === q.key))];
+    // "Final step" is checked, not believed: reviewPage needs the application's own Submit on the page.
+    if (!questions.some((q) => q.required) && (out.status === "review_ready" || m.submits.length > 0)) return reviewPage(page);
+    if (s.password) return visible ? manual(page, null, "login_required") : pause("login_required", [], { stage: "sign_in" });
+    await shot(page, "agent");
+    if (questions.length) return visible ? manual(page, null, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
     if (fromIndeed && visible) return employerManual(page);
-    throw new Stop("unsupported_site");
+    return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: state === "posting" ? "still_on_posting" : `agent_${out.status}` });
+  }
+
+  /** A generic page that shows the application's final Submit: stop for approval, or submit when authorised. */
+  async function reviewPage(page: Page): Promise<AttemptState> {
+    await shot(page, "filled");
+    // Fail closed: the final step counts only inside an application this run actually reached, and the
+    // Submit must be that application's own (inside its scope, not a widget's, exactly one form).
+    if (!milestones.has("form_found")) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: lastState === "posting" ? "still_on_posting" : "application_form_not_found" });
+    await observe(page);
+    const found = Number(await page.evaluate(MARK_SUBMIT).catch(() => 0));
+    if (found !== 1) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: found === 0 ? "submit_not_in_application" : "submit_ambiguous" });
+    await milestone("review_reached");
+    const submit = page.locator('[data-ca-submit="1"]').first();
+    if (!(await submit.isVisible().catch(() => false))) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page");
+    const gate = await submitGate(page, null);
+    if (gate) return gate;
+    const posts = trackSubmissions(page);
+    await markSubmitting();
+    await submit.click();
+    const outcome = await waitForOutcome(page, null, posts, t.afterSubmit);
+    if (outcome.kind === "verified") return verified(page, outcome.text, outcome.url, "page");
+    if (outcome.kind === "validation_errors") {
+      await shot(page, "rejected");
+      return visible ? manual(page, null, "validation_errors") : pause("validation_errors", [], { errorCode: "validation_errors", errorMessage: outcome.errors.join(" | ").slice(0, 600) });
+    }
+    if (outcome.kind === "challenge" && !posts.posted()) return visible ? manual(page, null, "captcha") : pause("captcha");
+    if (visible) return manual(page, null, outcome.kind === "email_code" ? "login_required" : "unexpected_page");
+    return unconfirmed(page, outcome.kind === "email_code" ? "verification_code_required" : outcome.kind === "challenge" ? "captcha_after_submit" : "no_confirmation");
   }
 
   /** The application form itself: Workday wizard, or a single-page Greenhouse / Lever form. */
@@ -413,7 +852,11 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
 
     for (let step = 0; step < MAX_FORM_STEPS; step++) {
       await checkCancel();
-      const { questions } = await fillPage(page, { uploadInPlan: true });
+      // Repeated employment / education blocks first (entry by entry), then the rest of the form.
+      const rows = await fillRows(rowsCtx(page));
+      const page1 = await fillPage(page, { uploadInPlan: true });
+      let questions = [...rows.questions, ...page1.questions.filter((q) => !rows.questions.some((r) => r.key === q.key))];
+      if (questions.length) questions = await resolveInteractions(page, questions);
       if (questions.length) {
         await shot(page, `step-${step + 1}`);
         return visible ? manual(page, ats, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
@@ -471,7 +914,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     for (let i = 0; i < MAX_WORKDAY_STEPS; i++) {
       await checkCancel();
       await declineCookies(page);
-      let st = await wdSettle(page);
+      // Recognised wizard state, or the page as it is once it stops changing (no fixed long wait).
+      let st = await wdSettleStable(page, 15_000);
       if (entered.result === "no_apply" && i === 0 && st.kind === "unknown") throw new Stop("form_not_found");
       if ((await signals(page)).challenge) {
         if (!visible) return pause("captcha");
@@ -508,7 +952,21 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       }
       if (/already applied/i.test(st.errors.join(" "))) throw new Stop("already_applied_on_site");
       if (st.kind === "review") break;
-      if (st.kind !== "step") return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page");
+      // A page not recognised yet: Workday may still be drawing a heavy step (My Experience after resume
+      // parsing) — wait longer before judging; then record what the page shows (labels only), never stop silently.
+      if (st.kind !== "step" && i > 0) st = await wdSettleStable(page, 45_000);
+      if (st.kind === "review") break;
+      if (st.kind !== "step") {
+        // The adapter does not recognise this page: the AI takes it, and the adapter resumes when a
+        // Workday step (or sign-in / review) is back.
+        const t3 = await aiTakeover(page, `The Workday adapter expected an application step (progress bar + Next), a sign-in page or the review page, but recognises none of them here. Work out what this page is and what it needs, and get the application to its next step.`, async (p) => ["step", "review", "auth", "verify_email"].includes((await wdState(p)).kind));
+        page = t3.page;
+        if (t3.result === "resolved") continue;
+        if (t3.result === "review" && (await wdState(page)).kind === "review") break;
+        await diagnose(page, "workday-page", (await scan(page)).filter((f) => f.visible), `unrecognised:${st.kind}:ai_${t3.result}`);
+        if (t3.questions.length) return visible ? manual(page, "workday", reasonFor(t3.questions), t3.questions) : pause(reasonFor(t3.questions), t3.questions);
+        return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: t3.result === "unavailable" ? "workday_page_unrecognised" : "ai_could_not_resolve" });
+      }
       // After signing in, Workday sometimes drops the "Autofill with Resume" choice and opens the
       // empty form instead: go back to the autofill address once, so the resume is uploaded and parsed.
       if (signedInNow && entered.mode === "autofill" && entered.url && !resumeHandled && !reentered && !(await isAutofillUpload(page)) && !(await page.locator('input[type="file"]').count())) {
@@ -544,8 +1002,9 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         }
         const sections = await fillWorkdaySections(page);
         const generic = await fillPage(page, { uploadInPlan: false, parsedMode });
-        const questions = [...sections.questions, ...generic.questions];
+        let questions = [...sections.questions, ...generic.questions];
         fillingStep = null;
+        if (questions.length) questions = await resolveInteractions(page, questions);
         if (questions.length) {
           await shot(page, `step-${st.index ?? i + 1}`);
           return visible ? manual(page, "workday", reasonFor(questions), questions) : pause(reasonFor(questions), questions);
@@ -561,11 +1020,27 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       }
       // Save and Continue. Workday validates on the server; errors keep us on the same step.
       if (!(await clickNext(page, t.stepReady))) {
+        // The "step" was the account page drawn late (sign-in / create account / verification): handled as such.
+        const now = await wdState(page);
+        if (now.kind === "auth" || now.kind === "verify_email") {
+          lastStep = "";
+          continue;
+        }
+        const t1 = await aiTakeover(page, `The Workday step "${st.step ?? "?"}" was filled but its Save and Continue / Next button never became available. Find what still blocks it (an unfamiliar control, an unanswered required item, a pop-up) and continue to the next step.`, async (p) => {
+          const x = await wdState(p);
+          return x.kind === "review" || (x.kind === "step" && `${x.step ?? ""}|${x.pageId ?? ""}` !== name);
+        });
+        page = t1.page;
+        if (t1.result === "resolved" || t1.result === "review") {
+          lastStep = "";
+          continue;
+        }
         await shot(page, `step-${st.index ?? i + 1}-stuck`);
+        if (t1.questions.length) return visible ? manual(page, "workday", reasonFor(t1.questions), t1.questions) : pause(reasonFor(t1.questions), t1.questions);
         return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "next_not_available" });
       }
       await sleep(800);
-      st = await wdSettle(page);
+      st = await wdSettleStable(page, 15_000);
       const after = `${st.step ?? ""}|${st.pageId ?? ""}`;
       if (after === name && st.kind === "step") {
         // A hidden file input with an uploaded file listed next to it is not "empty".
@@ -575,11 +1050,27 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           // Exactly the fields the site rejected — the rest of the application is kept as is.
           const qs = fields.map((f) => question(f, f.group ? `${f.group}:${f.groupIndex}:${f.wdField}` : fieldKey(f), "not_accepted", false, st.errors.find((e) => norm(e).includes(norm(f.label).slice(0, 20))) ?? st.errors.join(" | ").slice(0, 300), qmOf(f)));
           await shot(page, `step-${st.index ?? i + 1}-errors`);
-          if (qs.length) return pause("missing_information", qs, { errorMessage: st.errors.join(" | ").slice(0, 600) });
+          // The site rejected values: the AI tries the controls another way before anything is asked.
+          const left = qs.length ? await resolveInteractions(page, qs) : qs;
+          if (qs.length && !left.length) continue;
+          if (left.length) return pause("missing_information", left, { errorMessage: st.errors.join(" | ").slice(0, 600) });
           return pause("validation_errors", [], { errorCode: "step_rejected", errorMessage: st.errors.join(" | ").slice(0, 600) });
         }
         // No error shown and still on the same step: the site may be saving; never loop endlessly.
-        if (++stuck >= 2) return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+        if (++stuck >= 2) {
+          const t2 = await aiTakeover(page, `Save and Continue was pressed on the Workday step "${st.step ?? "?"}" twice, no error is shown, and the step did not change. Find what the page still needs and continue to the next step.`, async (p) => {
+            const x = await wdState(p);
+            return x.kind === "review" || (x.kind === "step" && `${x.step ?? ""}|${x.pageId ?? ""}` !== name);
+          });
+          page = t2.page;
+          if (t2.result === "resolved" || t2.result === "review") {
+            stuck = 0;
+            lastStep = "";
+            continue;
+          }
+          if (t2.questions.length) return visible ? manual(page, "workday", reasonFor(t2.questions), t2.questions) : pause(reasonFor(t2.questions), t2.questions);
+          return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+        }
       } else stuck = 0;
     }
 
@@ -685,11 +1176,20 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     if (visible && (await signInTriedBefore())) return "user";
     const tenant = tenantOf(page.url());
     if (acc.blocked(tenant, email)) return pause("login_required", [], { stage: "workday_sign_in", errorCode: "sign_in_failed_recently" });
+    // The step may be named by the progress bar before its form is drawn: nothing is typed until it is.
+    if (!(await wdAuthReady(page, 30_000))) return "user";
     const has = await acc.hasCredential(tenant, email);
-    if (has && !tried.signIn) {
+    const recorded = !!acc.record(tenant, email);
+    // Shared password on a site Career Atlas has no record of: when creating accounts is authorised, create
+    // first (an existing account answers "exists" → one sign-in with the same password); else sign in.
+    const createFirst = !recorded && acc.settings().mode === "shared" && row!.accountMode === "create";
+    // One sign-in try with the saved password. The site is recorded first, so a failed try is remembered
+    // and never repeated — also for an account the owner made by hand with the shared password.
+    const signIn = async (): Promise<AttemptState | "continue" | "user"> => {
       tried.signIn = true;
       const pw = await acc.password(tenant, email);
       if (!pw) return "user";
+      if (!acc.record(tenant, email)) await acc.save(tenant, email, pw, "shared", "pending");
       await set({ stage: "workday_sign_in" }, "workday_sign_in_attempt", { tenant });
       const t0 = Date.now();
       let r = await workdaySignIn(page, email, pw);
@@ -709,8 +1209,9 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       if (r === "verify") return pause("login_required", [], { stage: "workday_verify_email", errorCode: "verification_required" });
       if (r === "captcha") return pause("captcha");
       return pause("login_required", [], { stage: "workday_sign_in", errorCode: "sign_in_unclear" });
-    }
-    if (!has && row!.accountMode === "create" && !tried.create) {
+    };
+    if (has && !createFirst && !tried.signIn) return signIn();
+    if ((!has || createFirst) && row!.accountMode === "create" && !tried.create) {
       tried.create = true;
       const terms = await accountTermsLabel(page);
       const termsKey = `account_terms:${tenant}`;
@@ -738,6 +1239,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         }
         return "continue";
       }
+      // The account already exists and the owner's shared password is used everywhere: one sign-in with it.
+      if (r === "exists" && np.mode === "shared" && !tried.signIn) return signIn();
       // Not created: the unused generated password is removed again (a shared one stays the user's).
       if (r === "exists" || r === "policy" || r === "captcha") {
         if (np.mode === "unique") await acc.forget(tenant, email);
@@ -771,8 +1274,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
    * already holds correctly are kept (never erased and re-typed); a pre-filled value that My Profile
    * contradicts is corrected; pre-filled values My Profile can't confirm are kept and listed for Review.
    */
-  async function fillPage(page: Page, opts: { uploadInPlan: boolean; parsedMode?: boolean }): Promise<{ questions: PendingQuestion[] }> {
-    const questions: PendingQuestion[] = [];
+  async function fillPage(page: Page, opts: { uploadInPlan: boolean; parsedMode?: boolean; retried?: boolean }): Promise<{ questions: PendingQuestion[] }> {
+    let questions: PendingQuestion[] = [];
     const handled = new Set<string>();
     let uploaded = false;
     for (let pass = 0; pass < 3; pass++) {
@@ -780,6 +1283,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       if (!opts.uploadInPlan) fields = fields.filter((f) => f.control !== "file");
       const fresh = fields.filter((f) => f.visible && !handled.has(fieldKey(f)));
       if (!fresh.length) break;
+      planCtx.consent = { accuracyVerified: accuracyVerified(), inspectedTerms: await inspectTerms(page, fresh) };
       let plan = planForm(fresh, planCtx);
       const upload = plan.actions.find((a) => a.kind === "upload");
       const alreadyUploaded = fields.some((f) => f.control === "file" && (Array.isArray(f.value) ? f.value : [String(f.value ?? "")]).some((n) => norm(n) === norm(resumeFile.name)));
@@ -813,6 +1317,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           await checkCancel();
           await checkStep();
           if (list[i].kind === "upload") continue;
+          await progress(list[i].label || list[i].key);
           list[i] = (await refreshAction(page, list[i])) ?? list[i];
           await perform(page, list[i]).catch(() => {});
         }
@@ -885,8 +1390,14 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       for (let i = questions.length - 1; i >= 0; i--) if (verifiedKeys.has(questions[i].key)) questions.splice(i, 1);
       // Pre-filled by the site (resume parsing) and not confirmed by My Profile: kept, shown at Review.
       const planned = new Set([...plan.actions.map((a) => a.key), ...plan.kept.map((k) => k.key), ...plan.questions.map((q) => q.key)]);
+      // An accuracy declaration on the same page as the values it covers: authorised, but only once those
+      // values are verified — planned again on the next pass, after this pass's values were checked.
+      const afterVerification = new Set(
+        plan.questions.filter((q) => q.reason === "legal" && planCtx.profile.application_defaults.standing_consents?.accuracy_declaration === true && /not authorised: accuracy_declaration$/.test(q.hint ?? "") && !planCtx.consent?.accuracyVerified).map((q) => q.key),
+      );
       for (const f of now) {
         const key = fieldKey(f);
+        if (afterVerification.has(key)) continue;
         const action = plan.actions.find((a) => a.key === key);
         // A value the page did not keep is tried again on the next pass (resume parsing often re-renders).
         if (action && !ok.has(action.ref)) continue;
@@ -910,6 +1421,37 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         const labels = await readMenu(page, f.ref).catch(() => []);
         if (labels.length) q.options = labels;
       }
+      // Options read only now (the menu did not open while planning): those questions are planned again
+      // with their real options — an acknowledgment the standing consents cover, a statement option — and
+      // entered, verified, and taken off the list. Anything still unanswered stays a question.
+      const retry = questions.filter((q) => q.reason === "missing" && q.options.length);
+      if (retry.length) {
+        const cur = await scan(page);
+        const fs = retry.flatMap((q) => {
+          const f = cur.find((x) => fieldKey(x) === q.key && x.visible);
+          return f ? [{ ...f, options: q.options.map((l) => ({ label: l, value: l })) }] : [];
+        });
+        planCtx.consent = { accuracyVerified: accuracyVerified(), inspectedTerms: planCtx.consent?.inspectedTerms };
+        const p2 = planForm(fs, planCtx);
+        for (const a of p2.actions) await perform(page, a).catch(() => {});
+        await sleep(300);
+        const ok = verify(p2.actions, await scan(page), resumeFile);
+        for (const a of p2.actions.filter((x) => ok.has(x.ref))) {
+          questions = questions.filter((q) => q.key !== a.key);
+          allFilled.push({ label: (a.label || a.key).slice(0, 300), source: a.source, verified: true, status: "filled" });
+        }
+      }
+    }
+    // Open questions the profile can answer in writing (a project, the role, the applicant's experience):
+    // drafted from verified facts, checked, filled and verified — listed at review.
+    questions = await writeOpenAnswers(page, questions);
+    // A value the site cleared after it was verified (a re-render or a reset), or a control that appeared
+    // or became enabled only after the passes (State after Country): one more round — only then a question.
+    if (!opts.retried) {
+      await sleep(700);
+      const verifiedLabels = new Set(allFilled.filter((x) => x.verified).map((x) => x.label));
+      const again = (await scan(page)).filter((f) => f.visible && f.required && isEmpty(f.value) && !f.group && f.control !== "file" && (!handled.has(fieldKey(f)) || verifiedLabels.has((f.label || fieldKey(f)).slice(0, 300))));
+      if (again.length) return fillPage(page, { ...opts, retried: true });
     }
     // Before moving on: every visible required field must have a value (nothing left for the site to reject).
     // A second copy of the same control (Dayforce renders some inputs twice) does not count when the other holds the value.
@@ -922,6 +1464,196 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     }
     await set({ filled: allFilled }, "filled", { count: allFilled.filter((x) => x.verified).length, total: allFilled.length });
     return { questions };
+  }
+
+  /**
+   * One open question answered by the answer engine (the agent's write_answer tool): written once per
+   * question from verified records (owner opt-in), filled, verified, listed at review.
+   */
+  async function writeOne(page: Page, f: FieldDescriptor): Promise<{ ok: boolean; note: string }> {
+    if (planCtx.profile.application_defaults.ai_answer_writing !== "on") return { ok: false, note: "AI answer writing is off — ask_user" };
+    const oq = openQuestion(f.label, f.maxLength);
+    if (!oq.writable) return { ok: false, note: "this asks for a personal fact or decision — ask_user" };
+    const key = fieldKey(f);
+    const store = ((planCtx.answers.__generated as Record<string, { label: string; text: string; flags: string[] }> | undefined) ??= {});
+    let draft = store[key]?.label === f.label ? store[key] : null;
+    if (!draft) {
+      const w = deps.answerWriter ? await deps.answerWriter().catch(() => null) : null;
+      if (!w) return { ok: false, note: "no AI provider for writing — ask_user" };
+      const d = await writeAnswer(oq, planCtx.profile, { title: jobTitle, employer: planCtx.employer ?? null, description: jobDescription }, w).catch(() => null);
+      if (!d) return { ok: false, note: "the applicant's records do not support an answer — ask_user" };
+      draft = { label: f.label, text: d.text, flags: d.flags };
+      store[key] = draft;
+      await set({ answers: planCtx.answers }, "answer_written", { words: d.text.split(/\s+/).length, flags: d.flags.length });
+    }
+    const ok = await textSet(page, async () => {
+      const x = (await scan(page)).find((y) => y.visible && fieldKey(y) === key);
+      return x ? { f: x, loc: page.locator(`[data-ca-ref="${x.ref}"]`) } : null;
+    }, draft.text);
+    allFilled = allFilled.filter((x) => !(x.status === "generated" && x.label === f.label.slice(0, 300)));
+    allFilled.push({ label: f.label.slice(0, 300), source: "ai_generated", verified: ok, status: "generated", value: draft.text.slice(0, 6000), flags: draft.flags });
+    return ok ? { ok: true, note: "answer written from verified records, filled and kept by the page" } : { ok: false, note: "the page did not keep the whole answer" };
+  }
+
+  /**
+   * AI TAKE-OVER — the one mechanism every flow uses when its own expectation fails (an unrecognised page,
+   * a step that does not advance, a control that rejected the profile's answer). The agent sees the page
+   * and `why` (what the flow expected — never applicant values) and acts with Career Atlas's trusted tools
+   * until `done(page)` says the flow can continue, or it reports what only the applicant can supply, or a
+   * blocker. Bounded; the agent's memory of this attempt is kept between take-overs.
+   */
+  async function aiTakeover(page: Page, why: string, done: (p: Page) => Promise<boolean>, maxSteps = 12): Promise<{ result: "resolved" | "review" | "needs_user" | "blocked" | "unavailable"; page: Page; questions: PendingQuestion[] }> {
+    const propose = deps.browserAgent ? await deps.browserAgent().catch(() => null) : null;
+    if (!propose) return { result: "unavailable", page, questions: [] };
+    const a = agentFor(propose);
+    a.reset();
+    situation = why;
+    takeovers.count++;
+    const before = a.questions.length;
+    // Within this attempt, a page that looks the same as one the AI already solved is replayed through the
+    // same validated tools — no model call; if the replay does not get there, the AI decides as usual.
+    const state = ((planCtx.answers.__state as { playbook?: Record<string, PlaybookStep[]> } | undefined) ??= {});
+    const playbook = (state.playbook ??= {});
+    const sig = pageSignature(await observe(page));
+    if (playbook[sig]?.length) {
+      for (const d of playbook[sig]) {
+        const r = await a.replay(page, d);
+        page = r.page;
+        if (!r.ok) break;
+      }
+      if (await done(page).catch(() => false)) {
+        takeovers.resolved++;
+        await set({}, "ai_takeover", { why: why.slice(0, 120), replayed: playbook[sig].length });
+        await set({ stage: "filling" }, "ai_takeover_result", { result: "resolved" });
+        situation = null;
+        return { result: "resolved", page, questions: [] };
+      }
+    }
+    await set({ stage: "ai_takeover" }, "ai_takeover", { why: why.slice(0, 120) });
+    let result: "resolved" | "review" | "needs_user" | "blocked" = "blocked";
+    const learned: PlaybookStep[] = [];
+    try {
+      for (let k = 0; k < maxSteps; k++) {
+        if (await done(page).catch(() => false)) {
+          result = "resolved";
+          break;
+        }
+        const r = await a.step(page);
+        if (r.kind === "acted") {
+          page = r.page;
+          if (r.ok) learned.push({ action: r.action.action, target: r.target, ...("option" in r.action ? { option: r.action.option } : {}), ...("fact" in r.action ? { fact: r.action.fact } : {}), ...("checked" in r.action ? { checked: r.action.checked } : {}) });
+        } else if (r.kind === "finish" || r.kind === "stop") {
+          result = r.outcome.status === "review_ready" ? "review" : r.outcome.status === "needs_user" ? "needs_user" : "blocked";
+          break;
+        }
+      }
+      if (result === "blocked" && (await done(page).catch(() => false))) result = "resolved";
+    } finally {
+      situation = null;
+    }
+    if (result === "resolved" || result === "review") takeovers.resolved++;
+    // What worked is kept with the attempt (structure only: actions and the visible texts they targeted).
+    if (result === "resolved" && learned.length) playbook[sig] = learned.slice(0, 12);
+    await set({ stage: "filling", ...(result === "resolved" && learned.length ? { answers: planCtx.answers } : {}) }, "ai_takeover_result", { result });
+    return { result, page, questions: a.questions.slice(before) };
+  }
+
+  /**
+   * Before asking the applicant: questions caused by the PAGE (a control that rejected the profile's answer,
+   * no matching option, an unsupported control) go to the AI first; only what it cannot resolve — and
+   * genuine facts / decisions — remain for the applicant.
+   */
+  async function resolveInteractions(page: Page, questions: PendingQuestion[]): Promise<PendingQuestion[]> {
+    const structural = questions.filter((q) => blockerOf(q) === "interaction");
+    if (!structural.length) return questions;
+    const keys = new Set(structural.map((q) => q.key));
+    // Still open: empty and required, or marked invalid by the site (a rejected value is not empty).
+    const open = async (p: Page) => (await scan(p)).filter((f) => f.visible && keys.has(fieldKey(f)) && (f.invalid || (isEmpty(f.value) && f.required)));
+    const why = `Career Atlas could not enter the applicant's answer into these controls (their behaviour is unfamiliar): ${structural.map((q) => `"${q.label.slice(0, 80)}" (${q.reason})`).join("; ")}. Operate them with read_options / pick_from_profile / choose_from_profile, then stop — do not move to another step.`;
+    const t = await aiTakeover(page, why, async (p) => (await open(p)).length === 0, 10);
+    if (t.result === "unavailable") return questions;
+    const left = new Set((await open(t.page)).map((f) => fieldKey(f)));
+    return [...questions.filter((q) => !keys.has(q.key) || left.has(q.key)), ...t.questions.filter((q) => !questions.some((x) => x.key === q.key))];
+  }
+
+  /** An accuracy declaration may be given only over values that were all verified on the page (none parsed, none flagged). */
+  function accuracyVerified(): boolean {
+    return allFilled.length > 0 && allFilled.every((f) => (f.verified || f.status === "kept" || f.status === "skipped") && f.status !== "parsed" && !(f.flags && f.flags.length));
+  }
+
+  /**
+   * Terms a standing consent may accept must have been readable: the terms linked from the checkbox are
+   * fetched (GET, read-only) and count as inspected only when they load with real content.
+   */
+  async function inspectTerms(page: Page, fields: FieldDescriptor[]): Promise<Set<string>> {
+    const out = new Set<string>();
+    if (planCtx.profile.application_defaults.standing_consents?.routine_terms !== true) return out;
+    for (const f of fields.filter((x) => x.control === "checkbox" && /\bterms\b/i.test(x.label))) {
+      const href = await page
+        .locator(`[data-ca-ref="${f.ref}"]`)
+        .evaluate((el) => {
+          const box = el.closest("label") ?? (el.id ? el.ownerDocument.querySelector(`label[for="${el.id}"]`) : null) ?? el.parentElement;
+          return box?.querySelector("a[href]")?.getAttribute("href") ?? null;
+        })
+        .catch(() => null);
+      if (!href) continue;
+      try {
+        const res = await page.context().request.get(new URL(href, page.url()).toString(), { timeout: 8000 });
+        if (res.ok() && (await res.text()).replace(/<[^>]+>/g, " ").trim().length > 300) out.add(fieldKey(f));
+      } catch {
+        /* not inspected → not accepted by standing consent */
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The answer engine for open questions (answer-engine.ts). Only with the owner's "AI answer writing" on;
+   * the evidence sent is limited to what the question needs. A draft is written once per question and kept
+   * with the attempt (a re-run fills the same text); it is filled only if the page keeps the whole text.
+   */
+  async function writeOpenAnswers(page: Page, questions: PendingQuestion[]): Promise<PendingQuestion[]> {
+    if (planCtx.profile.application_defaults.ai_answer_writing !== "on" || !questions.length) return questions;
+    const store = ((planCtx.answers.__generated as Record<string, { label: string; text: string; flags: string[] }> | undefined) ??= {});
+    let writer: Writer | null | undefined;
+    const fields = await scan(page);
+    const rest: PendingQuestion[] = [];
+    for (const q of questions) {
+      const f = fields.find((x) => x.visible && fieldKey(x) === q.key);
+      const textual = !!f && (f.control === "text" || f.control === "textarea") && !f.group && !f.demographic;
+      const oq = f ? openQuestion(q.label, f.maxLength) : null;
+      // Only real writing questions: open-ended by the planner (or a free-text box asking to describe / explain).
+      const asks = q.reason === "open_ended" || (q.reason === "missing" && f?.control === "textarea" && oq?.topic !== "general");
+      if (!textual || !oq?.writable || !asks || q.sensitive) {
+        rest.push(q);
+        continue;
+      }
+      let draft = store[q.key]?.label === q.label ? store[q.key] : null;
+      if (!draft) {
+        writer ??= deps.answerWriter ? await deps.answerWriter().catch(() => null) : null;
+        if (!writer) {
+          rest.push(q);
+          continue;
+        }
+        await progress(q.label);
+        const d = await writeAnswer(oq, planCtx.profile, { title: jobTitle, employer: planCtx.employer ?? null, description: jobDescription }, writer).catch(() => null);
+        if (!d) {
+          rest.push(q);
+          continue;
+        }
+        draft = { label: q.label, text: d.text, flags: d.flags };
+        store[q.key] = draft;
+        await set({ answers: planCtx.answers }, "answer_written", { words: d.text.split(/\s+/).length, flags: d.flags.length });
+      }
+      const ok = await textSet(page, async () => {
+        const x = (await scan(page)).find((y) => y.visible && fieldKey(y) === q.key);
+        return x ? { f: x, loc: page.locator(`[data-ca-ref="${x.ref}"]`) } : null;
+      }, draft.text);
+      allFilled = allFilled.filter((x) => !(x.status === "generated" && x.label === q.label.slice(0, 300)));
+      allFilled.push({ label: q.label.slice(0, 300), source: "ai_generated", verified: ok, status: "generated", value: draft.text.slice(0, 6000), flags: draft.flags });
+      if (!ok) rest.push({ ...q, reason: "not_accepted" });
+    }
+    return rest;
   }
 
   /** Workday sections (work, education, websites, languages, skills, source) — see wd-sections.ts. */
@@ -1030,7 +1762,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   /** Followed from Indeed to a site Career Atlas can't fill: the user applies; we watch for a confirmation. */
   async function employerManual(page: Page): Promise<AttemptState> {
     await set({ state: "needs_review", intervention: "employer_site_manual", route: "employer_manual", stage: "manual" }, "employer_site_manual", { host: hostOf(page.url()) });
-    const posts = trackSubmissions(page);
+    const posts = await trackUserSubmission(page);
     const until = Date.now() + t.manual;
     while (Date.now() < until) {
       if (page.isClosed()) break;
@@ -1053,7 +1785,10 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
    */
   async function manual(page: Page, ats: Ats | null, reason: InterventionReason, questions: PendingQuestion[] = []): Promise<AttemptState> {
     await set({ state: "needs_review", intervention: "manual_in_browser", questions, stage: "manual" }, "manual_handoff", { reason });
-    const posts = trackSubmissions(page);
+    const posts = await trackUserSubmission(page);
+    // What the page already says at hand-off is not a confirmation of anything the user did next.
+    const baseline = await signals(page).then((x) => ({ text: successSentence(x.text), url: stripQuery(x.url) })).catch(() => ({ text: null as string | null, url: "" }));
+    const fresh = (text: string | null, url: string) => !!text && (text !== baseline.text || url !== baseline.url);
     const until = Date.now() + t.manual;
     while (Date.now() < until) {
       if (page.isClosed()) break; // the user closed the window
@@ -1074,7 +1809,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         const s = await signals(page).catch(() => null);
         if (s) {
           const o = classifyAfterSubmit(ats, s, posts.posted());
-          if (o.kind === "verified") return verified(page, o.text, o.url, "page");
+          if (o.kind === "verified" && fresh(o.text, o.url)) return verified(page, o.text, o.url, "page");
         }
       }
       await sleep(1000);
@@ -1111,6 +1846,36 @@ function submitButton(page: Page, ats: Ats | null) {
 }
 
 /** Watches for a form submission request (POST/PUT to the site itself, not analytics). */
+/**
+ * In a window the USER operates: a submission counts only after the user clicked a Submit-type
+ * control AND the site then received a request. Sites keep sending background requests (analytics,
+ * autosave) — on their own those never mean "submitted".
+ */
+async function trackUserSubmission(page: Page) {
+  let clickedAt = 0;
+  let postAfterClick = false;
+  await page.exposeBinding("__caSubmitClick", () => {
+    clickedAt = Date.now();
+  }).catch(() => {});
+  const install = String.raw`(() => { if (window.__caSubmitWatch) return; window.__caSubmitWatch = true;
+    document.addEventListener('click', (e) => {
+      const b = e.target && e.target.closest && e.target.closest('button, input[type=submit], input[type=button], [role=button], a');
+      if (!b) return;
+      const t = (b.innerText || b.value || b.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      if (/^(submit|submit (my |your )?application|send( my)? application|complete( my)? application|finish( and submit)?|confirm and submit)$/i.test(t) && window.__caSubmitClick) window.__caSubmitClick();
+    }, true); })()`;
+  await page.addInitScript(install).catch(() => {});
+  await page.evaluate(install).catch(() => {});
+  const host = hostOf(page.url());
+  const onReq = (req: { method(): string; url(): string }) => {
+    if (!clickedAt || !["POST", "PUT"].includes(req.method())) return;
+    const h = hostOf(req.url());
+    if (h && (h === host || /(^|\.)greenhouse\.io$|(^|\.)lever\.co$|\.myworkdayjobs\.com$|\.myworkday\.com$|\.dayforcehcm\.com$/.test(h))) postAfterClick = true;
+  };
+  page.on("request", onReq);
+  return { posted: () => postAfterClick, stop: () => page.off("request", onReq) };
+}
+
 function trackSubmissions(page: Page) {
   let seen = false;
   const host = hostOf(page.url());

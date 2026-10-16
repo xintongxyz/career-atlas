@@ -205,3 +205,59 @@ describe("Workday self-identification", () => {
     expect(p.questions.map((q) => q.reason)).toEqual(["demographic", "demographic"]);
   });
 });
+
+describe("preferred contact method (Application Defaults)", () => {
+  const withPref = (m: "email" | "phone" | "text" | null, phone_type: "mobile" | null = "mobile") => profileSchema.parse({ ...profile, application_defaults: { phone_type, preferred_contact_method: m } });
+  const opts = (...l: string[]) => l.map((x, i) => ({ value: String(i), label: x }));
+  it("selects Email from the saved preference, whatever the wording", () => {
+    for (const [label, options, want] of [
+      ["Preferred Contact Method", opts("Phone", "Email", "Text Message"), "Email"],
+      ["Preferred contact type*", opts("Mobile", "Home", "E-mail"), "E-mail"],
+      ["How would you like us to contact you?", opts("Call me", "Contact me by email"), "Contact me by email"],
+      ["Preferred method of communication", opts("Telephone", "Email address", "SMS"), "Email address"],
+    ] as const) {
+      const p = planForm([f({ control: "select", label, options: [...options], required: true })], ctx({ profile: withPref("email") }));
+      expect(p.questions).toEqual([]);
+      expect(p.actions[0]).toMatchObject({ kind: "choose", values: [want] });
+    }
+  });
+  it("is never inferred from the phone type (unknown preference → asked when required)", () => {
+    const p = planForm([f({ control: "select", label: "Preferred Contact Method", options: opts("Mobile", "Email"), required: true })], ctx({ profile: withPref(null, "mobile") }));
+    expect(p.actions).toEqual([]);
+    expect(p.questions[0]?.label).toBe("Preferred Contact Method");
+  });
+  it("phone type stays its own answer", () => {
+    const p = planForm([f({ control: "select", label: "Phone Device Type", options: opts("Mobile", "Home", "Email"), required: true })], ctx({ profile: withPref("email", "mobile") }));
+    expect(p.actions[0]).toMatchObject({ kind: "choose", values: ["Mobile"] });
+  });
+  it("Phone never matches Text and vice versa", () => {
+    const p = planForm([f({ control: "radio", label: "Preferred Contact Method", options: opts("Text", "Email"), required: true })], ctx({ profile: withPref("phone") }));
+    expect(p.actions).toEqual([]);
+  });
+});
+
+describe("profile written in Chinese, form in English", () => {
+  it("countries and provinces are searched by their English name", async () => {
+    const { englishCountry, englishRegion, matchOptionSemantic } = await import("../../src/shared/apply-semantic");
+    expect(englishCountry("加拿大")).toBe("Canada");
+    expect(englishCountry("中华人民共和国")).toBe("China");
+    expect(englishCountry("CA")).toBe("Canada");
+    expect(englishCountry("Atlantis")).toBe("Atlantis"); // unknown: unchanged, never guessed
+    expect(englishRegion("安大略省")).toBe("Ontario");
+    expect(englishRegion("BC")).toBe("British Columbia");
+    expect(englishRegion("Newfoundland and Labrador")).toBe("Newfoundland and Labrador");
+    expect(matchOptionSemantic([{ value: "a", label: "🇺🇸 +1 United States of America" }, { value: "b", label: "🇨🇦 +1 Canada" }], "加拿大", "country")?.label).toBe("🇨🇦 +1 Canada");
+    const zh = profileSchema.parse({ based_in: { city: "Toronto", region: "安大略省", country: "加拿大" } });
+    const p = planForm([f({ control: "combobox", asyncOptions: true, label: "Country", required: true }), f({ control: "combobox", asyncOptions: true, label: "State/Province" })], ctx({ profile: zh }));
+    expect(p.actions.map((a) => (a as { value?: string }).value)).toEqual(["Canada", "Ontario"]);
+  });
+});
+
+describe("submission confirmations", () => {
+  it("a polite 'thank you for your interest' is not a confirmation", async () => {
+    const { successSentence } = await import("../../src/local/apply/outcome");
+    expect(successSentence("Product Analyst. Thank you for your interest. Please review before submitting.")).toBeNull();
+    expect(successSentence("Thank you for applying. We will be in touch.")).toBe("Thank you for applying.");
+    expect(successSentence("Your application has been submitted.")).toBe("Your application has been submitted.");
+  });
+});

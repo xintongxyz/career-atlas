@@ -103,7 +103,10 @@ export function StartApplicationDialog({ job, open, onOpenChange, onStarted }: {
       setResumeId((v) => v ?? data.default_resume_id);
       setAuthorized(false);
       setSignIn(!!data.account?.credential && !!data.account.auto_sign_in && !data.account.blocked);
-      setCreateAccount(false);
+      // The owner's last choice is remembered on this computer (still shown, still changeable per application).
+      const acc = data.account;
+      const canCreate = !!acc?.available && !!acc.email && !acc.credential && !(acc.password_mode === "shared" && !acc.shared_configured);
+      setCreateAccount(canCreate && readPref(CREATE_PREF) === "1");
       if (data.support.resolved_url) {
         setLink(data.support.resolved_url);
         setRoute("link");
@@ -254,7 +257,10 @@ export function StartApplicationDialog({ job, open, onOpenChange, onStarted }: {
                       <span>{t("apply.workday.signIn")}</span>
                     </label>
                     <label className="mt-1 flex items-start gap-2">
-                      <Checkbox checked={createAccount} disabled={!data.account.available || !data.account.email || data.account.credential || (data.account.password_mode === "shared" && !data.account.shared_configured)} onCheckedChange={(v) => setCreateAccount(v === true)} aria-label={t("apply.workday.create", { site: data.account.tenant })} className="mt-0.5" />
+                      <Checkbox checked={createAccount} disabled={!data.account.available || !data.account.email || data.account.credential || (data.account.password_mode === "shared" && !data.account.shared_configured)} onCheckedChange={(v) => {
+                        setCreateAccount(v === true);
+                        writePref(CREATE_PREF, v === true ? "1" : "0");
+                      }} aria-label={t("apply.workday.create", { site: data.account.tenant })} className="mt-0.5" />
                       <span>
                         {t("apply.workday.create", { site: data.account.tenant })}
                         <span className="block text-xs text-ink-3">{data.account.password_mode === "shared" ? t("apply.workday.createShared") : t("apply.workday.createUnique")}</span>
@@ -579,6 +585,22 @@ function AttemptCard({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: string
   );
 }
 
+const CREATE_PREF = "career-atlas.apply.createAccount";
+const readPref = (k: string) => {
+  try {
+    return window.localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+};
+const writePref = (k: string, v: string) => {
+  try {
+    window.localStorage.setItem(k, v);
+  } catch {
+    /* private window: not remembered */
+  }
+};
+
 function Intervention({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: string }) {
   const { t } = useTranslation();
   const act = useAttemptAction(jobId);
@@ -590,6 +612,8 @@ function Intervention({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: strin
   const helpKey = reason === "login_required" && a.ats === "workday" ? "login_required_workday" : reason;
   const answered = (q: PendingQuestion) => {
     const v = answers[q.key];
+    // Already approved: nothing to answer — Continue tries again (or the owner ticks it in the visible browser).
+    if (q.reason === "approved_not_kept") return true;
     return q.kind === "checkbox" ? v === true : Array.isArray(v) ? v.length > 0 : typeof v === "string" && v.trim() !== "";
   };
   const allAnswered = a.questions.filter((q) => q.required).every(answered);
@@ -661,6 +685,7 @@ function ReviewSummary({ attempt: a }: { attempt: AttemptDTO }) {
   const parsed = a.filled.filter((f) => f.status === "parsed");
   const corrected = a.filled.filter((f) => f.status === "corrected");
   const skipped = a.filled.filter((f) => f.status === "skipped");
+  const generated = a.filled.filter((f) => f.status === "generated");
   const show = (v: string | string[] | boolean) => (typeof v === "boolean" ? (v ? t("profile.tri.yes") : t("profile.tri.no")) : Array.isArray(v) ? v.join(", ") : v);
   return (
     <div className="space-y-2 rounded-md bg-surface px-3 py-2.5 text-xs text-ink-2">
@@ -688,6 +713,20 @@ function ReviewSummary({ attempt: a }: { attempt: AttemptDTO }) {
             {a.answered.map((x) => (
               <li key={x.key}>
                 <span className="text-ink-3">{x.label}</span> → {show(x.value)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {generated.length ? (
+        <div className="rounded border border-accent/30 bg-accent-soft/30 px-2 py-1.5">
+          <p className="font-medium text-ink">{t("apply.review.generated")}</p>
+          <ul className="mt-1 space-y-2">
+            {generated.map((f, i) => (
+              <li key={i}>
+                <p className="text-ink-3">{f.label}</p>
+                <p className="whitespace-pre-wrap text-ink">{f.value}</p>
+                {f.flags?.length ? <p className="text-warn">{t("apply.review.generatedFlags", { items: f.flags.join("; ") })}</p> : <p className="text-ink-3">{t(f.verified ? "apply.review.generatedOk" : "apply.review.generatedNotKept")}</p>}
               </li>
             ))}
           </ul>
@@ -741,7 +780,9 @@ function QuestionInput({ q, value, onChange, remember, onRemember }: { q: Pendin
   const id = `q-${q.key.replace(/[^a-z0-9]/gi, "-")}`;
   const hint = [t(`apply.reason.${q.reason}`, { defaultValue: "" }), q.hint ? t("apply.profileSays", { value: t(`profile.languageLevel.${q.hint}`, { defaultValue: t(`profile.authStatus.${q.hint}`, { defaultValue: q.hint }) }) }) : ""].filter(Boolean).join(" ");
   let input: React.ReactNode;
-  if (q.kind === "checkbox") {
+  if (q.reason === "approved_not_kept") {
+    input = null;
+  } else if (q.kind === "checkbox") {
     input = (
       <label className="flex items-start gap-2 text-[13px] text-ink">
         <Checkbox id={id} checked={value === true} onCheckedChange={(v) => onChange(v === true)} className="mt-0.5" />

@@ -17,11 +17,14 @@ const url = optTxt(500);
 const yn = z.enum(["yes", "no"]).nullable().optional();
 
 export const PHONE_TYPES = ["mobile", "home", "work"] as const;
+/** How the applicant wants employers to contact them — independent of the phone type. */
+export const CONTACT_METHODS = ["email", "phone", "text"] as const;
 export const YES_NO_DEFAULT_KEYS = [
   "prior_employment",
   "prior_contractor",
   "prior_affiliate",
   "referral",
+  "contact_employer",
   "relocation",
   "travel",
   "shift_work",
@@ -32,11 +35,16 @@ export const YES_NO_DEFAULT_KEYS = [
   "coop_term_required",
   "internship_mandatory",
   "return_to_school",
+  "accept_privacy_notices",
 ] as const;
 export type YesNoDefaultKey = (typeof YES_NO_DEFAULT_KEYS)[number];
 
 export const applicationDefaultsSchema = z.object({
   phone_type: z.enum(PHONE_TYPES).nullable().optional(),
+  /** "Preferred contact method" questions (Email / Phone / Text). Never inferred from the phone type. */
+  preferred_contact_method: z.enum(CONTACT_METHODS).nullable().optional(),
+  /** Standing permission to acknowledge plain recruitment privacy notices (never declarations or background checks). */
+  accept_privacy_notices: yn,
   phone_country_code: optTxt(10),
   /** "Have you worked for <this employer> before?" — with per-employer exceptions. */
   prior_employment: yn,
@@ -44,6 +52,8 @@ export const applicationDefaultsSchema = z.object({
   prior_contractor: yn,
   prior_affiliate: yn,
   referral: yn,
+  /** "May we contact your current employer?" — the applicant's standing permission (asked otherwise). */
+  contact_employer: yn,
   relocation: yn,
   travel: yn,
   shift_work: yn,
@@ -65,6 +75,36 @@ export const applicationDefaultsSchema = z.object({
   salary_expectation: optTxt(100),
   hourly_expectation: optTxt(100),
   source: optTxt(200),
+  /**
+   * Standing consents by CATEGORY (owner opt-in, each separate). A consent is given automatically only
+   * when every category its text touches is authorised here; anything else is asked.
+   */
+  standing_consents: z
+    .object({
+      /** Ordinary application terms (the terms' text must be readable on the page or at its link). */
+      routine_terms: z.boolean().optional(),
+      /** "I have read the information about this application / position". */
+      read_information: z.boolean().optional(),
+      /** "The information I provided is accurate" — only when every filled value was verified. */
+      accuracy_declaration: z.boolean().optional(),
+      /** Interviews recorded and / or transcribed (e.g. an interview-intelligence tool). */
+      interview_recording: z.boolean().optional(),
+      /** Recordings used for internal training, quality or model improvement. */
+      recording_training: z.boolean().optional(),
+      /** Background, criminal, credit or reference checks. */
+      background_check: z.boolean().optional(),
+      /** Sharing application data with additional third parties or affiliates. */
+      third_party_sharing: z.boolean().optional(),
+    })
+    .default({}),
+  /**
+   * AI-written answers to open questions ("describe a project"): "on" lets Career Atlas send the facts a
+   * question needs (work / project / education / skills entries — never contact details, identity,
+   * eligibility or credentials) to the signed-in AI provider. Off unless the owner turns it on.
+   */
+  ai_answer_writing: z.enum(["on", "off"]).nullable().optional(),
+  /** Time-sensitive: an offer / recruiting deadline answer and the date it was given (reused only while fresh). */
+  recruiting_deadline: z.object({ answer: txt(500), as_of: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).nullable().optional(),
 });
 export type ApplicationDefaults = z.infer<typeof applicationDefaultsSchema>;
 
@@ -87,7 +127,9 @@ export const profileSchema = z.object({
     .default({}),
   based_in: z.object({ city: optTxt(120), region: optTxt(120), country: optTxt(120) }).default({}),
   work_authorization: z
-    .array(z.object({ country: txt(120).min(1), status: z.enum(AUTH_STATUSES), note: optTxt(500), expires: month }))
+    // any_employer: the authorisation is not tied to one employer (citizen, PR, or an open work permit) —
+    // stated by the applicant, never inferred from a work permit.
+    .array(z.object({ country: txt(120).min(1), status: z.enum(AUTH_STATUSES), note: optTxt(500), expires: month, any_employer: z.boolean().nullable().optional() }))
     .max(20)
     .default([]),
   driver_licence: z
@@ -110,6 +152,9 @@ export const profileSchema = z.object({
         /** false = in progress; null = not specified. */
         completed: z.boolean().nullable().default(true),
         year: z.number().int().min(1950).max(2100).nullable().optional(),
+        /** Optional exact months (YYYY or YYYY-MM); `year` stays the graduation / expected year. */
+        start: month,
+        end: month,
       }),
     )
     .max(20)

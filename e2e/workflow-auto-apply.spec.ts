@@ -73,13 +73,14 @@ test("start an application with a chosen resume, answer what the profile doesn't
   await expect(page.getByRole("button", { name: "Start application" })).toHaveCount(0);
 });
 
-test("unsupported sites get manual assistance instead of automation", async ({ page, request }) => {
-  const res = await request.post("/api/jobs", { headers: ORIGIN, data: { job: { company_name: "Contoso (synthetic)", title: "SmartRecruiters Analyst", original_url: "https://jobs.smartrecruiters.com/Contoso/744000012345678-analyst" }, confirm_duplicate: true } });
+// LinkedIn stays manual (its terms rule out automation); other systems are tried by the generic flow.
+test("sites whose terms rule out automation get manual assistance instead", async ({ page, request }) => {
+  const res = await request.post("/api/jobs", { headers: ORIGIN, data: { job: { company_name: "Contoso (synthetic)", title: "LinkedIn Analyst", original_url: "https://www.linkedin.com/jobs/view/4000000001" }, confirm_duplicate: true } });
   const { id } = (await res.json()) as { id: string };
   await page.goto(`/jobs/${id}`);
   await page.getByRole("button", { name: "Start application" }).first().click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Automatic applications are not available for SmartRecruiters")).toBeVisible();
+  await expect(dialog.getByText("Automatic applications are not available for LinkedIn")).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Copy Email" })).toBeVisible();
 });
 

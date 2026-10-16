@@ -51,7 +51,7 @@ export interface PendingQuestion {
   kind: (typeof QUESTION_KINDS)[number];
   required: boolean;
   options: string[];
-  /** missing | sensitive | legal | demographic | unsupported | open_ended | no_matching_option */
+  /** missing | sensitive | legal | demographic | unsupported | open_ended | no_matching_option | not_accepted | approved_not_kept (an approved consent the site's control would not keep) */
   reason: string;
   /** Sensitive answers (eligibility, legal) can still be remembered, but only when the user ticks it. */
   sensitive: boolean;
@@ -61,6 +61,22 @@ export interface PendingQuestion {
   meaning?: string | null;
   /** False for declarations / consents: those are approved each time. */
   rememberable?: boolean;
+  /** The profile entry a row question belongs to (e.g. the school), so the answer is saved to THAT entry. */
+  entry?: string | null;
+  /**
+   * Why the applicant is asked: "personal_fact" (not in any verified record), "authorization" (a decision,
+   * consent or identity answer), "synthesis" (an open answer the AI may not write), "interaction" (a control
+   * the AI could not operate after trying), "page" / "external" (a page or blocker the AI could not resolve).
+   */
+  blocker?: "personal_fact" | "authorization" | "synthesis" | "interaction" | "page" | "external";
+}
+
+/** The blocker class of a question, from its reason. */
+export function blockerOf(q: Pick<PendingQuestion, "reason">): NonNullable<PendingQuestion["blocker"]> {
+  if (q.reason === "missing" || q.reason === "attachment") return "personal_fact";
+  if (q.reason === "open_ended") return "synthesis";
+  if (q.reason === "not_accepted" || q.reason === "approved_not_kept" || q.reason === "no_matching_option" || q.reason === "unsupported") return "interaction";
+  return "authorization"; // sensitive, legal, demographic, consent, approval
 }
 
 export interface FilledField {
@@ -69,9 +85,11 @@ export interface FilledField {
   source: string;
   verified: boolean;
   /** "kept": already right on the page; "corrected": a value the site had filled (e.g. from resume parsing) was replaced from My Profile; "parsed": filled by the site's resume parsing and not confirmed by My Profile. */
-  status?: "filled" | "kept" | "corrected" | "parsed" | "skipped";
-  /** Only for "parsed": the value the site filled, shown for review (stored locally only). */
+  status?: "filled" | "kept" | "corrected" | "parsed" | "skipped" | "generated";
+  /** For "parsed": the value the site filled; for "generated": the AI-written answer — shown for review (stored locally only). */
   value?: string | null;
+  /** "generated" answers: what the evidence check could not confirm (empty = every claim supported). */
+  flags?: string[];
 }
 
 export interface AttemptStep {

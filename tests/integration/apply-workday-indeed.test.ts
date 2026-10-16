@@ -4,9 +4,13 @@
 import type { ApplyOverview, AttemptDTO } from "@shared/apply";
 import type { JobDetail, JobListItem } from "@shared/types";
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { Proposer } from "../../src/local/apply/browser-agent";
+import { codexProvider } from "../../src/local/codex";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startAtsFixture, type AtsFixture } from "../fixtures/ats-server";
-import { runtime, SELF } from "./harness";
+import { agentHook, runtime, SELF, testDataDir } from "./harness";
 import { api, waitFor } from "./helpers";
 
 const ready = runtime.apply.status().available;
@@ -211,18 +215,38 @@ describe.skipIf(!ready)("Workday (synthetic multi-step wizard)", () => {
 
   it("the site rejects a value on Save and Continue: the exact field is asked (live Workday error text); province codes match", async () => {
     fx.workday.signedIn = true;
+    // A postal code saved in a form this site rejects (it wants "A1A 1A1").
+    await api("/api/profile", { method: "PUT", json: { profile: { ...PROFILE, contact: { ...PROFILE.contact, postal_code: "m5h2n2" } } } });
     const id = await job(wd("validate+codes", 5), "Workday validation");
     let a = await settled((await start(id, { resume_document_id: resumeB, entry_mode: "manual" })).body.id);
     a = await answerKnown(a, COMMON);
-    expect(a.questions.map((q) => q.key)).toEqual(["wd:phoneNumber"]);
+    expect(a.questions.map((q) => q.key)).toEqual(["wd:postalCode"]);
     expect(a.questions[0]).toMatchObject({ reason: "not_accepted" });
-    expect(a.error_message).toMatch(/only digits/);
+    expect(a.error_message).toMatch(/A1A 1A1/);
     const v = (fx.workday.saves.at(-1)?.v ?? {}) as Record<string, string>;
-    a = await settled((await answer(a.id, { "wd:phoneNumber": "4165550142" })).id);
+    a = await settled((await answer(a.id, { "wd:postalCode": "M5H 2N2" })).id);
+    // The phone went in as Workday wants it: local digits, Canada (+1) in its own code prompt — never rejected.
+    const saved = (fx.workday.saves.at(-1)?.v ?? {}) as Record<string, string>;
+    expect(saved.phone).toBe("4165550142");
+    expect(saved.phoneCode).toBe("Canada (+1)");
+    expect(saved.postalCode).toBe("M5H 2N2");
+    await api("/api/profile", { method: "PUT", json: { profile: PROFILE } });
     expect(a.steps.filter((s) => s.code === "workday_step").map((s) => s.params?.step)).toContain("My Experience");
     expect(((fx.workday.saves.at(-1)?.v ?? v) as Record<string, string>).region).toBe("ON"); // Ontario ↔ ON in a province field
     await api(`/api/apply/attempts/${a.id}/cancel`, { method: "POST" });
   }, 300_000);
+
+  it("steps without page ids and a heavy step drawn after 20 s: recognised, never a silent stop", async () => {
+    fx.workday.signedIn = true;
+    const id = await job(wd("nopageid+slowexp", 9), "Workday unfamiliar markup");
+    let a = await settled((await start(id, { resume_document_id: resumeB, entry_mode: "manual" })).body.id);
+    a = await answerKnown(a, COMMON);
+    const steps = a.steps.filter((s) => s.code === "workday_step").map((s) => s.params?.step);
+    expect(steps).toEqual(expect.arrayContaining(["My Information", "My Experience"]));
+    expect(a.error_code).not.toBe("workday_page_unrecognised");
+    expect(a.intervention).toBe("submit_approval");
+    await api(`/api/apply/attempts/${a.id}/cancel`, { method: "POST" });
+  }, 400_000);
 
   it("ambiguous result after Submit → Unconfirmed, never re-submitted; closed postings fail", async () => {
     fx.workday.signedIn = true;
@@ -317,3 +341,108 @@ describe.skipIf(!ready)("Indeed (synthetic pages; Indeed itself is never automat
     for (const secret of ["jordan.okoye@example.test", "Okoye", "416 555", "linkedin.com/in", "synthetic resume"]) expect(all).not.toContain(secret);
   });
 });
+
+// ================================================================ AI take-over (one mechanism for every flow)
+
+/**
+ * Stands in for the model in CI: decides ONLY from what the agent is shown (situation, buttons, fields) —
+ * the same input the real model gets. The live variant below uses the real provider.
+ */
+const scriptedAgent: Proposer = async (_s, user) => {
+  const u = JSON.parse(user) as { situation?: string; page: { headings: string[]; buttons: { ref: string; text: string; disabled?: boolean }[]; fields: { ref: string; label: string; control: string; state: string; options?: string[] }[] } };
+  const out = (o: Record<string, unknown>) => ({ reasoning: "scripted", ref: null, fact: null, option: null, checked: null, question: null, status: null, ...o });
+  const b = (re: RegExp) => u.page.buttons.find((x) => re.test(x.text) && !x.disabled);
+  const gate = u.page.fields.find((f) => f.control === "radio" && (f.options ?? []).some((o) => /continue with my application/i.test(o)));
+  if (gate && gate.state === "empty") return out({ action: "choose_option", ref: gate.ref, option: (gate.options ?? []).find((o) => /continue with my application/i.test(o)) });
+  if (b(/^proceed/i)) return out({ action: "click", ref: b(/^proceed/i)!.ref });
+  if (b(/^select a country$/i)) return out({ action: "pick_from_profile", ref: b(/^select a country$/i)!.ref, fact: "location.country" });
+  return out({ action: "finish", status: "blocked" });
+};
+const traceOf = (id: string) => {
+  const f = join(testDataDir, "automation", "attempts", id, "agent-trace.jsonl");
+  return existsSync(f) ? readFileSync(f, "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>) : [];
+};
+const metricsOf = (a: AttemptDTO) => a.steps.filter((s) => s.code === "run_metrics").map((s) => s.params ?? {});
+
+describe.skipIf(!ready)("AI take-over inside known and unknown flows (synthetic)", () => {
+  it("Workday: an unfamiliar page between steps — without AI the old stop; with AI it is read, operated, verified, and the adapter resumes", async () => {
+    fx.workday.signedIn = true;
+    // Old architecture (no AI available): the adapter cannot recognise the page → the applicant is asked.
+    agentHook.propose = null;
+    let a = await settled((await start(await job(wd("interstitial", 21), "Workday gate (no AI)"), { resume_document_id: resumeB, entry_mode: "manual" })).body.id);
+    a = await answerKnown(a, COMMON);
+    expect(a).toMatchObject({ state: "needs_review", error_code: "workday_page_unrecognised" });
+    // New: the AI takes the unrecognised page and the Workday adapter continues afterwards.
+    agentHook.propose = scriptedAgent;
+    try {
+      a = await settled((await start(await job(wd("interstitial", 22), "Workday gate (AI)"), { resume_document_id: resumeB, entry_mode: "manual" })).body.id);
+      a = await answerKnown(a, COMMON);
+    } finally {
+      agentHook.propose = null;
+    }
+    const codes = a.steps.map((s) => s.code);
+    expect(codes).toEqual(expect.arrayContaining(["ai_takeover", "ai_takeover_result"]));
+    expect(a.steps.find((s) => s.code === "ai_takeover_result")?.params).toEqual({ result: "resolved" });
+    expect(a.steps.filter((s) => s.code === "workday_step").map((s) => s.params?.step)).toEqual(expect.arrayContaining(["My Information", "My Experience"]));
+    expect(a.intervention).toBe("submit_approval");
+    expect(metricsOf(a).some((m) => Number(m.takeovers) >= 1 && Number(m.resolved) >= 1)).toBe(true);
+    await api(`/api/apply/attempts/${a.id}/cancel`, { method: "POST" });
+  }, 600_000);
+
+  it("Workday: a page nobody can get past — the AI reports it (ai_could_not_resolve), nothing invented, the attempt is kept", async () => {
+    fx.workday.signedIn = true;
+    agentHook.propose = scriptedAgent;
+    let a: AttemptDTO;
+    try {
+      a = await settled((await start(await job(wd("deadend", 23), "Workday dead end"), { resume_document_id: resumeB, entry_mode: "manual" })).body.id);
+      a = await answerKnown(a, COMMON);
+    } finally {
+      agentHook.propose = null;
+    }
+    expect(a).toMatchObject({ state: "needs_review", intervention: "unexpected_page", error_code: "ai_could_not_resolve" });
+    expect(a.steps.find((s) => s.code === "ai_takeover_result")?.params).toEqual({ result: "blocked" });
+    expect(a.questions).toEqual([]); // the applicant is not asked about a broken page
+    await api(`/api/apply/attempts/${a.id}/cancel`, { method: "POST" });
+  }, 600_000);
+
+  it("unknown site: a custom picker rules cannot see — the step does not advance, the AI picks the profile's country, the form completes", async () => {
+    agentHook.propose = null;
+    let a = await settled((await start(await job(`${fx.url}/qa/custom/1?ai=0`, "Custom picker (no AI)"), { resume_document_id: resumeB })).body.id);
+    expect(a).toMatchObject({ state: "needs_review", error_code: "step_not_advancing" });
+    agentHook.propose = scriptedAgent;
+    try {
+      a = await settled((await start(await job(`${fx.url}/qa/custom/1?ai=1`, "Custom picker (AI)"), { resume_document_id: resumeB })).body.id);
+      expect(a.steps.find((s) => s.code === "ai_takeover_result")?.params).toEqual({ result: "resolved" });
+      expect(a.intervention).toBe("submit_approval");
+      // Approval re-runs the attempt: the same AI take-over happens again before Career Atlas submits.
+      a = await settled((await api<AttemptDTO>(`/api/apply/attempts/${a.id}/approve`, { method: "POST" })).body.id);
+    } finally {
+      agentHook.propose = null;
+    }
+    expect(fx.submissions.find((x) => x.path === "/qa/custom/1/submit")?.fields).toMatchObject({ first_name: "Jordan", country: "Canada" });
+  }, 600_000);
+
+  // OPT-IN: the same two take-overs with the REAL provider (CA_LIVE_CODEX=1); prints the agent's trace.
+  it.skipIf(process.env.CA_LIVE_CODEX !== "1")("real provider: the AI understands both unfamiliar pages with general tools and the flows continue", async () => {
+    const p = await codexProvider().ready();
+    expect(p).toBeTruthy();
+    agentHook.propose = async (system, user, schema) => (await p!.completeJson({ system, user, jsonSchema: schema })) as Record<string, unknown>;
+    fx.workday.signedIn = true;
+    const results: Record<string, unknown>[] = [];
+    try {
+      for (const [url, title, isWd] of [[wd("interstitial", 31), "Workday gate (real AI)", true], [`${fx.url}/qa/custom/1?ai=live`, "Custom picker (real AI)", false]] as const) {
+        let a = await settled((await start(await job(url, title), { resume_document_id: resumeB, ...(isWd ? { entry_mode: "manual" } : {}) })).body.id);
+        if (isWd) a = await answerKnown(a, COMMON);
+        const trace = traceOf(a.id);
+        results.push({ title, state: a.state, intervention: a.intervention, error: a.error_code, takeover: a.steps.filter((s) => s.code.startsWith("ai_takeover")).map((s) => [s.code, s.params]), metrics: metricsOf(a), trace });
+        expect(a.steps.find((s) => s.code === "ai_takeover_result")?.params).toEqual({ result: "resolved" });
+        expect(a.intervention).toBe("submit_approval");
+        await api(`/api/apply/attempts/${a.id}/cancel`, { method: "POST" });
+      }
+    } finally {
+      agentHook.propose = null;
+      process.stdout.write(`\nLIVE TAKEOVER\n${JSON.stringify(results, null, 1)}\n`);
+    }
+  }, 1_200_000);
+});
+

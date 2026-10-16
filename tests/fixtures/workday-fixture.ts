@@ -317,10 +317,24 @@ function authHtml() {
     '<button type="button" data-automation-id="createAccountSubmitButton">Create Account</button> <button type="button" data-automation-id="signInLink">Sign In</button></form></div>';
 }
 
+// clickfilter: like live tenants, a header "Sign In" (opens a different pop-up) comes before the form, and each
+// account button is covered by its own transparent "click_filter" that receives the click.
+function filtered(h) {
+  if (!has('clickfilter')) return h;
+  return h.replace(/<button type="button" data-automation-id="(createAccountSubmitButton|signInSubmitButton|signInLink|createAccountLink)">([^<]*)<\/button>/g, (m, id, label) => '<span style="position:relative;display:inline-block">' + m + '<div data-automation-id="click_filter" data-for="' + id + '" aria-label="' + label + '" role="button" tabindex="0" style="position:absolute;inset:0"></div></span>');
+}
+const header = () => has('clickfilter') ? '<header><button type="button" data-automation-id="utilityButtonSignIn">Sign In</button></header>' + (CFG.popup ? '<div role="dialog" data-automation-id="popUpDialog"><p>Sign in to your candidate home</p></div>' : '') : '';
+
 function render() {
   seq = 0;
   if (needAuth()) {
-    app.innerHTML = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(-1) + authHtml() + '</div>';
+    // lateauth: at first only the progress bar names "Create Account/Sign In"; the form is drawn 8 s later.
+    if (has('lateauth') && !CFG.authShown) {
+      app.innerHTML = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(-1) + '</div>';
+      if (!CFG.authTimer) CFG.authTimer = setTimeout(() => { CFG.authShown = true; render(); }, 8000);
+      return;
+    }
+    app.innerHTML = header() + '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(-1) + filtered(authHtml()) + '</div>';
     if (CFG.autologin && !CFG.autologinStarted) { CFG.autologinStarted = true; setTimeout(() => post('/wd/api/user-signed-in', {}).then(() => { CFG.signedIn = true; render(); }), 1500); } // the user signing in by hand
     return;
   }
@@ -341,10 +355,39 @@ function render() {
     setTimeout(render, 2500);
     return;
   }
-  app.innerHTML = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(step) +
+  // An unfamiliar page between steps, with none of Workday's markers (a tenant customisation): only an AI
+  // that reads it can continue — choose "Continue with my application" and press "Proceed →".
+  if (has('interstitial') && step === 1 && !CFG.interDone) {
+    app.innerHTML = '<main class="custom-gate"><h1>Before you continue</h1><p>We have saved your contact details.</p>' +
+      '<fieldset><legend>How would you like to continue?</legend><label><input type="radio" name="gate" value="continue"> Continue with my application</label><label><input type="radio" name="gate" value="later"> Save and finish later</label></fieldset>' +
+      '<p class="gate-err" role="alert" hidden>Please choose an option.</p><button type="button" id="gate-go" class="custom-btn">Proceed →</button></main>';
+    document.getElementById('gate-go').onclick = () => {
+      const v = (document.querySelector('input[name=gate]:checked') || {}).value;
+      if (v === 'continue') { CFG.interDone = true; render(); }
+      else if (v === 'later') { app.innerHTML = '<main><h1>Saved</h1><p>You can finish your application later from Candidate Home.</p></main>'; }
+      else document.querySelector('.gate-err').hidden = false;
+    };
+    return;
+  }
+  // A page nobody can get past (the site failed): the AI must say so, not invent a way through.
+  if (has('deadend') && step === 1) {
+    app.innerHTML = '<main class="custom-error"><h1>We are sorry</h1><p>Something went wrong on our side. Please try again later.</p><button type="button" disabled>Retry</button></main>';
+    return;
+  }
+  // A heavy step (My Experience after resume parsing) shows only a spinner for a long while on some tenants.
+  if (has('slowexp') && step === 1 && !CFG.expShown) {
+    CFG.expShown = true;
+    app.innerHTML = '<div data-automation-id="loadingSpinner" style="width:24px;height:24px;background:#ccc">Loading…</div>';
+    setTimeout(render, 20000);
+    return;
+  }
+  let html = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(step) +
     (errors.length ? '<div data-automation-id="errorHeading">Errors Found</div>' : '') + stepHtml() +
     '<div data-automation-id="pageFooter">' + (step > 0 ? '<button type="button" data-automation-id="pageFooterBackButton">Back</button> ' : '') +
     '<button type="button" data-automation-id="pageFooterNextButton">' + (step === 4 ? 'Submit' : 'Save and Continue') + '</button></div></div>';
+  // Tenants / UI versions without page ids or a visible flow container: only the progress bar and Next.
+  if (has('nopageid')) html = html.replace(/data-automation-id="applyFlow(\w*)Page"/g, 'data-automation-id="wizard$1"');
+  app.innerHTML = html;
 }
 // Signed in. Some tenants then forget "Autofill with Resume" and open the manual form.
 function afterAuth() {
@@ -369,6 +412,7 @@ function validate() {
     need('countryRegion', v.region, 'Province or Territory'); need('emailAddress', v.email, 'Email Address'); need('phoneType', v.phoneType, 'Phone Device Type');
     need('countryPhoneCode', v.phoneCode, 'Country Phone Code'); need('phoneNumber', v.phone, 'Phone Number');
     if (has('validate') && v.phone && /[^0-9]/.test(v.phone)) e.push({ name: 'phoneNumber', msg: 'Phone number must contain only digits.' });
+    if (has('validate') && v.postalCode && !/^[A-Z]\d[A-Z] \d[A-Z]\d$/.test(v.postalCode)) e.push({ name: 'postalCode', msg: 'Postal code must be in the format A1A 1A1.' });
   }
   if (step === 1 && has('rich')) {
     S.work.forEach((w) => { need('jobTitle', w.jobTitle, 'Job Title'); need('companyName', w.companyName, 'Company'); });
@@ -483,6 +527,9 @@ document.addEventListener('change', (e) => {
   }
 });
 document.addEventListener('click', (e) => {
+  const cf = e.target.closest('[data-automation-id="click_filter"]');
+  if (cf) { const b = document.querySelector('[data-automation-id="' + cf.dataset.for + '"]'); if (b) b.click(); return; }
+  if (e.target.closest('[data-automation-id="utilityButtonSignIn"]')) { CFG.popup = true; render(); return; }
   const t = e.target.closest('button, [data-automation-id="file-upload-drop-zone"]');
   if (!t) { if (menu && !e.target.closest('[role=listbox]')) closeMenu(); return; }
   if (t.dataset.lb) {

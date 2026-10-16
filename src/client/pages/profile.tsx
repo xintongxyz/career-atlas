@@ -154,6 +154,12 @@ function ProfileEditor({ dto }: { dto: ProfileDTO }) {
                   {sel(`pf-auth-${i}`, w.status, (v) => upd("work_authorization", i, { status: v as (typeof AUTH_STATUSES)[number] }), AUTH_STATUSES, "profile.authStatus", t("profile.status"))}
                   <Input aria-label={t("profile.note")} placeholder={t("profile.note")} value={w.note ?? ""} onChange={(e) => upd("work_authorization", i, { note: e.target.value || null })} />
                   {removeBtn(() => del("work_authorization", i))}
+                  {w.status === "work_permit" ? (
+                    <label className="flex items-start gap-2 text-xs text-ink-2 sm:col-span-4">
+                      <input type="checkbox" className="mt-0.5" checked={w.any_employer === true} onChange={(e) => upd("work_authorization", i, { any_employer: e.target.checked })} />
+                      <span>{t("profile.anyEmployer")}</span>
+                    </label>
+                  ) : null}
                 </div>
               ))}
               {addBtn(() => add("work_authorization", { country: p.based_in.country ?? "", status: "citizen", note: null }))}
@@ -203,6 +209,8 @@ function ProfileEditor({ dto }: { dto: ProfileDTO }) {
               <Input aria-label={t("profile.institution")} placeholder={t("profile.institution")} value={e.institution ?? ""} onChange={(x) => upd("education", i, { institution: x.target.value || null })} />
               <Input aria-label={t("profile.country")} placeholder={t("profile.country")} value={e.country ?? ""} onChange={(x) => upd("education", i, { country: x.target.value || null })} />
               {sel(`pf-edu-done-${i}`, e.completed === false ? "no" : e.completed == null ? "unknown" : "yes", (v) => upd("education", i, { completed: fromTri(v) }), ["yes", "no", "unknown"], "profile.completed", t("profile.completedLabel"))}
+              <Input aria-label={t("profile.eduStart")} placeholder={t("profile.eduStart")} value={e.start ?? ""} onChange={(x) => upd("education", i, { start: x.target.value || null })} />
+              <Input aria-label={t("profile.eduEnd")} placeholder={t("profile.eduEnd")} value={e.end ?? ""} onChange={(x) => upd("education", i, { end: x.target.value || null })} />
               <div className="flex items-center gap-2">
                 <Input aria-label={t("profile.year")} placeholder={t("profile.year")} inputMode="numeric" value={e.year ?? ""} onChange={(x) => upd("education", i, { year: x.target.value ? Number(x.target.value) || null : null })} />
                 {removeBtn(() => del("education", i))}
@@ -465,6 +473,15 @@ function ApplicationDefaultsCard({ value: d, onChange }: { value: Defaults; onCh
                 ))}
               </NativeSelect>
             </Field>
+            <Field label={t("profile.defaults.preferred_contact_method")} htmlFor="pd-preferred_contact_method" hint={t("profile.defaults.preferredContactHelp")}>
+              <NativeSelect id="pd-preferred_contact_method" value={d.preferred_contact_method ?? "unknown"} onChange={(e) => up({ preferred_contact_method: e.target.value === "unknown" ? null : (e.target.value as Defaults["preferred_contact_method"]) })}>
+                {(["unknown", "email", "phone", "text"] as const).map((o) => (
+                  <option key={o} value={o}>
+                    {o === "unknown" ? t("profile.tri.unknown") : t(`profile.defaults.contactMethods.${o}`)}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
             {text("phone_country_code", "+1")}
             {text("source")}
           </>,
@@ -476,6 +493,7 @@ function ApplicationDefaultsCard({ value: d, onChange }: { value: Defaults; onCh
             {tri("prior_contractor")}
             {tri("prior_affiliate")}
             {tri("referral")}
+            {tri("contact_employer")}
           </>,
         )}
         <div>
@@ -550,8 +568,42 @@ function ApplicationDefaultsCard({ value: d, onChange }: { value: Defaults; onCh
             {text("hourly_expectation")}
           </>,
         )}
+        <div>
+          <p className="mb-1 text-xs font-medium text-ink-3">{t("profile.defaults.groups.ai")}</p>
+          <Field label={t("profile.defaults.ai_answer_writing")} htmlFor="pd-ai_answer_writing" hint={t("profile.defaults.aiAnswerHelp")}>
+            <NativeSelect id="pd-ai_answer_writing" value={d.ai_answer_writing ?? "off"} onChange={(e) => up({ ai_answer_writing: e.target.value as "on" | "off" })}>
+              <option value="off">{t("profile.defaults.aiOff")}</option>
+              <option value="on">{t("profile.defaults.aiOn")}</option>
+            </NativeSelect>
+          </Field>
+        </div>
+        <div>
+          <p className="mb-1 text-xs font-medium text-ink-3">{t("profile.defaults.groups.consents")}</p>
+          <p className="mb-2 text-xs text-ink-3">{t("profile.defaults.consentsHelp")}</p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {/* Privacy notices have their own setting (accept_privacy_notices); shown here with the other consents. */}
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-1" checked={d.accept_privacy_notices === "yes"} onChange={(e) => up({ accept_privacy_notices: e.target.checked ? "yes" : "no" })} />
+              <span>
+                {t("profile.defaults.consents.privacy_notice")}
+                <span className="block text-xs text-ink-3">{t("profile.defaults.consentsHint.privacy_notice")}</span>
+              </span>
+            </label>
+            {CONSENT_KEYS.map((k) => (
+              <label key={k} className="flex items-start gap-2 text-sm">
+                <input type="checkbox" className="mt-1" checked={d.standing_consents?.[k] === true} onChange={(e) => up({ standing_consents: { ...(d.standing_consents ?? {}), [k]: e.target.checked } })} />
+                <span>
+                  {t(`profile.defaults.consents.${k}`)}
+                  <span className="block text-xs text-ink-3">{t(`profile.defaults.consentsHint.${k}`)}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
         <p className="text-xs text-ink-3">{t("profile.defaults.identityNote")}</p>
       </div>
     </Card>
   );
 }
+
+const CONSENT_KEYS = ["read_information", "routine_terms", "accuracy_declaration", "interview_recording", "recording_training", "background_check", "third_party_sharing"] as const;
