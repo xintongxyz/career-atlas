@@ -228,6 +228,12 @@ export function classify(f: FieldDescriptor): Semantic {
   if (/^eeo\[/.test(name) || DEMOGRAPHIC_RE.test(label)) return "demographic";
   // Declarations, consents and signatures need the user's explicit approval (also inside an EEO section).
   if (/^consent\[/.test(name) || /signature/.test(all) || (LEGAL_RE.test(label) && f.control !== "text" && f.control !== "textarea")) return "legal";
+  // A choice whose every option is an acknowledgment ("Please review the linked document:" → "I acknowledge
+  // that I have read … Privacy Notice") is a consent, whatever its own label says.
+  const realOpts = f.options.filter((o) => !isPlaceholderOption(o)).map((o) => norm(o.label));
+  if (realOpts.length && realOpts.every((o) => /^(i )?(hereby )?(acknowledge|agree|consent|accept|certify|confirm|have read|understand)\b/.test(o)) && realOpts.some((o) => LEGAL_RE.test(o))) return "legal";
+  // A statement to certify / acknowledge with a box to type into (not a question): a declaration.
+  if ((f.control === "text" || f.control === "textarea") && label.length > 80 && /^(i (hereby )?(certify|acknowledge|agree|attest|declare|confirm|understand)|by (submitting|signing))/.test(label)) return "legal";
   if (f.demographic) return "demographic";
   return classifyStandard(f, name, id, ac, label, keys, all);
 }
@@ -403,6 +409,10 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
       if (!country) return { ok: false, reason: "sensitive" };
       const entry = p.work_authorization.find((w) => sameCountry(w.country, country));
       if (!entry) return { ok: false, reason: "sensitive" };
+      // "Authorized to work for ANY employer": true for citizens and permanent residents; for a work permit
+      // only when the applicant said it is not tied to one employer (an open permit) — never inferred.
+      const anyEmployer = f.options.some((o) => /\bany employer\b/i.test(o.label));
+      if (anyEmployer && entry.status === "work_permit" && entry.any_employer !== true) return { ok: false, reason: "sensitive", hint: entry.status };
       if (entry.status === "citizen" || entry.status === "permanent_resident" || entry.status === "work_permit") return yes(`work_authorization.${entry.status}`);
       if (entry.status === "needs_sponsorship") return no("work_authorization.needs_sponsorship");
       return { ok: false, reason: "sensitive", hint: entry.status };
@@ -477,6 +487,33 @@ function educationFor(f: FieldDescriptor, p: Profile) {
 const YES_RE = /^(yes|y|true|oui|是)\b/;
 const NO_RE = /^(no|n|false|non|否)\b/;
 
+/** What a question is about, for options written as statements (by meaning). */
+const STATEMENT_SUBJECT: Partial<Record<QuestionMeaning["meaning"], RegExp>> = {
+  relocation: /relocat/,
+  work_authorization: /\b(authori[sz]ed|eligible|entitled|permitted|legally able) to work\b/,
+  contact_employer: /\bcontact/,
+  travel: /\btravel/,
+};
+const NEGATED = /\b(not|no|unwilling|unable|cannot|never|decline)\b|n't\b|\brequire|\bsponsor/;
+const VAGUE = /\b(unknown|unsure|not sure|prefer not|rather not|decline to (answer|say|state))\b/;
+/**
+ * A yes / no answer given through options written as statements ("I am willing to relocate…" / "I am not
+ * willing to relocate…" / "I already reside within commutable distance…"): the ONE option that states the
+ * answer about the question's own subject. Negation (or needing sponsorship) is "no"; "unknown" / "prefer
+ * not" options are never picked; a statement about something else (already living nearby) is not the
+ * answer. Ambiguous → null (asked).
+ */
+export function statementOption(options: FieldOption[], answer: string, label: string): FieldOption | null {
+  const a = norm(answer);
+  const want = YES_RE.test(a) ? "yes" : NO_RE.test(a) ? "no" : null;
+  if (!want) return null;
+  const subject = STATEMENT_SUBJECT[questionMeaning(label).meaning];
+  if (!subject) return null;
+  const cands = options.filter((o) => !isPlaceholderOption(o) && !VAGUE.test(norm(o.label)) && subject.test(norm(o.label)));
+  const pick = cands.filter((o) => (NEGATED.test(norm(o.label)) ? "no" : "yes") === want);
+  return pick.length === 1 ? pick[0] : null;
+}
+
 /** Maps an answer onto one of the field's options (semantic, never guessing between candidates). */
 export function matchOption(options: FieldOption[], answer: string): FieldOption | null {
   return matchOptionSemantic(options, answer) as FieldOption | null;
@@ -504,6 +541,7 @@ const DEFAULT_KEY: Partial<Record<QuestionMeaning["meaning"], keyof Profile["app
   prior_contractor: "prior_contractor",
   prior_affiliate: "prior_affiliate",
   referral: "referral",
+  contact_employer: "contact_employer",
   relocation: "relocation",
   travel: "travel",
   shift_work: "shift_work",
@@ -618,7 +656,9 @@ export function toAction(f: FieldDescriptor, key: string, value: unknown, source
     case "listbox":
     case "select":
     case "radio": {
-      const opt = matchOptionSemantic(f.options.filter((o) => !isPlaceholderOption(o)), typeof value === "boolean" ? (value ? "yes" : "no") : String(value), domainForLabel(f.label, classify(f))) as FieldOption | null;
+      const answer = typeof value === "boolean" ? (value ? "yes" : "no") : String(value);
+      const real = f.options.filter((o) => !isPlaceholderOption(o));
+      const opt = (matchOptionSemantic(real, answer, domainForLabel(f.label, classify(f))) as FieldOption | null) ?? statementOption(real, answer, f.label);
       if (!opt) return { misfit: String(value) };
       return { ...base, kind: "choose", values: [opt.label], optionRefs: opt.ref ? [opt.ref] : undefined, source };
     }
@@ -629,7 +669,8 @@ export function toAction(f: FieldDescriptor, key: string, value: unknown, source
         const parts = answer.split(",").map((x) => x.trim()).filter(Boolean);
         return { ...base, kind: "search", value: parts[0] ?? answer, match: parts.length ? parts : [answer], source };
       }
-      const opt = matchOptionSemantic(f.options.filter((o) => !isPlaceholderOption(o)), answer, domainForLabel(f.label, classify(f))) as FieldOption | null;
+      const real = f.options.filter((o) => !isPlaceholderOption(o));
+      const opt = (matchOptionSemantic(real, answer, domainForLabel(f.label, classify(f))) as FieldOption | null) ?? statementOption(real, answer, f.label);
       if (!opt) return { misfit: answer };
       return { ...base, kind: "choose", values: [opt.label], source };
     }
@@ -714,7 +755,9 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
       // Options of a searchable dropdown are known only once it is opened: plan "Yes" — the pick must still
       // find exactly that option on the page (never another one).
       const known = f.options.filter((o) => !isPlaceholderOption(o)).map((o) => o.label);
-      const value = cats ? (f.control === "checkbox" ? true : known.length ? affirmativeOption(known) : f.control === "combobox" ? "Yes" : null) : null;
+      // A typed declaration: the applicant's full name where a signature is asked for, else "I agree".
+      const typed = f.control === "text" || f.control === "textarea" ? (/signature|sign(ed)? (here|below)|type your (full |legal )?name/i.test(f.label) ? null : "I agree") : null;
+      const value = cats ? (f.control === "checkbox" ? true : typed ?? (known.length ? affirmativeOption(known) : f.control === "combobox" ? "Yes" : null)) : null;
       if (cats && value !== null && !use(value, `consent.${cats.join("+")}`)) continue;
     }
     // Identity and declarations: only the user's own answers above — never defaults or inference.

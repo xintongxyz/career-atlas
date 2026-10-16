@@ -294,7 +294,14 @@ actually uploaded, and the resume is linked to the application.
   where the site draws its box (its label, the element it is labelled by, a custom control) with real
   clicks, the keyboard or the control's own click, and counts only when the site shows it ticked and it
   stays ticked; if the site still will not keep it, it is shown as "already approved — the site would
-  not keep it", never as a new approval. Work-permit holders are asked about future sponsorship.
+  not keep it", never as a new approval. A typed certification ("I certify … [box]") is answered "I agree"
+  under the same rule; a signature box is never filled automatically. Work-permit holders are asked
+  about future sponsorship; "authorized to work for ANY employer" is chosen for a work permit only when
+  My Profile marks it as an open permit.
+- **Statement options.** Yes / No defaults (relocation, work authorization, contacting an employer, travel)
+  also answer options written as statements ("I am willing to relocate…"): the one statement about the
+  question's subject with the right polarity; "unknown" and statements about something else are never
+  chosen.
 - **The selected resume only.** The document id, SHA-256, file name and size are pinned when the
   attempt starts and re-checked before upload. If the file was deleted or changed, the attempt
   fails — another resume is never substituted. The file is uploaded byte for byte; it is never

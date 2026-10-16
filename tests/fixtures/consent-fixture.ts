@@ -11,6 +11,8 @@
 //   mixed     — a privacy-policy consent and a separate accuracy certification.
 //   arbitration — privacy policy AND binding arbitration in one box.
 //   reject    — a box the site never keeps ticked.
+//   screening — employer-history / relocation / work-authorization questions with statement options, a
+//               privacy acknowledgment as a one-option dropdown, a typed certification.
 //   toggle    — no checkbox at all: an "Agree" toggle button beside the statement (rules cannot see it);
 //               Next only advances once it is on.
 // Every form posts to /consent/<variant>/submit (or /frame/submit); the consent value is in the post.
@@ -121,6 +123,18 @@ const t = document.querySelector('.agree');
 t.onclick = () => { const on = t.getAttribute('aria-pressed') !== 'true'; t.setAttribute('aria-pressed', String(on)); t.textContent = on ? 'Agreed ✓' : 'Agree'; document.querySelector('input[name=consent]').value = on ? 'yes' : ''; };
 ${nextScript("document.querySelector('input[name=consent]').value === 'yes'")}
 </script></body></html>`;
+    case "screening": {
+      const sel = (id: string, label: string, options: string[]) => `<div class="field"><label for="${id}">${label} *</label><select id="${id}" name="${id}" required><option value="">Select...</option>${options.map((o) => `<option>${o}</option>`).join("")}</select></div>`;
+      return `${head("Apply (synthetic)")}<h1>Analyst (synthetic) — Application</h1>
+<form method="post" action="${action}" enctype="multipart/form-data">${contact}
+  ${sel("contact_employer", "May we contact your current employer?", ["Yes", "No"])}
+  ${sel("work_auth", "Work Authorization", ["I am authorized to work for any employer in the country in which this position is based.", "I require/will require Example Co's sponsorship to obtain work authorization in the country in which this position is based.", "My status to work in the country in which this position is based is unknown."])}
+  ${sel("privacy_doc", "Please review the linked document:", ["I acknowledge that I have read and understood the terms of the Example Co Candidate Privacy Notice."])}
+  ${sel("prior", "Have you been employed by Example Co, or any subsidiary, affiliate, or business unit of Example Co, in the past?", ["Yes", "No"])}
+  ${sel("relocate", "This position is required to work out of an Example Co office in Toronto; if you do not reside within commutable proximity to the office, are you open to relocating?", ["I am willing to relocate before starting employment.", "I am not willing to relocate before starting employment.", "I already reside within commutable distance to Toronto and am able to work at an on-site office."])}
+  <div class="field"><label for="certify">I certify that the facts set forth in this Application for Employment are true and complete to the best of my knowledge. I understand that if I am employed, false statements, omissions or misrepresentations may result in my dismissal. I authorize the Employer to make an investigation of any of the facts set forth in this application and release the Employer from any liability. The employer may contact any provided references. *</label><input id="certify" name="certify" required></div>
+  <button type="submit">Submit application</button></form></body></html>`;
+    }
     default:
       return "";
   }

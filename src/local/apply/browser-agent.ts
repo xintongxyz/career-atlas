@@ -224,7 +224,7 @@ const FACTS: Record<string, Semantic | "default"> = {
   "education.graduation": "default",
 };
 /** Preferences whose VALUES are not personal facts and help the model map a question. */
-const PREFS = ["preferred_contact_method", "prior_employment", "relocation", "travel", "shift_work", "referral", "enrolled_student", "coop_program", "source"] as const;
+const PREFS = ["preferred_contact_method", "prior_employment", "contact_employer", "relocation", "travel", "shift_work", "referral", "enrolled_student", "coop_program", "source"] as const;
 
 /** What the profile holds in bulk (counts only) — context for the model, not facts it can ask to enter. */
 export function profileSummary(p: Profile): Record<string, number> {

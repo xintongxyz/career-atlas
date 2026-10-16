@@ -16,7 +16,7 @@ let resume: string;
 
 const PROFILE = {
   contact: { first_name: "Morgan", last_name: "Lee", email: "morgan.lee@example.test", phone: "+1 613 555 0123" },
-  based_in: { city: "Ottawa", region: "Ontario", country: "Canada" },
+  based_in: { city: "Kingston", region: "Ontario", country: "Canada" },
   work_authorization: [{ country: "Canada", status: "citizen" }],
 };
 const NO_STANDING = { read_information: false, routine_terms: false, accuracy_declaration: false, interview_recording: false, recording_training: false, background_check: false, third_party_sharing: false };
@@ -146,6 +146,27 @@ describe.skipIf(!ready)("approved consents are executed on the site (synthetic)"
     expect(a.questions.map((q) => [q.reason, q.blocker])).toEqual([["approved_not_kept", "interaction"]]);
     expect(asked(a)).not.toContain("approval_needed");
     await api(`/api/apply/attempts/${a.id}/cancel`, { method: "POST" });
+  }, 300_000);
+});
+
+describe.skipIf(!ready)("screening questions from standing answers (synthetic)", () => {
+  const DEFAULTS = { accept_privacy_notices: "yes", contact_employer: "yes", prior_employment: "no", prior_affiliate: "no", relocation: "yes", standing_consents: { ...NO_STANDING, accuracy_declaration: true, background_check: true } };
+  it("statement options, a one-option privacy acknowledgment and a typed certification — answered without asking", async () => {
+    await api("/api/profile", { method: "PUT", json: { profile: { ...PROFILE, work_authorization: [{ country: "Canada", status: "work_permit", any_employer: true }], application_defaults: DEFAULTS } } });
+    const id = (await api<{ id: string }>("/api/jobs", { method: "POST", json: { job: { company_name: "Example Co (synthetic)", title: "Analyst — screening", country: "Canada", original_url: `${fx.url}/consent/screening` }, confirm_duplicate: true } })).body.id;
+    let a = await settled((await api<AttemptDTO>(`/api/jobs/${id}/apply`, { method: "POST", json: { resume_document_id: resume, submit_mode: "review", confirm: true } })).body.id);
+    dbg(a);
+    expect(a.questions).toEqual([]);
+    expect(a.intervention).toBe("submit_approval");
+    a = await approve(a);
+    expect(posted("/consent/screening/submit")).toMatchObject({
+      contact_employer: "Yes",
+      work_auth: "I am authorized to work for any employer in the country in which this position is based.",
+      privacy_doc: expect.stringMatching(/^I acknowledge/),
+      prior: "No",
+      relocate: "I am willing to relocate before starting employment.",
+      certify: "I agree",
+    });
   }, 300_000);
 });
 

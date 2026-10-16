@@ -91,6 +91,8 @@ const rowsOf = (fields: FieldDescriptor[], group: Group) => {
 export async function fillRows(ctx: RowsCtx): Promise<{ questions: PendingQuestion[] }> {
   const questions: PendingQuestion[] = [];
   const { page } = ctx;
+  // Each field of the row being filled: entered and verified on the page?
+  let rowFields: boolean[] = [];
   for (const group of ["work", "education"] as const) {
     const entries = group === "work" ? ctx.profile.experience : ctx.profile.education;
     if (!entries.length) continue;
@@ -113,12 +115,15 @@ export async function fillRows(ctx: RowsCtx): Promise<{ questions: PendingQuesti
         ctx.record({ label: `${group === "work" ? "Employment" : "Education"}: ${tag} (no Add button found)`.slice(0, 300), source: group, verified: false });
         break;
       }
+      rowFields = [];
       await fillRow(group, idx, k, tag);
       // 3. Save the row when it has its own Save / Update / Done button; then verify it shows.
       const ds = rowsOf(await scan(page), group).get(idx) ?? [];
       const saved = ds.length ? await savePanel(page, ds.map((d) => d.ref)) : false;
       if (saved) await sleep(600);
-      const ok = await savedOnPage(page, group, ident);
+      // Shown on the page by name — or, for a row without its own Save (one long form), every field of it
+      // verified: a school the site does not list is entered as its "Other" choice and never shows by name.
+      const ok = (await savedOnPage(page, group, ident)) || (!saved && rowFields.length > 0 && rowFields.every(Boolean));
       ctx.record({ label: `${group === "work" ? "Employment" : "Education"}: ${tag}`.slice(0, 300), source: group === "work" ? "experience" : "education", verified: ok });
       if (saved && !ok) {
         // The site refused the row (validation): its required fields become questions below.
@@ -142,6 +147,7 @@ export async function fillRows(ctx: RowsCtx): Promise<{ questions: PendingQuesti
       const want = role === "current" && e ? e.current : role === "notCompleted" && ed ? ed.completed === false : role === "completed" && ed ? ed.completed === true : null;
       if (want === null || ed?.completed === null && role !== "current") continue;
       const ok = await checkSet(page, find(role, f.label), want);
+      rowFields.push(ok);
       ctx.record({ label: `${tag}: ${f.label}`.slice(0, 300), source: group === "work" ? "experience.current" : "education.completed", verified: ok });
     }
     for (const f0 of rowsOf(await scan(page), group).get(idx) ?? []) {
@@ -240,6 +246,7 @@ export async function fillRows(ctx: RowsCtx): Promise<{ questions: PendingQuesti
           }
         }
       }
+      rowFields.push(ok);
       ctx.record({ label: `${tag}: ${f0.label.replace(/\*\s*$/, "")}${note}`.slice(0, 300), source: group === "work" ? "experience" : "education", verified: ok });
       if (!ok && f0.required) questions.push({ ...question(f0, key, "not_accepted", false, value), label: `${tag}: ${f0.label}`.slice(0, 500) });
     }

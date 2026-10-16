@@ -195,6 +195,7 @@ export type Meaning =
   | "prior_employment"
   | "prior_contractor"
   | "prior_affiliate"
+  | "contact_employer"
   | "prior_application"
   | "prior_interview"
   | "current_employee"
@@ -264,6 +265,8 @@ const RULES: { meaning: Meaning; re: RegExp; not?: RegExp; sensitivity?: Sensiti
   { meaning: "non_compete", re: /non ?compet|non ?solicit|restrictive covenant/, sensitivity: "legal", approval: true, reusable: false },
   { meaning: "conflict_of_interest", re: /conflict of interest/, sensitivity: "legal", approval: true, reusable: false },
   { meaning: "legal", re: /\b(i (hereby )?(certify|attest|declare|acknowledge|agree|consent)|terms (and|&) conditions|privacy (policy|notice)|electronic(ally)? sign|signature|true,? (accurate|correct) and complete)/, sensitivity: "legal", approval: true, reusable: false },
+  // permission to contact the applicant's (current / previous) employer — not employment history
+  { meaning: "contact_employer", re: /\b(may|can) (we|the employer|the company|the hiring team) contact your (current|present|previous|former|most recent)? ?employers?\b|\bpermission to contact your (current |present )?employers?\b|\bcontact your (current|present) employer\b/ },
   // employment history with the employer — distinct meanings, checked before the generic rule
   { meaning: "prior_contractor", re: /\b(contractor|consultant|contingent|temporary (worker|staff)|agency worker|freelance)/, not: /currently/, employerScoped: true },
   { meaning: "prior_affiliate", re: /\b(affiliate|subsidiar|sister company|parent company|related compan)/, employerScoped: true },
@@ -381,12 +384,15 @@ export function consentCategories(text: string): ConsentCategory[] {
   const recording = /\b(record(ed|ing|s)?|transcri(be|bed|bes|bing|ption|ptions))\b|brighthire|metaview|interview intelligence/.test(t) && /\binterview|conversation|call|meeting\b/.test(t);
   if (recording) out.add("interview_recording");
   if (recording && /\b(train(ing)?|improv(e|es|ing)|quality|internal (use|purposes|review)|machine learning|ai models?|research|calibrat)/.test(t)) out.add("recording_training");
-  if (/background (check|screening|investigation)|credit (check|history|report)|criminal (record|history|check|background)|reference checks?|consumer reports?|verify (your )?(employment|education) history/.test(t)) out.add("background_check");
+  if (/background (check|screening|investigation)|credit (check|history|report)|criminal (record|history|check|background)|reference checks?|consumer reports?|verify (your )?(employment|education) history|\b(make|conduct|carry out) an? investigation\b|\binvestigat\w* (of|into) (any of )?the (facts|information|statements)|\bcontact (any |my |the )?(provided |listed )?references\b/.test(t)) out.add("background_check");
   if (/(share|disclose|transfer|sell)\b.{0,60}\b(third[- ]part(y|ies)|other (companies|employers|organi[sz]ations)|affiliates|partners)\b|for (marketing|advertising) purposes/.test(t)) out.add("third_party_sharing");
   if (/privacy (policy|notice|statement)|personal (information|data)|data protection|\bgdpr\b|\bpipeda\b|candidate privacy/.test(t)) out.add("privacy_notice");
   if (/terms (and|&) conditions|terms of (use|service)|application terms|candidate terms|\bterms\b.{0,20}\b(agree|accept)|\b(agree|accept)\b.{0,30}\bterms\b/.test(t)) out.add("routine_terms");
   if (/\b(true|accurate|correct|complete|truthful)\b.{0,50}\b(information|answers|statements|application|responses)\b|\b(information|answers|statements)\b.{0,40}\b(true|accurate|correct|complete)\b|\bcertify\b|\battest\b|falsif|misrepresent/.test(t)) out.add("accuracy_declaration");
   if (/\bi (have )?(read|reviewed)\b|\bi understand\b|\bi acknowledge\b|acknowledge (that )?i have read/.test(t) && !out.size) out.add("read_information");
-  if (/arbitration|non-?compete|non-?solicit|drug (test|screen)|\bsignature\b|e-?sign|waive|waiver|release (of |from )?(all )?(liability|claims)|indemn|salary history/.test(t)) out.add("other_binding");
+  // A release of liability for an authorised investigation / reference check of the application is part of
+  // that background-check consent (owner decision 2026-10-16); any other release or waiver stays binding.
+  const release = /\breleas\w*\b.{0,60}\bfrom (any|all)( and all)? (liabilit|claims)|release (of |from )?(all )?(liability|claims)/.test(t);
+  if (/arbitration|non-?compete|non-?solicit|drug (test|screen)|\bsignature\b|e-?sign|waive|waiver|indemn|salary history/.test(t) || (release && !out.has("background_check"))) out.add("other_binding");
   return [...out];
 }

@@ -655,3 +655,51 @@ hCaptcha that may appear when Send is clicked — that is handed to the owner as
 - Approval re-runs the attempt from the start (the site does not keep an unsaved form); the recorded
   approval is re-applied and verified each time, the resume uploaded again.
 - A consent the site still rejects after all three ways stays with the owner (visible browser).
+
+## 23. Screening questions answered from standing answers — 2026-10-16
+
+### What the owner saw (a real Greenhouse application, review mode)
+
+Six questions asked although the owner had given (or now gave) standing answers: "May we contact your
+current employer?", "Work Authorization" (options written as statements), "Please review the linked
+document:" (one option: "I acknowledge … Candidate Privacy Notice"), "Have you been employed by <employer>,
+or any subsidiary, affiliate…", "…are you open to relocating?" (statement options), and a long
+certification ("I certify … true and complete … I authorize the Employer to make an investigation … release
+the Employer from any liability … may contact any provided references.") with a text box.
+
+### Causes and changes
+
+| Question | Cause | Change |
+|---|---|---|
+| Contact current employer | no meaning, no default | new meaning `contact_employer` + Application Default (owner: Yes) |
+| Work authorization | options are statements; "for ANY employer" cannot follow from "work permit" | statement-option matching; new `any_employer` flag on a work-authorization entry ("open permit", stated by the applicant, never inferred) — owner confirmed an open permit |
+| Linked privacy document | label has no consent words; the consent is in the only option | a choice whose every option is an acknowledgment is a consent → privacy setting → the acknowledging option |
+| Employed by an affiliate | `prior_affiliate` default unset | owner: No (also `prior_contractor`: No; `prior_employment` was already No) |
+| Relocation | statement options ("willing" / "not willing" / "already reside nearby") | `statementOption`: polarity + the question's subject; "already reside nearby" is a different statement; owner: Yes |
+| Certification text box | legal text boxes were "missing"; "investigation" / "references" not recognised; a liability release was not recognised at all | a long "I certify / acknowledge…" statement with a text box is a declaration, typed "I agree" when every category is authorised (a signature box gets nothing automatic); investigations / reference contact = background_check; a release tied to that check is part of it (owner decision) — any other release / waiver = other_binding, always asked |
+
+Also found on the way:
+
+- An accuracy declaration on the same page as the values it covers is planned again after they were
+  verified (it was asked because nothing was verified yet in the first pass).
+- An education row whose school the site does not list (entered as "Other") was marked unverified because
+  the school's name never shows; a row without its own Save now counts as verified when every field of it
+  was verified — which kept the accuracy declaration from being given.
+- A dropdown whose options could not be read while planning was asked as "missing"; once its options are
+  read for the question, it is planned again and entered when the profile / consents cover it.
+
+Owner data changes (owner's instructions in chat, app's own profile save, verified backup first; only these
+values changed): `contact_employer` yes, `prior_affiliate` no, `prior_contractor` no, `relocation` yes,
+Canada work authorization `any_employer` true.
+
+### Evidence
+
+- Unit (`tests/unit/screening-statements.test.ts`): statement options both ways, "already reside" never
+  chosen, unset → asked; any-employer only with the flag (citizen always); contact-employer default; the
+  one-option privacy acknowledgment (privacy on → given, off → asked); certification categories, other
+  releases / waivers still binding; typed "I agree" only when all categories are authorised.
+- Synthetic (`apply-consent.test.ts` › screening): the same six question types on a fictional form —
+  answered without a question, posted values checked after approval.
+- Real application (Greenhouse, review mode, existing attempt continued, nothing submitted): **submit
+  approval with no questions; 47 of 47 entered values verified**; 2 model calls (school / field judge),
+  94 s.

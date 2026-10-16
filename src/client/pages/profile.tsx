@@ -154,6 +154,12 @@ function ProfileEditor({ dto }: { dto: ProfileDTO }) {
                   {sel(`pf-auth-${i}`, w.status, (v) => upd("work_authorization", i, { status: v as (typeof AUTH_STATUSES)[number] }), AUTH_STATUSES, "profile.authStatus", t("profile.status"))}
                   <Input aria-label={t("profile.note")} placeholder={t("profile.note")} value={w.note ?? ""} onChange={(e) => upd("work_authorization", i, { note: e.target.value || null })} />
                   {removeBtn(() => del("work_authorization", i))}
+                  {w.status === "work_permit" ? (
+                    <label className="flex items-start gap-2 text-xs text-ink-2 sm:col-span-4">
+                      <input type="checkbox" className="mt-0.5" checked={w.any_employer === true} onChange={(e) => upd("work_authorization", i, { any_employer: e.target.checked })} />
+                      <span>{t("profile.anyEmployer")}</span>
+                    </label>
+                  ) : null}
                 </div>
               ))}
               {addBtn(() => add("work_authorization", { country: p.based_in.country ?? "", status: "citizen", note: null }))}
@@ -487,6 +493,7 @@ function ApplicationDefaultsCard({ value: d, onChange }: { value: Defaults; onCh
             {tri("prior_contractor")}
             {tri("prior_affiliate")}
             {tri("referral")}
+            {tri("contact_employer")}
           </>,
         )}
         <div>

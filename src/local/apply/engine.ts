@@ -1372,8 +1372,14 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       for (let i = questions.length - 1; i >= 0; i--) if (verifiedKeys.has(questions[i].key)) questions.splice(i, 1);
       // Pre-filled by the site (resume parsing) and not confirmed by My Profile: kept, shown at Review.
       const planned = new Set([...plan.actions.map((a) => a.key), ...plan.kept.map((k) => k.key), ...plan.questions.map((q) => q.key)]);
+      // An accuracy declaration on the same page as the values it covers: authorised, but only once those
+      // values are verified — planned again on the next pass, after this pass's values were checked.
+      const afterVerification = new Set(
+        plan.questions.filter((q) => q.reason === "legal" && planCtx.profile.application_defaults.standing_consents?.accuracy_declaration === true && /not authorised: accuracy_declaration$/.test(q.hint ?? "") && !planCtx.consent?.accuracyVerified).map((q) => q.key),
+      );
       for (const f of now) {
         const key = fieldKey(f);
+        if (afterVerification.has(key)) continue;
         const action = plan.actions.find((a) => a.key === key);
         // A value the page did not keep is tried again on the next pass (resume parsing often re-renders).
         if (action && !ok.has(action.ref)) continue;
@@ -1396,6 +1402,26 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         if (!f) continue;
         const labels = await readMenu(page, f.ref).catch(() => []);
         if (labels.length) q.options = labels;
+      }
+      // Options read only now (the menu did not open while planning): those questions are planned again
+      // with their real options — an acknowledgment the standing consents cover, a statement option — and
+      // entered, verified, and taken off the list. Anything still unanswered stays a question.
+      const retry = questions.filter((q) => q.reason === "missing" && q.options.length);
+      if (retry.length) {
+        const cur = await scan(page);
+        const fs = retry.flatMap((q) => {
+          const f = cur.find((x) => fieldKey(x) === q.key && x.visible);
+          return f ? [{ ...f, options: q.options.map((l) => ({ label: l, value: l })) }] : [];
+        });
+        planCtx.consent = { accuracyVerified: accuracyVerified(), inspectedTerms: planCtx.consent?.inspectedTerms };
+        const p2 = planForm(fs, planCtx);
+        for (const a of p2.actions) await perform(page, a).catch(() => {});
+        await sleep(300);
+        const ok = verify(p2.actions, await scan(page), resumeFile);
+        for (const a of p2.actions.filter((x) => ok.has(x.ref))) {
+          questions = questions.filter((q) => q.key !== a.key);
+          allFilled.push({ label: (a.label || a.key).slice(0, 300), source: a.source, verified: true, status: "filled" });
+        }
       }
     }
     // Open questions the profile can answer in writing (a project, the role, the applicant's experience):

@@ -24,6 +24,7 @@ export const YES_NO_DEFAULT_KEYS = [
   "prior_contractor",
   "prior_affiliate",
   "referral",
+  "contact_employer",
   "relocation",
   "travel",
   "shift_work",
@@ -51,6 +52,8 @@ export const applicationDefaultsSchema = z.object({
   prior_contractor: yn,
   prior_affiliate: yn,
   referral: yn,
+  /** "May we contact your current employer?" — the applicant's standing permission (asked otherwise). */
+  contact_employer: yn,
   relocation: yn,
   travel: yn,
   shift_work: yn,
@@ -124,7 +127,9 @@ export const profileSchema = z.object({
     .default({}),
   based_in: z.object({ city: optTxt(120), region: optTxt(120), country: optTxt(120) }).default({}),
   work_authorization: z
-    .array(z.object({ country: txt(120).min(1), status: z.enum(AUTH_STATUSES), note: optTxt(500), expires: month }))
+    // any_employer: the authorisation is not tied to one employer (citizen, PR, or an open work permit) —
+    // stated by the applicant, never inferred from a work permit.
+    .array(z.object({ country: txt(120).min(1), status: z.enum(AUTH_STATUSES), note: optTxt(500), expires: month, any_employer: z.boolean().nullable().optional() }))
     .max(20)
     .default([]),
   driver_licence: z

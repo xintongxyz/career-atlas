@@ -38,6 +38,7 @@ const YES_NO_KEYS: Record<string, keyof Profile["application_defaults"]> = {
   prior_contractor: "prior_contractor",
   prior_affiliate: "prior_affiliate",
   referral: "referral",
+  contact_employer: "contact_employer",
   relocation: "relocation",
   travel: "travel",
   shift_work: "shift_work",
