@@ -21,6 +21,9 @@ export function execArgs(schemaFile: string, outFile: string, prompt: string): s
   return ["exec", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--sandbox", "read-only", ...NO_TOOLS, "--color", "never", "--output-schema", schemaFile, "--output-last-message", outFile, prompt];
 }
 
+/** Running totals of model use (calls, tokens reported by Codex, wall time) — read as deltas per attempt. */
+export const codexUsage = { calls: 0, tokens: 0, ms: 0 };
+
 export interface CodexStatus {
   available: boolean;
   path: string | null;
@@ -141,6 +144,7 @@ export function codexProvider() {
           const out = join(work, "last.txt");
           writeFileSync(schema, JSON.stringify(req.jsonSchema), { mode: 0o600 });
           const prompt = `${req.system}\n\n${req.user}\n\nReply with JSON matching the schema. Do not use tools.`;
+          const t0 = Date.now();
           const result = await run(
             st.path!,
             // No tools for the model: shell, code execution, browsing, apps and web search are switched off,
@@ -149,6 +153,11 @@ export function codexProvider() {
             work,
             TIMEOUT_MS,
           );
+          // Usage: Codex prints "tokens used\n12,345" on stderr (includes its own instructions).
+          const used = /tokens used\s*\n?\s*([\d,]+)/i.exec(`${result.stderr}\n${result.stdout}`);
+          codexUsage.calls += 1;
+          codexUsage.tokens += used ? Number(used[1].replace(/,/g, "")) : 0;
+          codexUsage.ms += Date.now() - t0;
           const body = existsSync(out) ? readFileSync(out, "utf8") : result.stdout;
           if (!body.trim()) throw new AiError("ai_failed", "Codex returned no message");
           return parseJson(body);

@@ -141,6 +141,28 @@ export async function wdSettle(page: Page, timeout = 15_000): Promise<WdState> {
   return s;
 }
 
+/**
+ * Waits for a recognisable wizard state — but only while the page is still changing: a page that has
+ * stopped changing (no spinner, same content for ~3 s) is returned as it is, so an unfamiliar but finished
+ * page goes to the AI quickly instead of after the full timeout.
+ */
+export async function wdSettleStable(page: Page, timeout = 45_000): Promise<WdState> {
+  const until = Date.now() + timeout;
+  let s = await wdState(page);
+  let last = "";
+  let stableSince = Date.now();
+  while ((s.kind === "loading" || s.kind === "unknown") && Date.now() < until) {
+    const sig = String(await page.evaluate(`(() => { const b = [...document.querySelectorAll(${JSON.stringify(BUSY)})].some((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }); return (b ? 'busy:' : '') + (document.body ? document.body.innerText.length + ':' + document.querySelectorAll('input,select,textarea,button').length : ''); })()`).catch(() => "busy:"));
+    if (sig !== last || sig.startsWith("busy:")) {
+      last = sig;
+      stableSince = Date.now();
+    } else if (Date.now() - stableSince > 3000) break;
+    await sleep(400);
+    s = await wdState(page);
+  }
+  return s;
+}
+
 export function nextButton(page: Page): Locator {
   return page.locator(`${aid("pageFooterNextButton")}, ${aid("bottom-navigation-next-button")}`).first();
 }

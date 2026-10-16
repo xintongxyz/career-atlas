@@ -46,7 +46,7 @@ export interface PageMap {
   frames: { src: string; area: number }[];
 }
 
-export type PageState = "posting" | "application" | "questions" | "login" | "unknown";
+export type PageState = "posting" | "application" | "questions" | "review" | "login" | "unknown";
 
 /**
  * A cookie-banner control by what it does: "private" (reject / necessary only — the choice Career Atlas
@@ -73,6 +73,8 @@ export function pageState(m: PageMap, ctx: { inWorkflow: boolean; login: boolean
   const strong = m.semantics.length >= 2 || m.semantics.includes("resume");
   if (ctx.login && !strong) return "login";
   if (strong) return "application";
+  // Inside the application, a page without fields that shows the application's own Submit: its final step.
+  if (ctx.inWorkflow && m.applicationFields === 0 && m.submits.length > 0) return "review";
   if (m.applicationFields > 0 && (ctx.inWorkflow || m.steps)) return "questions";
   if ([...m.names, ...m.chromeNames].some((n) => APPLY_CTA_RE.test(n.trim()))) return "posting";
   return "unknown";
@@ -259,7 +261,8 @@ export const PAGE_MAP = String.raw`(() => {
     if (!list.includes(n)) list.push(n);
   }
   const SUBMIT = /^(submit|submit( my| your)? application|send( my)? application|complete( my)? application|finish( and submit)?)$/i;
-  const submits = root ? buttonsIn(root).filter((b) => !b.closest('[data-ca-outside]') && SUBMIT.test(nameOf(b))).map(nameOf) : [];
+  // The application's own Submit (in its scope; on a review page without fields, anywhere outside widgets).
+  const submits = buttonsIn(root || document).filter((b) => !b.closest('[data-ca-outside]') && SUBMIT.test(nameOf(b))).map(nameOf);
   const headings = [...document.querySelectorAll('h1, h2')].filter((h) => vis(h) && !h.closest('[data-ca-outside]')).map((h) => clean(h.innerText).slice(0, 100)).filter(Boolean).slice(0, 8);
   const steps = /\/apply\b|\/application\b|[?&]step=|\/candidate\b/i.test(location.pathname + location.search) || !!document.querySelector('[aria-current="step"], [class*="stepper" i], [class*="progress-step" i]') || /\bstep \d+ (of|\/) \d+\b/i.test((document.body?.innerText || '').slice(0, 5000));
   const frames = [...document.querySelectorAll('iframe')].map((f) => { const r = f.getBoundingClientRect(); return { src: f.src || '', area: (r.width * r.height) / Math.max(1, innerWidth * innerHeight) }; }).filter((f) => /^https?:/.test(f.src) && f.area > 0.25);

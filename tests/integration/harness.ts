@@ -25,6 +25,8 @@ const rt = await createLocalRuntime(cfg, {
 rt.env.MAX_UPLOAD_BYTES = "1048576";
 
 export const env = rt.env;
+/** This test instance's data folder (synthetic; e.g. to read an attempt's local agent trace). */
+export const testDataDir = dataDir;
 export const runtime = rt;
 export const SELF = {
   // Real HTTP requests always carry a Host header; a Request built in-process does not.

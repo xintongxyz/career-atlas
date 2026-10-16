@@ -498,3 +498,88 @@ values in Git (grep before commit).
 resume-text retrieval yet (structured profile only); the claim check is lexical (it catches invented numbers, tools and
 names, not every paraphrased exaggeration — review stays mandatory before submit); option equivalence needs the AI
 setting; "Other" free-text follow-up fields are not filled yet.
+
+## 21. Architecture correction: one AI-directed loop, adapters as accelerators — 2026-10-16
+
+### Diagnosis (before the change)
+
+- **Who decided:** deterministic flows owned every step. Workday, Greenhouse / Lever and the generic flow each had
+  their own loop; GPT was consulted only by the generic flow on postings / unknown pages, and as a last resort
+  after the generic flow gave up. Inside a known ATS, GPT was never consulted.
+- **What a surprise did:** of 56 exits in `engine.ts`, every structural surprise ended the run and went to the
+  applicant — an unrecognised Workday page ("unexpected page", e.g. the owner's IKO run after My Information), Save
+  and Continue not advancing, Next not available, a site rejecting a value, a control the planner could not
+  operate ("not accepted", "no matching option"). Unfamiliar STRUCTURE and missing FACTS ended up in the same
+  question list.
+- **Disconnected tools:** the agent could not read a control's real options, pick a profile fact from a custom
+  widget, or use the answer engine; the deterministic code had those abilities but did not expose them.
+- **No memory, no measure:** the agent's context died with each run (an answer → the attempt re-runs from the
+  start → the same problem again); nothing measured model calls, tokens or time. Each Codex call carries ~9.7k
+  tokens of Codex's own instructions, so the number of calls dominates cost.
+
+### Change (incremental; adapters kept)
+
+- **`aiTakeover(page, why, done)` (engine.ts)** — one mechanism for every flow. When a flow's expectation fails it
+  hands the AI the observed page plus `why` (what it expected — no applicant values); the agent acts with Career
+  Atlas's validated tools until `done(page)` (the flow's own recognition succeeds again: a Workday step, a changed
+  page, filled controls), or it reports genuinely missing facts / decisions, or a blocker. Wired into: Workday
+  unrecognised page, Next not available, step not advancing, site-rejected fields; Greenhouse / Lever / generic
+  questions caused by controls (`resolveInteractions`); generic "Next did not advance". The adapter resumes after.
+- **General tools for the agent (browser-agent.ts, interact.ts):** `read_options` (open a dropdown / autocomplete /
+  menu — field or button — and read the choices that appeared), `pick_from_profile` (Career Atlas resolves the
+  fact, opens the control, picks the choice that means it — rules, then the equivalence judge — clicks and
+  verifies the control shows it), `write_answer` (the answer engine fills an open question). Validation keeps every
+  boundary (no Submit, accounts, passwords, widgets, identity / declarations without the applicant).
+- **Blocker classes:** each paused question carries `blocker` = personal_fact | authorization | synthesis |
+  interaction | page | external (`blockerOf`). Interaction questions go to the AI first; only what it cannot
+  resolve, and genuine facts / decisions, reach the applicant. A page the AI cannot get past → `ai_could_not_resolve`.
+- **Memory within the attempt:** a solved take-over is kept as a playbook (actions + the visible texts they targeted,
+  no values) in the attempt; when the same page appears again (re-run after an answer, approval, restart) it is
+  replayed through the same validated tools with **no model call**; if the replay does not reach `done`, the AI
+  decides as usual.
+- **Cost / latency:** `run_metrics` step per run (model calls, tokens reported by Codex, model seconds, run seconds,
+  take-overs, resolved); unrecognised pages are judged once they stop changing (no fixed 15 s / 45 s waits);
+  review pages inside the workflow are recognised without a model call.
+
+### What is AI-directed vs deterministic
+
+| Deterministic (fast, verified) | AI-directed (understanding, recovery) |
+|---|---|
+| filling known fields from the profile, rows, Workday sections, phone layouts, consents by category, review gate, Submit (only on approval) | postings and unknown pages, unfamiliar controls (custom pickers, odd wizards), pages an adapter does not recognise, steps that do not advance, rejected values, open answers (answer engine) |
+
+### Evidence (synthetic sites, fictional applicant)
+
+| Scenario | Old architecture (AI not available) | New (AI) |
+|---|---|---|
+| Workday tenant inserts an unfamiliar page between steps | paused, `workday_page_unrecognised` (applicant asked) | AI read it, chose "Continue with my application", pressed "Proceed →", verified; adapter resumed → Review |
+| Unknown site, required custom country picker (no select / option roles) | paused, `step_not_advancing` | AI `pick_from_profile` → Canada chosen and verified → Review → approved → submitted with country=Canada |
+| A page nobody can get past ("something went wrong") | — | AI reported it: `ai_could_not_resolve`, no questions invented, attempt kept |
+
+**Real provider (CA_LIVE_CODEX=1), actual trace:**
+- Workday gate: OBSERVE page_state "questions", headings "Before you continue / How would you like to continue?" →
+  REASON "a non-personal continuation choice before the application" → ACTION choose_option → VERIFY "option selected
+  and verified" → ACTION click "Proceed →" → VERIFY "page changed" → the Workday adapter recognised My Experience and
+  continued to Review. The two later re-runs of the same attempt replayed it: 0 model calls.
+- Custom picker: REASON "the page requires a country of residence through a custom picker before it can advance" →
+  ACTION pick_from_profile → VERIFY "“Canada” chosen and shown by the control" → Review.
+
+**Cost (same scenarios, real provider):** Workday gate attempt (3 runs): before replay 4 model calls; after 2
+(+ 2 replays, 0 calls). Custom picker: 2 calls before (one on the review page), 1 after. Each call: ~3.5–10k tokens
+(mostly Codex's own instructions), 3–10 s.
+
+**GPT reasoning evaluation after the change (44 cases, real provider, fresh run):** 43/44 (goal 6/6, irrelevant
+10/10, composite 6/6, fact 3/4, ambiguity 4/4, stop 8/8, recovery 6/6); ~3.2 s per decision. The previous run
+scored 41/44 because the model used the new `pick_from_profile` on an address typeahead and on an international phone
+widget's country selector — valid uses with the right fact on the right control, so the rubric now accepts them (a
+wrong fact or target still fails). The remaining miss is genuine: a street-address autocomplete picked with
+`location.full` instead of `contact.address`; the prompt now states what each location fact contains (not re-run).
+
+**Regression:** `npm test` 341 passed, 10 skipped (opt-in live); `npm run test:e2e` 21 passed; typecheck, build,
+secret scan clean.
+
+### Remaining
+
+- Replays are per attempt (not shared across employers by design — layouts are not memorised as knowledge).
+- Visual (screenshot) reasoning is not used; the agent reads structure and text.
+- The agent acts one decision per call; multi-action plans per call would cut calls further on long unfamiliar pages.
+- Real-site validation of take-over on the owner's paused applications is pending the owner's go-ahead.

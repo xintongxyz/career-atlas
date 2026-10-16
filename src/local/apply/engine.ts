@@ -19,7 +19,7 @@
 //
 // The Workday listbox handling (chooseListbox) and Workday field names follow MIT-licensed projects
 // listed in THIRD_PARTY_NOTICES.md (AutoApply, Autofill-Jobs); see src/local/apply/workday.ts.
-import { classificationUrl, type AttemptState, type FilledField, type InterventionReason, type PendingQuestion } from "@shared/apply";
+import { blockerOf, classificationUrl, type AttemptState, type FilledField, type InterventionReason, type PendingQuestion } from "@shared/apply";
 import { emptyProfile, profileSchema, type Profile } from "@shared/profile";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,6 +35,7 @@ import { tenantOf, type AccountManager } from "./credentials";
 import { questionMeaning } from "@shared/apply-semantic";
 import type { PublicFacts } from "./codex-agent";
 import { createAgent, type Proposer } from "./browser-agent";
+import { codexUsage } from "../codex";
 import { judgeOption, openQuestion, writeAnswer, type Writer } from "./answer-engine";
 import { APPLY_CTA_RE, MARK_SUBMIT, PAGE_MAP, pageState, type PageMap, type PageState } from "./page-intent";
 import { PAGE_SIGNALS } from "./dom";
@@ -47,7 +48,7 @@ import { fillSections } from "./wd-sections";
 import { fillRows } from "./rows";
 import { jobSourceOf, type JobSource } from "@shared/apply-match";
 import type { MailVerifier } from "./mail";
-import { accountTermsLabel, activeStep, clickNext, codeInput, declineCookies, enterApplyFlow, isAutofillUpload, nextButton, submitVerificationCode, uploadResume, wdReady, wdSettle, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
+import { accountTermsLabel, activeStep, clickNext, codeInput, declineCookies, enterApplyFlow, isAutofillUpload, nextButton, submitVerificationCode, uploadResume, wdReady, wdSettleStable, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
 
 const { applicationAttempts, documents, jobPostings, companies } = schema;
 
@@ -88,8 +89,17 @@ export interface EngineDeps {
   answerWriter?: (() => Promise<Writer | null>) | null;
 }
 
+/** One remembered action of a solved take-over (replayed by visible text / label, re-validated). */
+interface PlaybookStep {
+  action: string;
+  target: string;
+  option?: string;
+  fact?: string;
+  checked?: boolean;
+}
+
 /** What the attempt shows while a generic site is being worked on. */
-const STAGE_OF: Record<PageState, string> = { posting: "on_posting", application: "filling", questions: "filling", login: "sign_in", unknown: "reading_page" };
+const STAGE_OF: Record<PageState, string> = { posting: "on_posting", application: "filling", questions: "filling", review: "review", login: "sign_in", unknown: "reading_page" };
 
 class Stop extends Error {
   constructor(public code: string) {
@@ -131,6 +141,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   const evidence = new Set<string>((row.evidence as string[] | null) ?? []);
   let clickedThisRun = false;
   let agentRan = false;
+  /** Why the AI is currently in charge (what the deterministic flow expected) — shown to the agent. */
+  let situation: string | null = null;
   let agent: ReturnType<typeof createAgent> | null = null;
   let agentOpen: PendingQuestion[] = [];
   let jobTitle: string | null = null;
@@ -182,6 +194,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     }
   };
   const pause = async (reason: InterventionReason, questions: PendingQuestion[] = [], extra: Partial<typeof applicationAttempts.$inferInsert> = {}) => {
+    questions = questions.map((q) => ({ ...q, blocker: q.blocker ?? blockerOf(q) }));
     await set({ state: "needs_review", intervention: reason, questions, visible: 0, stage: null, ...extra }, "paused", { reason });
     return "needs_review" as const;
   };
@@ -189,6 +202,10 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   const reasonFor = (questions: PendingQuestion[]): InterventionReason =>
     questions.some((q) => q.reason === "legal") ? "approval_needed" : questions.every((q) => q.reason === "unsupported") ? "unsupported_field" : "missing_information";
 
+  // Cost of this run: model calls / tokens / model time (Codex usage deltas), wall time, AI take-overs.
+  const usage0 = { ...codexUsage };
+  const t0run = Date.now();
+  const takeovers = { count: 0, resolved: 0 };
   try {
     await set({ state: "filling", startedAt: row.startedAt ?? Date.now(), stage: "opening", errorCode: null, errorMessage: null }, visible ? "started_visible" : "started");
 
@@ -241,6 +258,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   } finally {
     // Closing the browser must never block the queue (a hung close would stall every later attempt).
     if (ctx) await Promise.race([ctx.close().catch(() => {}), sleep(10_000)]);
+    // Run metrics as a step (append-only; never rewrites answers the user may be giving right now).
+    await updateAttempt(db, attemptId, {}, { code: "run_metrics", params: { model_calls: codexUsage.calls - usage0.calls, tokens: codexUsage.tokens - usage0.tokens, model_s: Math.round((codexUsage.ms - usage0.ms) / 1000), run_s: Math.round((Date.now() - t0run) / 1000), takeovers: takeovers.count, resolved: takeovers.resolved } }).catch(() => {});
   }
 
   // ================================================================ routes
@@ -618,13 +637,22 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
             await clickNamed(page, adv.name);
             page = await adoptNewTab(page, tabs);
             await sleep(400);
-            if (`${page.url()}:${contentSig(await observe(page))}` === before && repeats >= 2) return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+            if (`${page.url()}:${contentSig(await observe(page))}` === before && repeats >= 2) {
+              const t = await aiTakeover(page, `The form's "${adv.name}" button was pressed but the page did not move to another step and showed no clear error. Find out what the page still needs (an unfamiliar control, a hidden required answer, a different continue button) and move the application on.`, async (p) => `${p.url()}:${contentSig(await observe(p))}` !== before);
+              page = t.page;
+              if (t.result === "resolved") continue;
+              if (t.result === "review") return reviewPage(page);
+              if (t.questions.length) return visible ? manual(page, null, reasonFor(t.questions), t.questions) : pause(reasonFor(t.questions), t.questions);
+              return visible ? manual(page, null, "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+            }
             await set({}, "next_step", { step: step + 2 });
             continue;
           }
           if (adv.action === "review") return reviewPage(page);
         }
         if (questions.length) {
+          questions = await resolveInteractions(page, questions);
+          if (!questions.length) continue; // the AI operated the unfamiliar controls: look at the page again
           await shot(page, `step-${step + 1}`);
           return visible ? manual(page, null, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
         }
@@ -646,6 +674,11 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     return agentOrStop(page, fromIndeed);
   }
 
+  /** A page's identity for replaying a solved take-over: its headings, field labels and buttons (no values). */
+  function pageSignature(m: PageMap): string {
+    return `${m.headings.slice(0, 6).join("|")}#${m.labels.slice(0, 20).join("|")}#${m.names.slice(0, 20).join("|")}`.slice(0, 2000);
+  }
+
   /** What the page shows (headings, controls, fields) — how a step change is recognised without a new URL. */
   function contentSig(m: PageMap): string {
     return `${m.headings.join("|")}#${m.names.join("|")}#${m.labels.join("|")}#${m.applicationFields}`;
@@ -663,6 +696,15 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     agent ??= createAgent({
       goal: `Apply for "${jobTitle ?? "this job"}"${planCtx.employer ? ` at ${planCtx.employer}` : ""}`,
       inWorkflow: () => inWorkflow,
+      situation: () => situation,
+      writeAnswer: (p, f) => writeOne(p, f),
+      judge:
+        planCtx.profile.application_defaults.ai_answer_writing === "on" && deps.answerWriter
+          ? async (value, options) => {
+              const w = await deps.answerWriter!().catch(() => null);
+              return w ? ((await judgeOption(value, options, "other", w))?.pick ?? null) : null;
+            }
+          : null,
       planCtx,
       resume: resumeFile,
       propose,
@@ -798,7 +840,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       // Repeated employment / education blocks first (entry by entry), then the rest of the form.
       const rows = await fillRows(rowsCtx(page));
       const page1 = await fillPage(page, { uploadInPlan: true });
-      const questions = [...rows.questions, ...page1.questions.filter((q) => !rows.questions.some((r) => r.key === q.key))];
+      let questions = [...rows.questions, ...page1.questions.filter((q) => !rows.questions.some((r) => r.key === q.key))];
+      if (questions.length) questions = await resolveInteractions(page, questions);
       if (questions.length) {
         await shot(page, `step-${step + 1}`);
         return visible ? manual(page, ats, reasonFor(questions), questions) : pause(reasonFor(questions), questions);
@@ -856,7 +899,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     for (let i = 0; i < MAX_WORKDAY_STEPS; i++) {
       await checkCancel();
       await declineCookies(page);
-      let st = await wdSettle(page);
+      // Recognised wizard state, or the page as it is once it stops changing (no fixed long wait).
+      let st = await wdSettleStable(page, 15_000);
       if (entered.result === "no_apply" && i === 0 && st.kind === "unknown") throw new Stop("form_not_found");
       if ((await signals(page)).challenge) {
         if (!visible) return pause("captcha");
@@ -895,11 +939,18 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       if (st.kind === "review") break;
       // A page not recognised yet: Workday may still be drawing a heavy step (My Experience after resume
       // parsing) — wait longer before judging; then record what the page shows (labels only), never stop silently.
-      if (st.kind !== "step" && i > 0) st = await wdSettle(page, 45_000);
+      if (st.kind !== "step" && i > 0) st = await wdSettleStable(page, 45_000);
       if (st.kind === "review") break;
       if (st.kind !== "step") {
-        await diagnose(page, "workday-page", (await scan(page)).filter((f) => f.visible), `unrecognised:${st.kind}`);
-        return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "workday_page_unrecognised" });
+        // The adapter does not recognise this page: the AI takes it, and the adapter resumes when a
+        // Workday step (or sign-in / review) is back.
+        const t3 = await aiTakeover(page, `The Workday adapter expected an application step (progress bar + Next), a sign-in page or the review page, but recognises none of them here. Work out what this page is and what it needs, and get the application to its next step.`, async (p) => ["step", "review", "auth", "verify_email"].includes((await wdState(p)).kind));
+        page = t3.page;
+        if (t3.result === "resolved") continue;
+        if (t3.result === "review" && (await wdState(page)).kind === "review") break;
+        await diagnose(page, "workday-page", (await scan(page)).filter((f) => f.visible), `unrecognised:${st.kind}:ai_${t3.result}`);
+        if (t3.questions.length) return visible ? manual(page, "workday", reasonFor(t3.questions), t3.questions) : pause(reasonFor(t3.questions), t3.questions);
+        return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: t3.result === "unavailable" ? "workday_page_unrecognised" : "ai_could_not_resolve" });
       }
       // After signing in, Workday sometimes drops the "Autofill with Resume" choice and opens the
       // empty form instead: go back to the autofill address once, so the resume is uploaded and parsed.
@@ -936,8 +987,9 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         }
         const sections = await fillWorkdaySections(page);
         const generic = await fillPage(page, { uploadInPlan: false, parsedMode });
-        const questions = [...sections.questions, ...generic.questions];
+        let questions = [...sections.questions, ...generic.questions];
         fillingStep = null;
+        if (questions.length) questions = await resolveInteractions(page, questions);
         if (questions.length) {
           await shot(page, `step-${st.index ?? i + 1}`);
           return visible ? manual(page, "workday", reasonFor(questions), questions) : pause(reasonFor(questions), questions);
@@ -953,11 +1005,21 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       }
       // Save and Continue. Workday validates on the server; errors keep us on the same step.
       if (!(await clickNext(page, t.stepReady))) {
+        const t1 = await aiTakeover(page, `The Workday step "${st.step ?? "?"}" was filled but its Save and Continue / Next button never became available. Find what still blocks it (an unfamiliar control, an unanswered required item, a pop-up) and continue to the next step.`, async (p) => {
+          const x = await wdState(p);
+          return x.kind === "review" || (x.kind === "step" && `${x.step ?? ""}|${x.pageId ?? ""}` !== name);
+        });
+        page = t1.page;
+        if (t1.result === "resolved" || t1.result === "review") {
+          lastStep = "";
+          continue;
+        }
         await shot(page, `step-${st.index ?? i + 1}-stuck`);
+        if (t1.questions.length) return visible ? manual(page, "workday", reasonFor(t1.questions), t1.questions) : pause(reasonFor(t1.questions), t1.questions);
         return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "next_not_available" });
       }
       await sleep(800);
-      st = await wdSettle(page);
+      st = await wdSettleStable(page, 15_000);
       const after = `${st.step ?? ""}|${st.pageId ?? ""}`;
       if (after === name && st.kind === "step") {
         // A hidden file input with an uploaded file listed next to it is not "empty".
@@ -967,11 +1029,27 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
           // Exactly the fields the site rejected — the rest of the application is kept as is.
           const qs = fields.map((f) => question(f, f.group ? `${f.group}:${f.groupIndex}:${f.wdField}` : fieldKey(f), "not_accepted", false, st.errors.find((e) => norm(e).includes(norm(f.label).slice(0, 20))) ?? st.errors.join(" | ").slice(0, 300), qmOf(f)));
           await shot(page, `step-${st.index ?? i + 1}-errors`);
-          if (qs.length) return pause("missing_information", qs, { errorMessage: st.errors.join(" | ").slice(0, 600) });
+          // The site rejected values: the AI tries the controls another way before anything is asked.
+          const left = qs.length ? await resolveInteractions(page, qs) : qs;
+          if (qs.length && !left.length) continue;
+          if (left.length) return pause("missing_information", left, { errorMessage: st.errors.join(" | ").slice(0, 600) });
           return pause("validation_errors", [], { errorCode: "step_rejected", errorMessage: st.errors.join(" | ").slice(0, 600) });
         }
         // No error shown and still on the same step: the site may be saving; never loop endlessly.
-        if (++stuck >= 2) return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+        if (++stuck >= 2) {
+          const t2 = await aiTakeover(page, `Save and Continue was pressed on the Workday step "${st.step ?? "?"}" twice, no error is shown, and the step did not change. Find what the page still needs and continue to the next step.`, async (p) => {
+            const x = await wdState(p);
+            return x.kind === "review" || (x.kind === "step" && `${x.step ?? ""}|${x.pageId ?? ""}` !== name);
+          });
+          page = t2.page;
+          if (t2.result === "resolved" || t2.result === "review") {
+            stuck = 0;
+            lastStep = "";
+            continue;
+          }
+          if (t2.questions.length) return visible ? manual(page, "workday", reasonFor(t2.questions), t2.questions) : pause(reasonFor(t2.questions), t2.questions);
+          return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "step_not_advancing" });
+        }
       } else stuck = 0;
     }
 
@@ -1327,6 +1405,116 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     }
     await set({ filled: allFilled }, "filled", { count: allFilled.filter((x) => x.verified).length, total: allFilled.length });
     return { questions };
+  }
+
+  /**
+   * One open question answered by the answer engine (the agent's write_answer tool): written once per
+   * question from verified records (owner opt-in), filled, verified, listed at review.
+   */
+  async function writeOne(page: Page, f: FieldDescriptor): Promise<{ ok: boolean; note: string }> {
+    if (planCtx.profile.application_defaults.ai_answer_writing !== "on") return { ok: false, note: "AI answer writing is off — ask_user" };
+    const oq = openQuestion(f.label, f.maxLength);
+    if (!oq.writable) return { ok: false, note: "this asks for a personal fact or decision — ask_user" };
+    const key = fieldKey(f);
+    const store = ((planCtx.answers.__generated as Record<string, { label: string; text: string; flags: string[] }> | undefined) ??= {});
+    let draft = store[key]?.label === f.label ? store[key] : null;
+    if (!draft) {
+      const w = deps.answerWriter ? await deps.answerWriter().catch(() => null) : null;
+      if (!w) return { ok: false, note: "no AI provider for writing — ask_user" };
+      const d = await writeAnswer(oq, planCtx.profile, { title: jobTitle, employer: planCtx.employer ?? null, description: jobDescription }, w).catch(() => null);
+      if (!d) return { ok: false, note: "the applicant's records do not support an answer — ask_user" };
+      draft = { label: f.label, text: d.text, flags: d.flags };
+      store[key] = draft;
+      await set({ answers: planCtx.answers }, "answer_written", { words: d.text.split(/\s+/).length, flags: d.flags.length });
+    }
+    const ok = await textSet(page, async () => {
+      const x = (await scan(page)).find((y) => y.visible && fieldKey(y) === key);
+      return x ? { f: x, loc: page.locator(`[data-ca-ref="${x.ref}"]`) } : null;
+    }, draft.text);
+    allFilled = allFilled.filter((x) => !(x.status === "generated" && x.label === f.label.slice(0, 300)));
+    allFilled.push({ label: f.label.slice(0, 300), source: "ai_generated", verified: ok, status: "generated", value: draft.text.slice(0, 6000), flags: draft.flags });
+    return ok ? { ok: true, note: "answer written from verified records, filled and kept by the page" } : { ok: false, note: "the page did not keep the whole answer" };
+  }
+
+  /**
+   * AI TAKE-OVER — the one mechanism every flow uses when its own expectation fails (an unrecognised page,
+   * a step that does not advance, a control that rejected the profile's answer). The agent sees the page
+   * and `why` (what the flow expected — never applicant values) and acts with Career Atlas's trusted tools
+   * until `done(page)` says the flow can continue, or it reports what only the applicant can supply, or a
+   * blocker. Bounded; the agent's memory of this attempt is kept between take-overs.
+   */
+  async function aiTakeover(page: Page, why: string, done: (p: Page) => Promise<boolean>, maxSteps = 12): Promise<{ result: "resolved" | "review" | "needs_user" | "blocked" | "unavailable"; page: Page; questions: PendingQuestion[] }> {
+    const propose = deps.browserAgent ? await deps.browserAgent().catch(() => null) : null;
+    if (!propose) return { result: "unavailable", page, questions: [] };
+    const a = agentFor(propose);
+    a.reset();
+    situation = why;
+    takeovers.count++;
+    const before = a.questions.length;
+    // Within this attempt, a page that looks the same as one the AI already solved is replayed through the
+    // same validated tools — no model call; if the replay does not get there, the AI decides as usual.
+    const state = ((planCtx.answers.__state as { playbook?: Record<string, PlaybookStep[]> } | undefined) ??= {});
+    const playbook = (state.playbook ??= {});
+    const sig = pageSignature(await observe(page));
+    if (playbook[sig]?.length) {
+      for (const d of playbook[sig]) {
+        const r = await a.replay(page, d);
+        page = r.page;
+        if (!r.ok) break;
+      }
+      if (await done(page).catch(() => false)) {
+        takeovers.resolved++;
+        await set({}, "ai_takeover", { why: why.slice(0, 120), replayed: playbook[sig].length });
+        await set({ stage: "filling" }, "ai_takeover_result", { result: "resolved" });
+        situation = null;
+        return { result: "resolved", page, questions: [] };
+      }
+    }
+    await set({ stage: "ai_takeover" }, "ai_takeover", { why: why.slice(0, 120) });
+    let result: "resolved" | "review" | "needs_user" | "blocked" = "blocked";
+    const learned: PlaybookStep[] = [];
+    try {
+      for (let k = 0; k < maxSteps; k++) {
+        if (await done(page).catch(() => false)) {
+          result = "resolved";
+          break;
+        }
+        const r = await a.step(page);
+        if (r.kind === "acted") {
+          page = r.page;
+          if (r.ok) learned.push({ action: r.action.action, target: r.target, ...("option" in r.action ? { option: r.action.option } : {}), ...("fact" in r.action ? { fact: r.action.fact } : {}), ...("checked" in r.action ? { checked: r.action.checked } : {}) });
+        } else if (r.kind === "finish" || r.kind === "stop") {
+          result = r.outcome.status === "review_ready" ? "review" : r.outcome.status === "needs_user" ? "needs_user" : "blocked";
+          break;
+        }
+      }
+      if (result === "blocked" && (await done(page).catch(() => false))) result = "resolved";
+    } finally {
+      situation = null;
+    }
+    if (result === "resolved" || result === "review") takeovers.resolved++;
+    // What worked is kept with the attempt (structure only: actions and the visible texts they targeted).
+    if (result === "resolved" && learned.length) playbook[sig] = learned.slice(0, 12);
+    await set({ stage: "filling", ...(result === "resolved" && learned.length ? { answers: planCtx.answers } : {}) }, "ai_takeover_result", { result });
+    return { result, page, questions: a.questions.slice(before) };
+  }
+
+  /**
+   * Before asking the applicant: questions caused by the PAGE (a control that rejected the profile's answer,
+   * no matching option, an unsupported control) go to the AI first; only what it cannot resolve — and
+   * genuine facts / decisions — remain for the applicant.
+   */
+  async function resolveInteractions(page: Page, questions: PendingQuestion[]): Promise<PendingQuestion[]> {
+    const structural = questions.filter((q) => blockerOf(q) === "interaction");
+    if (!structural.length) return questions;
+    const keys = new Set(structural.map((q) => q.key));
+    // Still open: empty and required, or marked invalid by the site (a rejected value is not empty).
+    const open = async (p: Page) => (await scan(p)).filter((f) => f.visible && keys.has(fieldKey(f)) && (f.invalid || (isEmpty(f.value) && f.required)));
+    const why = `Career Atlas could not enter the applicant's answer into these controls (their behaviour is unfamiliar): ${structural.map((q) => `"${q.label.slice(0, 80)}" (${q.reason})`).join("; ")}. Operate them with read_options / pick_from_profile / choose_from_profile, then stop — do not move to another step.`;
+    const t = await aiTakeover(page, why, async (p) => (await open(p)).length === 0, 10);
+    if (t.result === "unavailable") return questions;
+    const left = new Set((await open(t.page)).map((f) => fieldKey(f)));
+    return [...questions.filter((q) => !keys.has(q.key) || left.has(q.key)), ...t.questions.filter((q) => !questions.some((x) => x.key === q.key))];
   }
 
   /** An accuracy declaration may be given only over values that were all verified on the page (none parsed, none flagged). */

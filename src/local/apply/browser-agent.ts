@@ -16,7 +16,8 @@ import { questionMeaning } from "@shared/apply-semantic";
 import type { Profile } from "@shared/profile";
 import type { Page } from "playwright-core";
 import { isIndeedOwnedHost } from "./indeed";
-import { checkSet, listSelect, scan, searchSelect, shownMatches, textSet, valuesOf, type Finder } from "./interact";
+import { checkSet, listSelect, openChoices, scan, searchSelect, shownMatches, textSet, valuesOf, type Finder } from "./interact";
+import { domainForLabel, matchOptionSemantic } from "@shared/apply-semantic";
 import { APPLY_CTA_RE, cookieChoice, PAGE_MAP, pageState, type PageMap, type PageState, type PageWidget, type WidgetKind } from "./page-intent";
 import { classify, datePartOf, fieldKey, MONTH_NAMES, norm, parseDateAnswer, planForm, profileValue, question, screeningValue, toAction, type FieldDescriptor, type PlanContext, type Semantic } from "./plan";
 import { phoneAccepted, type CanonicalPhone } from "@shared/phone";
@@ -250,13 +251,16 @@ export type AgentAction =
   | { action: "scroll" }
   | { action: "wait" }
   | { action: "ask_user"; ref?: string; question: string }
+  | { action: "read_options"; ref: string }
+  | { action: "pick_from_profile"; ref: string; fact: string }
+  | { action: "write_answer"; ref: string }
   | { action: "finish"; status: "review_ready" | "needs_user" | "blocked"; reason: string };
 
 export const PROPOSAL_SCHEMA = {
   type: "object",
   properties: {
     reasoning: { type: "string", description: "One short sentence: what the page shows and why this action." },
-    action: { type: "string", enum: ["click", "fill_from_profile", "choose_from_profile", "choose_option", "set_checkbox", "upload_resume", "run_autofill", "dismiss_dialog", "scroll", "wait", "ask_user", "finish"] },
+    action: { type: "string", enum: ["click", "fill_from_profile", "choose_from_profile", "choose_option", "set_checkbox", "upload_resume", "run_autofill", "dismiss_dialog", "scroll", "wait", "ask_user", "finish", "read_options", "pick_from_profile", "write_answer"] },
     ref: { type: ["string", "null"], description: "Element ref from the observation (b… button, f… field)." },
     fact: { type: ["string", "null"], description: "A key from available_facts, for *_from_profile actions." },
     option: { type: ["string", "null"], description: "Exact option text, for choose_option." },
@@ -290,6 +294,11 @@ Rules:
 - CAPTCHA or bot check → finish with needs_user.
 - Fields marked answer_on_file: the applicant answered them — fill_from_profile / choose_from_profile with fact "applicant_answer".
 - Fields marked asked_applicant are waiting for the applicant: never ask again; continue with other fields, and when nothing else can be done, finish with needs_user. Optional questions may stay empty.
+- "situation" (when present) says why you were called in: what Career Atlas's own flow expected and what it found instead. Resolve THAT, then the flow continues by itself.
+- Unfamiliar controls are your job, not the applicant's: read_options opens a dropdown / autocomplete / menu (field or button ref) and shows its real choices; pick_from_profile (ref = the control or the button that opens it, fact = a fact key) makes Career Atlas open it, find the choice that means the applicant's fact, click and verify it — use it for custom dropdowns, autocompletes and button lists, or when choose_from_profile failed.
+- Fact meanings: contact.address = street address (line 1); contact.postal_code = postal / ZIP code; location.city / location.region / location.country = where the applicant lives; location.full = "City, Region, Country" for a single location box; location.phone_country = the phone number's country (calling code).
+- Open questions (describe a project, why this role, tell us about…) → write_answer: Career Atlas writes the answer from the applicant's verified records and fills it. Never ask the applicant to write it.
+- Ask the applicant ONLY for facts or decisions no profile fact covers, identity questions, or consents — never about how a page works.
 - If the last action failed, try a different approach; do not repeat the same failing action.
 Keep "reasoning" to one short sentence.`;
 
@@ -360,6 +369,26 @@ export function validate(a: AgentAction, v: ValidationContext): string | null {
     }
     case "upload_resume":
       return a.ref && !field ? "unknown field ref" : null;
+    case "read_options":
+    case "pick_from_profile": {
+      if (!btn && !field) return "unknown ref — use a ref from the current observation";
+      const text = btn?.text ?? field?.label ?? "";
+      if (btn?.area === "search" || btn?.area === "subscription" || btn?.area === "matching") return "that control belongs to a site widget, not to the application";
+      if (SUBMIT_RE.test(text) || (ACCOUNT_RE.test(text) && !/guest|without (an )?account/i.test(text))) return "not a choice control";
+      if (field?.inputType === "password") return "password fields are never touched by the agent";
+      if (a.action === "pick_from_profile") {
+        if (a.fact !== "applicant_answer" && !(a.fact in FACTS) && !a.fact.startsWith("defaults.")) return `unknown fact "${a.fact}" — use a key from available_facts`;
+        if (a.fact !== "applicant_answer" && (field?.demographic || DEMO_RE.test(text))) return "identity questions are answered only by the applicant — ask_user";
+        if (a.fact !== "applicant_answer" && LEGAL_RE.test(text)) return "declarations need the applicant's approval — ask_user";
+      }
+      return null;
+    }
+    case "write_answer": {
+      if (!field) return "unknown field ref";
+      if (field.control !== "text" && field.control !== "textarea") return "write_answer is for free-text fields";
+      if (field.demographic || DEMO_RE.test(field.label) || LEGAL_RE.test(field.label)) return "identity questions and declarations are answered only by the applicant — ask_user";
+      return null;
+    }
     case "ask_user":
       if (!a.question?.trim()) return "ask_user needs the question text";
       if (field && v.asked?.has(fieldKey(field))) return "already asked — continue with the other fields, or finish with needs_user";
@@ -392,6 +421,11 @@ export function toAgentAction(raw: Record<string, unknown>): AgentAction | null 
       return { action: raw.action };
     case "ask_user":
       return { action: "ask_user", ref: s("ref"), question: s("question") ?? "" };
+    case "read_options":
+    case "write_answer":
+      return s("ref") ? { action: raw.action, ref: s("ref")! } : null;
+    case "pick_from_profile":
+      return s("ref") && s("fact") ? { action: "pick_from_profile", ref: s("ref")!, fact: s("fact")! } : null;
     case "finish":
       return { action: "finish", status: (["review_ready", "needs_user", "blocked"].includes(String(raw.status)) ? raw.status : "blocked") as "review_ready" | "needs_user" | "blocked", reason: s("reasoning") ?? "" };
     default:
@@ -406,6 +440,12 @@ export type Proposer = (system: string, user: string, schema: Record<string, unk
 export interface AgentHost {
   /** "Apply for <job title> at <employer>". */
   goal: string;
+  /** Why the agent was called in (what Career Atlas's flow expected and found) — no applicant values. */
+  situation?: () => string | null;
+  /** The answer engine for an open question in this field (null when AI answer writing is off). */
+  writeAnswer?: ((page: Page, field: FieldDescriptor) => Promise<{ ok: boolean; note: string }>) | null;
+  /** Which offered choice is the same as a profile value (owner opt-in); null when unavailable. */
+  judge?: ((value: string, options: string[]) => Promise<string | null>) | null;
   /** True once an Apply / guest action led into the application (page-state hint for the model). */
   inWorkflow?: () => boolean;
   planCtx: PlanContext;
@@ -459,7 +499,8 @@ export function createAgent(host: AgentHost) {
    */
   async function decide(page: Page, o: { lastResult?: string; history?: string[] } = {}) {
     const { obs, fields } = await observeForModel(page, { goal: host.goal, answers: host.planCtx.answers, asked, inWorkflow: host.inWorkflow?.() });
-    const user = JSON.stringify({ step: n, last_action_result: o.lastResult ?? lastResult, recent_actions: (o.history ?? history).slice(-6), available_facts: factCatalog(host.planCtx.profile), profile_summary: profileSummary(host.planCtx.profile), page: obs });
+    const situation = host.situation?.() ?? null;
+    const user = JSON.stringify({ step: n, ...(situation ? { situation } : {}), last_action_result: o.lastResult ?? lastResult, recent_actions: (o.history ?? history).slice(-6), available_facts: factCatalog(host.planCtx.profile), profile_summary: profileSummary(host.planCtx.profile), page: obs });
     const raw = await host.propose(AGENT_SYSTEM, user.slice(0, 30_000), PROPOSAL_SCHEMA);
     const action = toAgentAction(raw);
     const reasoning = String(raw.reasoning ?? "").slice(0, 240);
@@ -536,7 +577,28 @@ export function createAgent(host: AgentHost) {
     return out(page, "step_limit", "step limit reached");
   }
 
-  return { step, run, decide, questions, asked };
+  /**
+   * Replays one remembered action on a page that looks the same again (no model call): the target is found
+   * again by its visible text / label, then validated and executed like any proposal.
+   */
+  async function replay(page: Page, d: { action: string; target: string; option?: string; fact?: string; checked?: boolean }): Promise<{ ok: boolean; page: Page }> {
+    const { obs, fields } = await observeForModel(page, { goal: host.goal, answers: host.planCtx.answers, asked, inWorkflow: host.inWorkflow?.() });
+    const ref = obs.buttons.find((b) => b.text === d.target)?.ref ?? obs.fields.find((f) => f.label === d.target)?.ref;
+    const a = ref || ["run_autofill", "scroll", "wait", "upload_resume"].includes(d.action) ? toAgentAction({ action: d.action, ref: ref ?? null, option: d.option ?? null, fact: d.fact ?? null, checked: d.checked ?? null, question: null, status: null }) : null;
+    if (!a || validate(a, { obs, fields, profile: host.planCtx.profile, employer: host.planCtx.employer ?? null, answers: host.planCtx.answers, asked })) return { ok: false, page };
+    const res = await act(page, a, fields, host, questions, asked);
+    host.trace?.({ step: ++n, replayed: { action: a.action, target: d.target.slice(0, 80) }, verification: res.ok ? `ok: ${res.note}` : `FAILED: ${res.note}` });
+    return { ok: res.ok, page: res.page ?? page };
+  }
+
+  /** A new hand-over: earlier failures and results do not count against it. */
+  function reset() {
+    failures = 0;
+    lastResult = "none yet";
+    lastSig = "";
+  }
+
+  return { step, run, decide, reset, replay, questions, asked };
 }
 
 export async function runBrowserAgent(page: Page, host: AgentHost, maxSteps = 30): Promise<AgentOutcome> {
@@ -625,6 +687,51 @@ async function act(page: Page, a: AgentAction, fields: FieldDescriptor[], host: 
     case "run_autofill": {
       const r = await host.autofill(page);
       return { ok: true, note: `${r.verified} values filled and verified; still open: ${r.open.slice(0, 8).join("; ") || "none"}` };
+    }
+    case "read_options": {
+      const opener = byRef(page, a.ref);
+      if (!(await opener.count())) return { ok: false, note: "element gone — observe again" };
+      const choices = await openChoices(page, opener);
+      await page.keyboard.press("Escape").catch(() => {});
+      return choices.length ? { ok: true, note: `choices shown: ${choices.slice(0, 40).map((c) => c.text).join(" | ")}` } : { ok: false, note: "no choices appeared after opening it" };
+    }
+    case "pick_from_profile": {
+      // The value comes from the profile (Career Atlas), the control is opened and read on the page, the
+      // matching choice is clicked and the control must then show it.
+      // A button that opens a list has no field: the fact is resolved without one.
+      const target: FieldDescriptor = field ?? { ref: a.ref, control: "combobox", inputType: "text", name: "", id: "", label: "", placeholder: "", autocomplete: "", required: false, options: [], section: "", demographic: false, value: [], visible: true };
+      const v = resolve(a.fact, target, host.planCtx);
+      if (!v.ok) return { ok: false, note: v.note };
+      const want = String(Array.isArray(v.value) ? v.value[0] : v.value);
+      const opener = byRef(page, a.ref);
+      if (!(await opener.count())) return { ok: false, note: "element gone — observe again" };
+      const typeable = await opener.isEditable({ timeout: 500 }).catch(() => false);
+      let choices = await openChoices(page, opener, typeable ? want : undefined);
+      if (!choices.length && typeable) choices = await openChoices(page, opener, want.split(/[\s,]+/)[0]);
+      if (!choices.length) return { ok: false, note: "no choices appeared after opening it" };
+      const domain = domainForLabel(field?.label ?? "", field ? classify(field) : undefined);
+      let pick = (matchOptionSemantic(choices.map((c) => ({ label: c.text, value: c.text })), want, domain)?.label as string | undefined) ?? null;
+      if (!pick && host.judge) pick = await host.judge(want, choices.map((c) => c.text)).catch(() => null);
+      if (!pick) return { ok: false, note: `none of the ${choices.length} choices means the applicant's answer` };
+      const c = choices.find((x) => x.text === pick)!;
+      await page.locator(`[data-ca-pick="${c.i}"]`).first().click({ timeout: 4000 }).catch(() => {});
+      await sleep(600);
+      // Verified when the control (or the block around it) now shows the chosen text.
+      const shown = await opener
+        .evaluate((el, t) => {
+          const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+          const box = el.closest("[role=group], fieldset, li, [class*=field], [class*=Field], div") ?? el;
+          const value = (el as unknown as { value?: string }).value ?? "";
+          return norm(value).includes(norm(t)) || norm((box as unknown as { innerText?: string }).innerText ?? "").includes(norm(t));
+        }, pick)
+        .catch(() => false);
+      host.record({ label: (field?.label ?? "choice").slice(0, 300), source: `agent:${v.source}`, verified: shown });
+      return shown ? { ok: true, note: `“${pick}” chosen and shown by the control` } : { ok: false, note: "the control did not keep the choice" };
+    }
+    case "write_answer": {
+      if (!field) return { ok: false, note: "unknown field" };
+      if (!host.writeAnswer) return { ok: false, note: "AI answer writing is off — ask_user" };
+      return host.writeAnswer(page, field);
     }
     case "scroll":
       await page.mouse.wheel(0, 800).catch(() => {});

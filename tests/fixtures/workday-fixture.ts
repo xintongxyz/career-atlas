@@ -341,6 +341,25 @@ function render() {
     setTimeout(render, 2500);
     return;
   }
+  // An unfamiliar page between steps, with none of Workday's markers (a tenant customisation): only an AI
+  // that reads it can continue — choose "Continue with my application" and press "Proceed →".
+  if (has('interstitial') && step === 1 && !CFG.interDone) {
+    app.innerHTML = '<main class="custom-gate"><h1>Before you continue</h1><p>We have saved your contact details.</p>' +
+      '<fieldset><legend>How would you like to continue?</legend><label><input type="radio" name="gate" value="continue"> Continue with my application</label><label><input type="radio" name="gate" value="later"> Save and finish later</label></fieldset>' +
+      '<p class="gate-err" role="alert" hidden>Please choose an option.</p><button type="button" id="gate-go" class="custom-btn">Proceed →</button></main>';
+    document.getElementById('gate-go').onclick = () => {
+      const v = (document.querySelector('input[name=gate]:checked') || {}).value;
+      if (v === 'continue') { CFG.interDone = true; render(); }
+      else if (v === 'later') { app.innerHTML = '<main><h1>Saved</h1><p>You can finish your application later from Candidate Home.</p></main>'; }
+      else document.querySelector('.gate-err').hidden = false;
+    };
+    return;
+  }
+  // A page nobody can get past (the site failed): the AI must say so, not invent a way through.
+  if (has('deadend') && step === 1) {
+    app.innerHTML = '<main class="custom-error"><h1>We are sorry</h1><p>Something went wrong on our side. Please try again later.</p><button type="button" disabled>Retry</button></main>';
+    return;
+  }
   // A heavy step (My Experience after resume parsing) shows only a spinner for a long while on some tenants.
   if (has('slowexp') && step === 1 && !CFG.expShown) {
     CFG.expShown = true;

@@ -87,7 +87,8 @@ export function gptCases(variants = 2): GptCase[] {
       what: "phone in an international widget (flag + dial code shows another country)",
       html: doc(`<h1>Contact</h1><form>${filled("email", "Email")}<label for="ip${v}">Phone *</label><div class="iti"><button type="button" class="iti__selected-flag" aria-label="Selected country"><span class="iti__selected-dial-code">+61</span></button><input id="ip${v}" type="tel" data-truth="number" required></div><button type="submit">Continue</button></form>`),
       inWorkflow: true,
-      accept: (p) => (is(p, "fill_from_profile", "number") && p.fact === "contact.phone") || p.action === "run_autofill",
+      // The number from the profile, or first the widget's country set to the phone's country (pick_from_profile).
+      accept: (p) => (is(p, "fill_from_profile", "number") && p.fact === "contact.phone") || (p.action === "pick_from_profile" && p.fact === "location.phone_country") || p.action === "run_autofill",
     });
     out.push({
       id: `date-parts-${v}`,
@@ -104,7 +105,7 @@ export function gptCases(variants = 2): GptCase[] {
       what: "address typeahead box",
       html: doc(`<h1>Where do you live?</h1><form>${filled("first_name", "First name")}<label for="ad${v}">${r.pick(["Home address", "Start typing your address"])} *</label><input id="ad${v}" role="combobox" aria-expanded="false" aria-autocomplete="list" data-truth="address" required><ul role="listbox" hidden></ul><button type="submit">Next</button></form>`),
       inWorkflow: true,
-      accept: (p) => (is(p, ["fill_from_profile", "choose_from_profile"], "address") && p.fact === "contact.address") || p.action === "run_autofill",
+      accept: (p) => (is(p, ["fill_from_profile", "choose_from_profile", "pick_from_profile"], "address") && p.fact === "contact.address") || p.action === "run_autofill",
     });
     out.push({
       id: `eligibility-${v}`,

@@ -63,6 +63,20 @@ export interface PendingQuestion {
   rememberable?: boolean;
   /** The profile entry a row question belongs to (e.g. the school), so the answer is saved to THAT entry. */
   entry?: string | null;
+  /**
+   * Why the applicant is asked: "personal_fact" (not in any verified record), "authorization" (a decision,
+   * consent or identity answer), "synthesis" (an open answer the AI may not write), "interaction" (a control
+   * the AI could not operate after trying), "page" / "external" (a page or blocker the AI could not resolve).
+   */
+  blocker?: "personal_fact" | "authorization" | "synthesis" | "interaction" | "page" | "external";
+}
+
+/** The blocker class of a question, from its reason. */
+export function blockerOf(q: Pick<PendingQuestion, "reason">): NonNullable<PendingQuestion["blocker"]> {
+  if (q.reason === "missing" || q.reason === "attachment") return "personal_fact";
+  if (q.reason === "open_ended") return "synthesis";
+  if (q.reason === "not_accepted" || q.reason === "no_matching_option" || q.reason === "unsupported") return "interaction";
+  return "authorization"; // sensitive, legal, demographic, consent, approval
 }
 
 export interface FilledField {

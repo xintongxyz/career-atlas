@@ -53,8 +53,38 @@ document.querySelectorAll('.cs').forEach((w) => {
 });
 </script></body></html>`;
 
+// A form with a CUSTOM country picker: a plain button that opens a list of clickable items (no select, no
+// combobox role, no option role). Rules cannot see it as a field; the step only advances once it is set.
+const CUSTOM = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Apply (synthetic)</title>
+<style>body{font-family:sans-serif;max-width:760px;margin:16px auto}.field{margin:8px 0}label{display:block}[hidden]{display:none!important}.picker-list div{padding:4px;cursor:pointer}</style></head><body>
+<h1>Analyst (synthetic) — Application</h1>
+<form id="f" method="post" action="/qa/custom/1/submit" enctype="multipart/form-data">
+  <section class="s1"><h2>About you</h2>
+    <div class="field"><label for="fn">First name *</label><input id="fn" name="first_name" required></div>
+    <div class="field"><label for="ln">Last name *</label><input id="ln" name="last_name" required></div>
+    <div class="field"><label for="em">Email *</label><input id="em" name="email" type="email" required></div>
+    <div class="field"><span class="lbl">Country of residence *</span><div class="picker"><button type="button" class="picker-btn">Select a country</button><div class="picker-list" hidden>${["Australia", "Brazil", "Canada", "France", "India", "United Kingdom"].map((c) => `<div onclick="pick(this)">${c}</div>`).join("")}</div><input type="hidden" name="country"></div></div>
+    <p class="err" role="alert" hidden>Please choose your country of residence.</p>
+    <button type="button" class="next">Next</button></section>
+  <section class="s2" hidden><h2>Review</h2><p>Check your details.</p><button type="submit">Submit application</button></section>
+</form>
+<script>
+document.querySelector('.picker-btn').onclick = () => { document.querySelector('.picker-list').hidden = false; };
+function pick(el) { document.querySelector('input[name=country]').value = el.textContent; document.querySelector('.picker-btn').textContent = el.textContent; document.querySelector('.picker-list').hidden = true; }
+document.querySelector('.next').onclick = () => {
+  const ok = ['fn', 'ln', 'em'].every((id) => document.getElementById(id).value) && document.querySelector('input[name=country]').value;
+  document.querySelector('.err').hidden = !!ok;
+  if (ok) { document.querySelector('.s1').hidden = true; document.querySelector('.s2').hidden = false; }
+};
+</script></body></html>`;
+
 export async function questionnaireRoute(_req: IncomingMessage, res: ServerResponse, u: URL): Promise<boolean> {
   if (!u.pathname.startsWith("/qa/")) return false;
+  if (u.pathname === "/qa/custom/1") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(CUSTOM);
+    return true;
+  }
   if (/^\/qa\/\d+$/.test(u.pathname)) {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(PAGE);

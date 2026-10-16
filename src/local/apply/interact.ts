@@ -838,3 +838,64 @@ export function frameView(page: Page, frame: import("playwright-core").Frame): P
     },
   }) as Page;
 }
+
+// ---------------------------------------------------------------- unfamiliar controls (general tools)
+
+/** Elements that can be a choice in a custom dropdown, autocomplete or button list. */
+const PICKABLE = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="treeitem"], [role="radio"], li, button, a, [onclick], [data-value], [tabindex]';
+
+/** Marks every choice-like element visible now, so the ones that appear after opening a control can be told apart. */
+export async function markVisibleChoices(page: Page) {
+  await page
+    .evaluate(`(() => {
+      const vis = (e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+      document.querySelectorAll('[data-ca-pre]').forEach((e) => e.removeAttribute('data-ca-pre'));
+      document.querySelectorAll(${JSON.stringify(PICKABLE)}).forEach((e) => { if (vis(e)) e.setAttribute('data-ca-pre', '1'); });
+    })()`)
+    .catch(() => {});
+}
+
+/**
+ * The choices a control showed when it was opened (visible now, not before; innermost element per text),
+ * tagged data-ca-pick="<i>" for clicking. Texts only.
+ */
+export async function newChoices(page: Page): Promise<{ i: number; text: string }[]> {
+  return ((await page
+    .evaluate(`(() => {
+      const vis = (e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+      document.querySelectorAll('[data-ca-pick]').forEach((e) => e.removeAttribute('data-ca-pick'));
+      const all = [...document.querySelectorAll(${JSON.stringify(PICKABLE)})].filter((e) => vis(e) && !e.hasAttribute('data-ca-pre') && !e.closest('[data-ca-outside]'));
+      const text = (e) => (e.innerText || e.textContent || '').replace(/\\s+/g, ' ').trim();
+      const out = [];
+      for (const e of all) {
+        const t = text(e);
+        if (!t || t.length > 120) continue;
+        if (all.some((c) => c !== e && e.contains(c) && text(c) === t)) continue; // innermost with the same text
+        if (out.some((o) => o.text === t)) continue;
+        e.setAttribute('data-ca-pick', String(out.length));
+        out.push({ i: out.length, text: t });
+        if (out.length >= 200) break;
+      }
+      return out;
+    })()`)
+    .catch(() => [])) as { i: number; text: string }[]);
+}
+
+/** Opens a control (a field or the button that opens it), optionally types a query, and reads the choices that appear. */
+export async function openChoices(page: Page, opener: Locator, query?: string): Promise<{ i: number; text: string }[]> {
+  await markVisibleChoices(page);
+  await opener.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+  await opener.click({ timeout: 4000 }).catch(() => opener.click({ force: true, timeout: 3000 }).catch(() => {}));
+  if (query && (await opener.isEditable({ timeout: 500 }).catch(() => false))) {
+    await opener.fill("", { timeout: 2000 }).catch(() => {});
+    await opener.pressSequentially(query, { delay: 30, timeout: 6000 }).catch(() => {});
+  }
+  let seen: { i: number; text: string }[] = [];
+  for (let w = 0; w < 12; w++) {
+    await sleep(250);
+    const now = await newChoices(page);
+    if (now.length && now.length === seen.length) return now;
+    seen = now;
+  }
+  return seen;
+}
