@@ -48,6 +48,7 @@ const obs: AgentObservation = {
     { ref: "b14", text: "Media and entertainment", area: "chrome" },
     { ref: "b15", text: "Apply now", area: "chrome" },
     { ref: "b16", text: "Cookie settings", area: "cookie" },
+    { ref: "b17", text: "Send" },
   ],
 };
 const ctx: ValidationContext = { obs, fields, profile, employer: null };
@@ -126,5 +127,44 @@ describe("browser agent: field state in the observation", () => {
     expect(_agentTest.stateOf(f({ label: "Country", control: "select", options: opts("Canada", "France"), value: ["Canada"] }))).toBe("filled");
     expect(_agentTest.stateOf(f({ label: "First name", value: "Alex" }))).toBe("filled");
     expect(_agentTest.stateOf(f({ label: "First name", value: "" }))).toBe("empty");
+  });
+});
+
+describe("browser agent: consents within the applicant's approval", () => {
+  const privacy = f({ ref: "c1", label: "I agree to Example Co's Privacy Policy", control: "checkbox", value: false, name: "consent" });
+  const bundled = f({ ref: "c2", label: "I agree to the Privacy Policy and to binding arbitration", control: "checkbox", value: false, name: "arb" });
+  const yesNo = f({ ref: "c3", label: "Do you agree to the Privacy Policy?", control: "select", name: "pp", options: [{ label: "Yes", value: "y" }, { label: "No", value: "n" }] as FieldDescriptor["options"] });
+  const o2: AgentObservation = { ...obs, buttons: [{ ref: "a1", text: "Agree", context: "I agree to Example Co's Privacy Policy. Agree" }, { ref: "a2", text: "I accept", context: "I accept binding arbitration of all claims. I accept" }] };
+  // Career Atlas's standing check stands in: privacy notices authorised, nothing else.
+  const standing = (text: string) => /privacy policy/i.test(text) && !/arbitration/i.test(text);
+  const c = (extra: Partial<ValidationContext> = {}): ValidationContext => ({ obs: o2, fields: [privacy, bundled, yesNo], profile, employer: null, ...extra });
+
+  it("a bare \"Send\" is the final submit: never clicked by the agent", () => {
+    expect(validate({ action: "click", ref: "b17" }, ctx)).toMatch(/final submit/);
+  });
+
+  it("ticks an approved consent; refuses one outside the approval", () => {
+    expect(validate({ action: "set_checkbox", ref: "c1", checked: true }, c())).toMatch(/approval/);
+    expect(validate({ action: "set_checkbox", ref: "c1", checked: true }, c({ consentApproved: standing }))).toBeNull();
+    expect(validate({ action: "set_checkbox", ref: "c2", checked: true }, c({ consentApproved: standing }))).toMatch(/approval/);
+    // The applicant's own answer to this very consent.
+    expect(validate({ action: "set_checkbox", ref: "c1", checked: true }, c({ answers: { "name:consent": true } }))).toBeNull();
+  });
+
+  it("an approved Yes / No consent: only the affirmative option", () => {
+    expect(validate({ action: "choose_option", ref: "c3", option: "Yes" }, c({ consentApproved: standing }))).toBeNull();
+    expect(validate({ action: "choose_option", ref: "c3", option: "No" }, c({ consentApproved: standing }))).toMatch(/approval/);
+    expect(validate({ action: "choose_option", ref: "c3", option: "Yes" }, c())).toMatch(/approval/);
+  });
+
+  it("a button that gives a consent: judged by the statement around it", () => {
+    expect(validate({ action: "click", ref: "a1" }, c())).toMatch(/not approved/);
+    expect(validate({ action: "click", ref: "a1" }, c({ consentApproved: standing }))).toBeNull();
+    expect(validate({ action: "click", ref: "a2" }, c({ consentApproved: standing }))).toMatch(/not approved/);
+  });
+
+  it("an approved consent is never asked again, and checkboxes are set with set_checkbox", () => {
+    expect(validate({ action: "ask_user", ref: "c1", question: "Agree?" }, c({ consentApproved: standing }))).toMatch(/already approved/);
+    expect(validate({ action: "pick_from_profile", ref: "c1", fact: "applicant_answer" }, c({ answers: { "name:consent": true } }))).toMatch(/set_checkbox/);
   });
 });

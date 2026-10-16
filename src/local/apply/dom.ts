@@ -146,8 +146,15 @@ export const SCAN_FIELDS = String.raw`(() => {
   const out = [];
   const seenGroups = new Set();
   const seenDates = new Set();
-  const controls = root.querySelectorAll('input, select, textarea, button[aria-haspopup="listbox"]');
+  const controls = root.querySelectorAll('input, select, textarea, button[aria-haspopup="listbox"], [role="checkbox"]:not(input), [role="switch"]:not(input)');
   for (const el of controls) {
+    // Custom checkboxes / switches (a div or button with role="checkbox" and aria-checked): one checkbox field.
+    if (el.tagName !== 'INPUT' && /^(checkbox|switch)$/.test(el.getAttribute('role') || '')) {
+      if (el.querySelector('input[type="checkbox"]') || el.closest('[data-ca-outside], [aria-hidden="true"]') || el.getAttribute('aria-disabled') === 'true') continue;
+      const label = labelFor(el) || textOf(el);
+      out.push({ invalid: el.getAttribute('aria-invalid') === 'true', inputType: 'checkbox', name: el.getAttribute('name') || el.getAttribute('data-name') || '', id: el.id || '', placeholder: '', autocomplete: '', section: sectionOf(el), demographic: isDemo(el), options: [], wdField: '', group: null, groupIndex: null, help: '', maxLength: null, ref: ref(el), control: 'checkbox', label, required: el.getAttribute('aria-required') === 'true' || requiredOf(el, label), value: el.getAttribute('aria-checked') === 'true', visible: visible(el) });
+      continue;
+    }
     const type = el.tagName === 'BUTTON' ? 'listbox' : (el.getAttribute('type') || el.tagName).toLowerCase();
     // (type="search" is kept: Workday's searchable prompts and the skills box may use it.)
     if (['hidden', 'submit', 'button', 'reset', 'image', 'password'].includes(type)) continue;

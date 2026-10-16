@@ -153,8 +153,8 @@ export async function perform(page: Page, a: PlannedAction) {
       await loc.blur().catch(() => {});
       return;
     case "check":
-      // A click (not setChecked): some forms re-render on change, which would make setChecked retry.
-      if ((await loc.isChecked()) !== a.value) await loc.click({ force: true });
+      // Where the site draws the box, with its own events, verified (a re-rendered node is found again).
+      await checkSet(page, () => locate(page, (f) => f.ref === a.ref || (f.control === "checkbox" && fieldKey(f) === a.key)), a.value);
       return;
     case "date":
       // Workday date sections only commit real keystrokes.
@@ -640,16 +640,79 @@ export async function textSet(page: Page, find: Finder, value: string): Promise<
   return false;
 }
 
-/** A checkbox to the wanted state, verified. */
-export async function checkSet(_page: Page, find: Finder, want: boolean): Promise<boolean> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const t = await find();
-    if (!t) return false;
-    if (t.f.value === want) return true;
-    await t.loc.click({ force: true, timeout: 4000 }).catch(() => {});
-    if (await until(1500, async () => (await find())?.f.value === want)) return true;
+/**
+ * Where a person would click to tick this checkbox, in order: the box itself when it is what is on screen
+ * there; otherwise what the site draws in its place — its <label>, the element it is labelled by, a
+ * custom role="checkbox" control — at the small box inside it or its left edge (never on a link inside
+ * the statement, e.g. "Privacy Policy"). Sites often hide the real input as a 1×1 clipped element under
+ * other content, where a click lands on something else.
+ */
+const CHECK_POINTS = String.raw`(el) => {
+  if (!el) return [];
+  el.scrollIntoView({ block: "center", inline: "nearest" });
+  const proxies = [];
+  for (const l of Array.from(el.labels || [])) proxies.push(l);
+  for (const id of (el.getAttribute("aria-labelledby") || "").split(/\s+/)) {
+    const x = id && document.getElementById(id);
+    if (x) proxies.push(x);
   }
-  return false;
+  const wrap = el.closest("label");
+  if (wrap) proxies.push(wrap);
+  // Another control's box is never clicked for this one.
+  const CTRL = 'input:not([type="hidden"]), select, textarea, [role="checkbox"], [role="switch"], [role="radio"]';
+  const other = (e) => [...(e.matches(CTRL) ? [e] : []), ...e.querySelectorAll(CTRL)].some((c) => c !== el);
+  if (el.parentElement && !proxies.length && !other(el.parentElement)) proxies.push(el.parentElement);
+  const mine = (e) => !!e && !e.closest("a[href]") && (e === el || el.contains(e) || proxies.some((p) => (p === e || p.contains(e)) && !other(e)));
+  const pts = [];
+  const add = (x, y) => {
+    if (x >= 0 && y >= 0 && x < innerWidth && y < innerHeight && mine(document.elementFromPoint(x, y)) && !pts.some((p) => Math.abs(p.x - x) < 2 && Math.abs(p.y - y) < 2)) pts.push({ x, y });
+  };
+  const r = el.getBoundingClientRect();
+  if (r.width >= 6 && r.height >= 6) add(r.x + r.width / 2, r.y + r.height / 2);
+  for (const p of proxies) {
+    for (const d of [p, ...Array.from(p.querySelectorAll("*"))]) {
+      if (other(d)) continue;
+      const b = d.getBoundingClientRect();
+      if (b.width >= 8 && b.height >= 8 && b.width <= 48 && b.height <= 48) add(b.x + b.width / 2, b.y + b.height / 2);
+    }
+    const b = p.getBoundingClientRect();
+    if (b.width > 0 && b.height > 0) add(b.x + Math.min(10, b.width / 2), b.y + Math.min(b.height / 2, 14));
+  }
+  // Document coordinates: clicked through the document's root element, so it works inside embedded frames too.
+  return pts.slice(0, 4).map((p) => ({ x: p.x + scrollX, y: p.y + scrollY }));
+}`;
+
+/**
+ * A checkbox to the wanted state, verified on the page — with the site's own events. Tried in turn until
+ * the page shows the state: a real click where the box is drawn, the keyboard (focus + Space), then a DOM
+ * click on the control (fires click / input / change). The state must still hold after a moment (sites
+ * that re-render and clear it get another round). A click that was merely attempted is not success.
+ */
+export async function checkSet(page: Page, find: Finder, want: boolean): Promise<boolean> {
+  const holds = async () => (await find())?.f.value === want;
+  const settled = async () => (await until(1200, holds)) && (await sleep(600), await holds());
+  for (let round = 0; round < 3; round++) {
+    let t = await find();
+    if (!t) return false;
+    if (t.f.value === want && round > 0) return true;
+    if (t.f.value === want && (await sleep(400), await holds())) return true;
+    const points = ((await page.evaluate(`(${CHECK_POINTS})(document.querySelector('[data-ca-ref="${t.f.ref}"]'))`).catch(() => [])) ?? []) as { x: number; y: number }[];
+    for (const p of points) {
+      await page.locator(":root").click({ position: p, force: true, timeout: 3000 }).catch(() => {});
+      if (await settled()) return true;
+      if ((t = await find()) && t.f.value === want) continue;
+    }
+    if ((t = await find())) {
+      await t.loc.focus({ timeout: 2000 }).catch(() => {});
+      await page.keyboard.press("Space").catch(() => {});
+      if (await settled()) return true;
+    }
+    if ((t = await find()) && t.f.value !== want) {
+      await t.loc.evaluate((e) => (e as unknown as { click: () => void }).click()).catch(() => {});
+      if (await settled()) return true;
+    }
+  }
+  return holds();
 }
 
 /** Workday date (month / year boxes): typed keystroke by keystroke, verified. */

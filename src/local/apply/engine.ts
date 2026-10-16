@@ -194,6 +194,9 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     }
   };
   const pause = async (reason: InterventionReason, questions: PendingQuestion[] = [], extra: Partial<typeof applicationAttempts.$inferInsert> = {}) => {
+    // A consent the applicant already approved (here or by a standing authorisation) that the site would not
+    // keep is a control problem, never a new approval: it is shown as such, not as a question to approve again.
+    questions = questions.map((q) => (q.kind === "checkbox" && (q.reason === "not_accepted" || q.reason === "legal") && consentApproved(q.label, q.key) ? { ...q, reason: "approved_not_kept", blocker: "interaction" as const } : q));
     questions = questions.map((q) => ({ ...q, blocker: q.blocker ?? blockerOf(q) }));
     await set({ state: "needs_review", intervention: reason, questions, visible: 0, stage: null, ...extra }, "paused", { reason });
     return "needs_review" as const;
@@ -692,11 +695,23 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   }
 
   /** The GPT agent for this run (one per run, so its memory of asked questions and failures is kept). */
+  /**
+   * An agreement covered by the applicant's approval: their answer to this very question, or every category
+   * it touches authorised in Application Defaults (standingConsent — accuracy only over verified values,
+   * terms only when readable). Used by the agent's trusted checks; the model cannot widen it.
+   */
+  function consentApproved(text: string, key: string): boolean {
+    if (planCtx.answers[key] === true) return true;
+    planCtx.consent = { accuracyVerified: accuracyVerified(), inspectedTerms: planCtx.consent?.inspectedTerms };
+    return !!standingConsent(text, key, planCtx);
+  }
+
   function agentFor(propose: Proposer) {
     agent ??= createAgent({
       goal: `Apply for "${jobTitle ?? "this job"}"${planCtx.employer ? ` at ${planCtx.employer}` : ""}`,
       inWorkflow: () => inWorkflow,
       situation: () => situation,
+      consentApproved,
       writeAnswer: (p, f) => writeOne(p, f),
       judge:
         planCtx.profile.application_defaults.ai_answer_writing === "on" && deps.answerWriter

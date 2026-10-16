@@ -590,6 +590,8 @@ function Intervention({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: strin
   const helpKey = reason === "login_required" && a.ats === "workday" ? "login_required_workday" : reason;
   const answered = (q: PendingQuestion) => {
     const v = answers[q.key];
+    // Already approved: nothing to answer — Continue tries again (or the owner ticks it in the visible browser).
+    if (q.reason === "approved_not_kept") return true;
     return q.kind === "checkbox" ? v === true : Array.isArray(v) ? v.length > 0 : typeof v === "string" && v.trim() !== "";
   };
   const allAnswered = a.questions.filter((q) => q.required).every(answered);
@@ -756,7 +758,9 @@ function QuestionInput({ q, value, onChange, remember, onRemember }: { q: Pendin
   const id = `q-${q.key.replace(/[^a-z0-9]/gi, "-")}`;
   const hint = [t(`apply.reason.${q.reason}`, { defaultValue: "" }), q.hint ? t("apply.profileSays", { value: t(`profile.languageLevel.${q.hint}`, { defaultValue: t(`profile.authStatus.${q.hint}`, { defaultValue: q.hint }) }) }) : ""].filter(Boolean).join(" ");
   let input: React.ReactNode;
-  if (q.kind === "checkbox") {
+  if (q.reason === "approved_not_kept") {
+    input = null;
+  } else if (q.kind === "checkbox") {
     input = (
       <label className="flex items-start gap-2 text-[13px] text-ink">
         <Checkbox id={id} checked={value === true} onCheckedChange={(v) => onChange(v === true)} className="mt-0.5" />

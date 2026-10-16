@@ -260,7 +260,7 @@ export const PAGE_MAP = String.raw`(() => {
     const list = !w ? names : w === 'chrome' ? chromeNames : w === 'cookie' ? cookieNames : widgetNames;
     if (!list.includes(n)) list.push(n);
   }
-  const SUBMIT = /^(submit|submit( my| your)? application|send( my)? application|complete( my)? application|finish( and submit)?)$/i;
+  const SUBMIT = /^(submit|submit( my| your)? application|send|send( my)? application|complete( my)? application|finish( and submit)?)$/i;
   // The application's own Submit (in its scope; on a review page without fields, anywhere outside widgets).
   const submits = buttonsIn(root || document).filter((b) => !b.closest('[data-ca-outside]') && SUBMIT.test(nameOf(b))).map(nameOf);
   const headings = [...document.querySelectorAll('h1, h2')].filter((h) => vis(h) && !h.closest('[data-ca-outside]')).map((h) => clean(h.innerText).slice(0, 100)).filter(Boolean).slice(0, 8);
@@ -280,7 +280,7 @@ export const MARK_SUBMIT = String.raw`(() => {
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const vis = (el) => { const r = el.getBoundingClientRect(); const st = getComputedStyle(el); return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none'; };
   for (const el of document.querySelectorAll('[data-ca-submit]')) el.removeAttribute('data-ca-submit');
-  const SUBMIT = /^(submit|submit( my| your)? application|send( my)? application|complete( my)? application|finish( and submit)?)$/i;
+  const SUBMIT = /^(submit|submit( my| your)? application|send|send( my)? application|complete( my)? application|finish( and submit)?)$/i;
   const EXPLICIT = /application/i;
   const nameOf = (b) => clean(b.getAttribute('aria-label') || b.innerText || b.value || '');
   const cands = [...document.querySelectorAll('button, [role="button"], input[type="submit"]')].filter((b) => vis(b) && !b.closest('[data-ca-outside]') && SUBMIT.test(nameOf(b)));

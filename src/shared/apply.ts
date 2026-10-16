@@ -51,7 +51,7 @@ export interface PendingQuestion {
   kind: (typeof QUESTION_KINDS)[number];
   required: boolean;
   options: string[];
-  /** missing | sensitive | legal | demographic | unsupported | open_ended | no_matching_option */
+  /** missing | sensitive | legal | demographic | unsupported | open_ended | no_matching_option | not_accepted | approved_not_kept (an approved consent the site's control would not keep) */
   reason: string;
   /** Sensitive answers (eligibility, legal) can still be remembered, but only when the user ticks it. */
   sensitive: boolean;
@@ -75,7 +75,7 @@ export interface PendingQuestion {
 export function blockerOf(q: Pick<PendingQuestion, "reason">): NonNullable<PendingQuestion["blocker"]> {
   if (q.reason === "missing" || q.reason === "attachment") return "personal_fact";
   if (q.reason === "open_ended") return "synthesis";
-  if (q.reason === "not_accepted" || q.reason === "no_matching_option" || q.reason === "unsupported") return "interaction";
+  if (q.reason === "not_accepted" || q.reason === "approved_not_kept" || q.reason === "no_matching_option" || q.reason === "unsupported") return "interaction";
   return "authorization"; // sensitive, legal, demographic, consent, approval
 }
 

@@ -583,3 +583,75 @@ secret scan clean.
 - Visual (screenshot) reasoning is not used; the agent reads structure and text.
 - The agent acts one decision per call; multi-action plans per call would cut calls further on long unfamiliar pages.
 - Real-site validation of take-over on the owner's paused applications is pending the owner's go-ahead.
+
+## 22. Consents: approved once, executed on the site, never asked again — 2026-10-16
+
+### What the owner saw (a real Recruitee application, review mode)
+
+"I agree to <employer>'s Privacy Policy" was asked again and again: first as an approval
+("not authorised: privacy_notice"), then — after the owner ticked it in Career Atlas — as "the site did not
+accept the value", every re-run.
+
+### Root causes (from the attempt's steps, the agent trace and a read-only look at the public form)
+
+1. **Setting.** The owner had authorised all seven standing-consent categories, but plain privacy-policy
+   acknowledgments are a separate setting (`accept_privacy_notices`), which was unset, so the first ask was
+   correct by the rules but invisible in the consent list. Now enabled (owner's instruction, through the
+   app's own profile save, after a verified backup; only that field changed), and the setting is shown as
+   the first item in **Standing consents** instead of under Contact.
+2. **The site's checkbox.** The real input is a 1×1 clipped element positioned under the field's error line;
+   the box the applicant sees is drawn in the element the input is `aria-labelledby`. Career Atlas
+   force-clicked the input's centre — the click landed on the error line and nothing changed (reproduced
+   headless on the public form: force click and `check()` fail; a click on the drawn box or focus + Space
+   toggles it).
+3. **The AI could not finish it.** The take-over called the checkbox an "interaction" problem (correct), but
+   the agent's trusted check refused `set_checkbox` on any agreement ("ticked only with the applicant's
+   approval") without looking at the approval already on file, while `ask_user` was refused because the
+   applicant had answered. Dead end → the same question again (4 model calls, ~22k tokens per run).
+4. **Final button.** The form's final button is a bare "Send", which was not recognised as the final
+   submit: after the consent was fixed the flow did not see the review point (and the agent's never-click
+   list did not include a bare "Send").
+
+### Changes
+
+- `checkSet` (`interact.ts`): ticks where the site draws the box — the input itself only when it is what
+  is on screen there, else its `<label>`, its `aria-labelledby` element or a custom control, at the small
+  box inside or its left edge, never on a link in the statement; then focus + Space; then the control's own
+  DOM click. Each try is verified on the page and must still hold ~0.6 s later (a re-render that clears it
+  gets another round). Clicks go through the document root, so the same works inside embedded frames.
+  The planner's `check` actions use it too.
+- The scanner reads custom `role="checkbox"` / `role="switch"` controls (`aria-checked`).
+- Agent (`browser-agent.ts`): `consentApproved(text, key)` from the engine = the applicant's answer to that
+  question, or `standingConsent` (every category authorised). Fields and consent-like buttons are marked
+  `consent: approved | applicant_decides`; `set_checkbox`, the affirmative option of a Yes/No consent and a
+  consent button ("Agree", judged by the statement around it) are allowed only when approved; an approved
+  consent cannot be asked again; checkboxes are set with `set_checkbox`.
+- An approved consent the site still will not keep pauses as `approved_not_kept` (blocker
+  *interaction*): the panel says it is already approved and offers Continue / the visible browser — no
+  approval checkbox.
+- A bare "Send" is the final submit everywhere (review detection, Career Atlas's navigation, the agent's
+  never-click list).
+
+### Evidence
+
+Synthetic (`tests/integration/apply-consent.test.ts`, fictional applicant, local fixture
+`tests/fixtures/consent-fixture.ts`): 12 cases pass — hidden Recruitee-style box (+ "Send"), privacy on
+while other categories are off (certification still asked), not authorised → asked once → same attempt
+ticks it and never asks again (also after the approval re-run), custom role=checkbox that ignores script
+clicks, Yes/No dropdown, re-render that clears the tick, application inside an iframe, the same consent
+on two steps, privacy + arbitration (asked, `not authorised: other_binding`), a box the site never keeps
+(`approved_not_kept`, never `approval_needed`), an "Agree" toggle rules cannot see (no AI:
+`step_not_advancing`; AI: clicked, verified, submit approval) and the same toggle without authorisation
+(the AI's click refused by Career Atlas). Unit: agent consent guards (approved / bundled / Yes-No / button /
+no re-ask / "Send").
+
+Real application (Recruitee, review mode, existing attempt continued, nothing submitted): the consent is
+ticked and verified on the site; the run reached **submit approval in 11 s with 0 model calls** and no
+questions (before: paused every run, 4 model calls / ~15–23k tokens, 51–59 s). The site loads an invisible
+hCaptcha that may appear when Send is clicked — that is handed to the owner as before.
+
+### Remaining
+
+- Approval re-runs the attempt from the start (the site does not keep an unsaved form); the recorded
+  approval is re-applied and verified each time, the resume uploaded again.
+- A consent the site still rejects after all three ways stays with the owner (visible browser).

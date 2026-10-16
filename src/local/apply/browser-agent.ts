@@ -32,6 +32,10 @@ export interface AgentButton {
   disabled?: boolean;
   /** The control sits in a site widget, not in the page's own content: "search" | "subscription" | "chrome" | "cookie". */
   area?: WidgetKind;
+  /** For a consent-like button: the statement around it (site wording). */
+  context?: string;
+  /** For a consent-like button: "approved" (the applicant's authorisation covers it) or "applicant_decides". */
+  consent?: "approved" | "applicant_decides";
 }
 export interface AgentField {
   ref: string;
@@ -47,6 +51,8 @@ export interface AgentField {
   answer_on_file?: boolean;
   /** Already asked in this run: do not ask again. */
   asked_applicant?: boolean;
+  /** An agreement / consent: "approved" (the applicant approved it, here or by a standing authorisation) or "applicant_decides". */
+  consent?: "approved" | "applicant_decides";
   /** The group / fieldset heading the control sits in (e.g. "Graduation date" for a bare "Month"). */
   group?: string;
   /** The site's placeholder text (an example format, never a saved value). */
@@ -91,6 +97,12 @@ const OBSERVE_JS = String.raw`(() => {
     if (e.disabled || e.getAttribute('aria-disabled') === 'true') b.disabled = true;
     const w = e.closest('[data-ca-outside]');
     if (w) b.area = w.getAttribute('data-ca-outside');
+    // A consent-like button ("Agree", "I accept"): the statement it agrees to (the nearest text around it).
+    if (/\b(agree|consent|accept|acknowledg|certif|attest)/i.test(text) && !w) {
+      let p = e.parentElement;
+      while (p && p !== document.body && clean(p.innerText).length <= text.length + 12) p = p.parentElement;
+      if (p && p !== document.body) b.context = clean(p.innerText).slice(0, 300);
+    }
     buttons.push(b);
     if (buttons.length >= 60) break;
   }
@@ -121,6 +133,8 @@ function stateOf(f: FieldDescriptor): string {
 export interface ObserveContext {
   goal: string;
   answers?: Record<string, unknown>;
+  /** Is this agreement covered by the applicant's approval (this question's answer or a standing authorisation)? */
+  consentApproved?: (text: string, key: string) => boolean;
   asked?: Set<string>;
   inWorkflow?: boolean;
 }
@@ -138,6 +152,7 @@ export async function observeForModel(page: Page, c: ObserveContext): Promise<{ 
     widgets: map.widgets.filter((w) => w.kind !== "chrome" || w.inputs > 0).slice(0, 8),
     frames: map.frames.map((f) => ({ host: (() => { try { return new URL(f.src).host; } catch { return ""; } })(), share: Math.round(f.area * 100) / 100 })).slice(0, 4),
     ...base,
+    buttons: base.buttons.map((b) => (b.context && !b.area && CONSENT_BTN_RE.test(b.text) ? { ...b, consent: c.consentApproved?.(`${b.text} ${b.context}`, buttonConsentKey(b)) ? ("approved" as const) : ("applicant_decides" as const) } : b)),
     fields: fields.slice(0, 80).map((f) => ({
       ref: f.ref,
       label: (f.label || f.placeholder || f.name).slice(0, 140),
@@ -148,6 +163,7 @@ export async function observeForModel(page: Page, c: ObserveContext): Promise<{ 
       ...(f.group ? { entry: `${f.group} ${(f.groupIndex ?? 0) + 1}` } : {}),
       ...(f.demographic || DEMO_RE.test(f.label) ? { identity: true } : {}),
       ...(answered(answers, f) ? { answer_on_file: true } : {}),
+      ...(isAgreement(f) ? { consent: approvedConsent(f, answers, c.consentApproved) ? ("approved" as const) : ("applicant_decides" as const) } : {}),
       ...(asked.has(fieldKey(f)) ? { asked_applicant: true } : {}),
       ...(f.section && norm(f.section) !== norm(f.label) ? { group: f.section.slice(0, 120) } : {}),
       ...(f.placeholder && f.control !== "combobox" ? { placeholder: f.placeholder.slice(0, 60) } : {}),
@@ -157,6 +173,21 @@ export async function observeForModel(page: Page, c: ObserveContext): Promise<{ 
     })),
   };
   return { obs, fields, map };
+}
+
+/** An agreement / declaration ticked or chosen in the form (privacy policy, terms, certification…). */
+const isAgreement = (f: FieldDescriptor) => LEGAL_RE.test(f.label) && (f.control === "checkbox" || CHOICE.has(f.control));
+/** A button that gives a consent ("Agree", "I accept the terms") — its statement decides whether it is approved. */
+const CONSENT_BTN_RE = /^\s*(i )?(hereby )?(agree|consent|accept|acknowledge|certify|attest)\b/i;
+const buttonConsentKey = (b: AgentButton) => `consent:${norm(`${b.text} ${b.context ?? ""}`).slice(0, 120)}`;
+/**
+ * The applicant approved THIS agreement: ticked / "Yes" in their answer to it, or covered by their standing
+ * authorisations (Application Defaults — checked by Career Atlas, category by category).
+ */
+function approvedConsent(f: FieldDescriptor, answers: Record<string, unknown>, standing?: (text: string, key: string) => boolean): boolean {
+  const v = answers[fieldKey(f)];
+  if (v === true || (typeof v === "string" && /^\s*(yes|i agree|agree|i consent|i accept|accept|i acknowledge)\b/i.test(v))) return true;
+  return !!standing?.([f.label, ...f.options.map((o) => o.label)].join(" "), fieldKey(f));
 }
 
 const answered = (answers: Record<string, unknown>, f: FieldDescriptor) => {
@@ -282,7 +313,8 @@ Rules:
 - Applicant values come ONLY from the profile: use fill_from_profile / choose_from_profile with a fact key; Career Atlas looks the value up and enters it. You never type personal data yourself.
 - choose_option is only for choices that are not about the applicant (e.g. "How would you like to apply?" or a language picker). Questions about the applicant (eligibility, experience, preferences, identity) → choose_from_profile if a fact covers it, else ask_user.
 - Identity / self-identification questions (gender, race, disability, veteran, Indigenous, pronouns) → ask_user unless the page already has them done.
-- Agreements, declarations, privacy consents → ask_user (Career Atlas may already have handled routine notices).
+- Agreements, declarations, privacy consents: a field or button marked consent "approved" is covered by the applicant's approval — tick it with set_checkbox (or choose its affirmative option / click it) and continue; one marked "applicant_decides" → ask_user. Never tick or accept anything else.
+- Checkboxes: set_checkbox (Career Atlas clicks where the box is drawn and verifies it). choose_from_profile / pick_from_profile / read_options are not for checkboxes.
 - Repeated sections (work history, education) and long standard forms → run_autofill first; it fills everything the profile covers and verifies it.
 - Composite controls: a field's "group" names the question its part belongs to (a bare "Month" under "Graduation date"); "related" tells how a phone is split. For a phone number use fact contact.phone on the number box and location.phone_country on a separate country-code control — Career Atlas formats the number for that layout. A placeholder is only an example format, never a value.
 - To start: click the button that opens the application (Apply, Start, Begin, Continue as guest…). Never create an account or sign in; if the page requires it, finish with needs_user.
@@ -302,7 +334,7 @@ Rules:
 - If the last action failed, try a different approach; do not repeat the same failing action.
 Keep "reasoning" to one short sentence.`;
 
-const SUBMIT_RE = /^\s*(submit|submit (my |your )?(application|candidacy)|send( my)? application|complete( my)? application|finish( and submit)?|confirm and submit|apply now and submit)\b/i;
+const SUBMIT_RE = /^\s*(submit|submit (my |your )?(application|candidacy)|send\s*$|send( my)? application|complete( my)? application|finish( and submit)?|confirm and submit|apply now and submit)\b/i;
 const ACCOUNT_RE = /\b(create (an |my )?account|sign ?up|register|sign ?in|log ?in)\b/i;
 const LEGAL_RE = /\b(i (hereby )?(agree|consent|certify|attest|declare|acknowledge|accept)|terms (and|&) conditions|privacy (policy|notice)|consent|certif|attest|background check|signature)/i;
 
@@ -314,6 +346,8 @@ export interface ValidationContext {
   answers?: Record<string, unknown>;
   /** Field keys already asked in this run. */
   asked?: Set<string>;
+  /** Standing authorisations (see ObserveContext.consentApproved). */
+  consentApproved?: (text: string, key: string) => boolean;
 }
 
 
@@ -334,6 +368,8 @@ export function validate(a: AgentAction, v: ValidationContext): string | null {
       // The site's navigation (header, menus, footer) is not part of the application, unless it starts one.
       if (btn?.area === "chrome" && !APPLY_CTA_RE.test(text) && cookieChoice(text) !== "private") return "this is the site's navigation (header / menu / footer), not part of the application for this job";
       if (SUBMIT_RE.test(text)) return "the final submit button is never clicked by the agent — finish with review_ready";
+      // A button that gives a consent: only within the applicant's approval for that statement.
+      if (btn && !btn.area && CONSENT_BTN_RE.test(btn.text) && !v.consentApproved?.(`${btn.text} ${btn.context ?? ""}`, buttonConsentKey(btn))) return "this gives a consent the applicant has not approved — ask_user";
       if (ACCOUNT_RE.test(text) && !/guest|without (an )?account/i.test(text)) return "creating accounts and signing in are not done by the agent — finish with needs_user";
       if (field && (field.control === "checkbox" || field.control === "radio" || field.control === "checkboxes")) return "use set_checkbox / choose_* for form controls";
       if (field?.inputType === "password") return "password fields are never touched by the agent";
@@ -348,14 +384,14 @@ export function validate(a: AgentAction, v: ValidationContext): string | null {
       if (!(a.fact in FACTS) && !a.fact.startsWith("defaults.")) return `unknown fact "${a.fact}" — use a key from available_facts (profile_summary holds counts, not facts)`;
       if (a.fact.startsWith("defaults.") && !(PREFS as readonly string[]).includes(a.fact.slice(9))) return `unknown preference "${a.fact}"`;
       if (field.demographic || DEMO_RE.test(field.label)) return "identity questions are answered only by the applicant — ask_user";
-      if (LEGAL_RE.test(field.label) && CHOICE.has(field.control)) return "declarations need the applicant's approval — ask_user";
+      if (LEGAL_RE.test(field.label) && CHOICE.has(field.control)) return approvedConsent(field, v.answers ?? {}, v.consentApproved) ? null : "declarations need the applicant's approval — ask_user";
       return null;
     }
     case "choose_option": {
       if (!field) return "unknown field ref";
       if (field.options.length && !field.options.some((o) => norm(o.label) === norm(a.option))) return "that option is not offered by this field";
       if (field.demographic || DEMO_RE.test(field.label)) return "identity questions are answered only by the applicant — ask_user";
-      if (LEGAL_RE.test(field.label)) return "declarations need the applicant's approval — ask_user";
+      if (LEGAL_RE.test(field.label)) return approvedConsent(field, v.answers ?? {}, v.consentApproved) && /^\s*(yes|i agree|agree|i consent|consent|i accept|accept|i acknowledge|acknowledged?|i understand)\b/i.test(a.option) && !/\b(not|decline|do not|don't)\b/i.test(a.option) ? null : "declarations need the applicant's approval — ask_user";
       if (questionMeaning(field.label, v.employer).meaning !== "unknown") return "this question is about the applicant — use choose_from_profile or ask_user";
       const sem = classify(field);
       if (!["unknown", "open_ended"].includes(sem)) return `this field is the applicant's ${sem} — use choose_from_profile / fill_from_profile`;
@@ -363,7 +399,8 @@ export function validate(a: AgentAction, v: ValidationContext): string | null {
     }
     case "set_checkbox": {
       if (!field) return "unknown field ref";
-      if (a.checked && LEGAL_RE.test(field.label)) return "agreements are ticked only with the applicant's approval — ask_user";
+      // An agreement is ticked only within the applicant's approval: their answer to it, or a standing authorisation.
+      if (a.checked && LEGAL_RE.test(field.label) && !approvedConsent(field, v.answers ?? {}, v.consentApproved)) return "agreements are ticked only with the applicant's approval — ask_user";
       if (field.demographic || DEMO_RE.test(field.label)) return "identity questions are answered only by the applicant — ask_user";
       return null;
     }
@@ -380,6 +417,7 @@ export function validate(a: AgentAction, v: ValidationContext): string | null {
         if (a.fact !== "applicant_answer" && !(a.fact in FACTS) && !a.fact.startsWith("defaults.")) return `unknown fact "${a.fact}" — use a key from available_facts`;
         if (a.fact !== "applicant_answer" && (field?.demographic || DEMO_RE.test(text))) return "identity questions are answered only by the applicant — ask_user";
         if (a.fact !== "applicant_answer" && LEGAL_RE.test(text)) return "declarations need the applicant's approval — ask_user";
+        if (field && field.control === "checkbox") return "this is a checkbox — use set_checkbox";
       }
       return null;
     }
@@ -392,6 +430,7 @@ export function validate(a: AgentAction, v: ValidationContext): string | null {
     case "ask_user":
       if (!a.question?.trim()) return "ask_user needs the question text";
       if (field && v.asked?.has(fieldKey(field))) return "already asked — continue with the other fields, or finish with needs_user";
+      if (field && isAgreement(field) && approvedConsent(field, v.answers ?? {}, v.consentApproved)) return "the applicant already approved this agreement — set_checkbox (or choose its affirmative option); if the page does not keep it, try another way (click the box drawn beside it, its label)";
       if (field && answered(v.answers ?? {}, field)) return "the applicant already answered — use fact applicant_answer";
       return null;
     default:
@@ -448,6 +487,8 @@ export interface AgentHost {
   judge?: ((value: string, options: string[]) => Promise<string | null>) | null;
   /** True once an Apply / guest action led into the application (page-state hint for the model). */
   inWorkflow?: () => boolean;
+  /** Is this agreement covered by the applicant's standing authorisations (Application Defaults)? */
+  consentApproved?: (text: string, key: string) => boolean;
   planCtx: PlanContext;
   resume: { name: string; mimeType: string; buffer: Buffer };
   /** Proposes the next action (Codex in the app; a scripted stand-in in tests). */
@@ -498,14 +539,14 @@ export function createAgent(host: AgentHost) {
    * the reasoning evaluation (tests/lab) grades it against ground truth.
    */
   async function decide(page: Page, o: { lastResult?: string; history?: string[] } = {}) {
-    const { obs, fields } = await observeForModel(page, { goal: host.goal, answers: host.planCtx.answers, asked, inWorkflow: host.inWorkflow?.() });
+    const { obs, fields } = await observeForModel(page, { goal: host.goal, answers: host.planCtx.answers, asked, inWorkflow: host.inWorkflow?.(), consentApproved: host.consentApproved });
     const situation = host.situation?.() ?? null;
     const user = JSON.stringify({ step: n, ...(situation ? { situation } : {}), last_action_result: o.lastResult ?? lastResult, recent_actions: (o.history ?? history).slice(-6), available_facts: factCatalog(host.planCtx.profile), profile_summary: profileSummary(host.planCtx.profile), page: obs });
     const raw = await host.propose(AGENT_SYSTEM, user.slice(0, 30_000), PROPOSAL_SCHEMA);
     const action = toAgentAction(raw);
     const reasoning = String(raw.reasoning ?? "").slice(0, 240);
     const target = action && "ref" in action && action.ref ? (obs.buttons.find((b) => b.ref === action.ref)?.text ?? obs.fields.find((f) => f.ref === action.ref)?.label ?? action.ref) : "";
-    const refusal = action ? validate(action, { obs, fields, profile: host.planCtx.profile, employer: host.planCtx.employer ?? null, answers: host.planCtx.answers, asked }) : "invalid proposal";
+    const refusal = action ? validate(action, { obs, fields, profile: host.planCtx.profile, employer: host.planCtx.employer ?? null, answers: host.planCtx.answers, asked, consentApproved: host.consentApproved }) : "invalid proposal";
     return { obs, fields, raw, action, reasoning, target: String(target), refusal };
   }
 
@@ -582,10 +623,10 @@ export function createAgent(host: AgentHost) {
    * again by its visible text / label, then validated and executed like any proposal.
    */
   async function replay(page: Page, d: { action: string; target: string; option?: string; fact?: string; checked?: boolean }): Promise<{ ok: boolean; page: Page }> {
-    const { obs, fields } = await observeForModel(page, { goal: host.goal, answers: host.planCtx.answers, asked, inWorkflow: host.inWorkflow?.() });
+    const { obs, fields } = await observeForModel(page, { goal: host.goal, answers: host.planCtx.answers, asked, inWorkflow: host.inWorkflow?.(), consentApproved: host.consentApproved });
     const ref = obs.buttons.find((b) => b.text === d.target)?.ref ?? obs.fields.find((f) => f.label === d.target)?.ref;
     const a = ref || ["run_autofill", "scroll", "wait", "upload_resume"].includes(d.action) ? toAgentAction({ action: d.action, ref: ref ?? null, option: d.option ?? null, fact: d.fact ?? null, checked: d.checked ?? null, question: null, status: null }) : null;
-    if (!a || validate(a, { obs, fields, profile: host.planCtx.profile, employer: host.planCtx.employer ?? null, answers: host.planCtx.answers, asked })) return { ok: false, page };
+    if (!a || validate(a, { obs, fields, profile: host.planCtx.profile, employer: host.planCtx.employer ?? null, answers: host.planCtx.answers, asked, consentApproved: host.consentApproved })) return { ok: false, page };
     const res = await act(page, a, fields, host, questions, asked);
     host.trace?.({ step: ++n, replayed: { action: a.action, target: d.target.slice(0, 80) }, verification: res.ok ? `ok: ${res.note}` : `FAILED: ${res.note}` });
     return { ok: res.ok, page: res.page ?? page };

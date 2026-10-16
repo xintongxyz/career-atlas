@@ -1178,6 +1178,7 @@ const zhCN: Messages = {
       aiOn: "开启——根据我已核实的记录撰写",
       consentsHelp: "勾选的类别会在网站询问时自动同意——但只有当该同意涉及的所有类别都已勾选时才会这样做。其他内容（仲裁、签名、弃权等）总是会询问你。提交申请仍需单独批准。",
       consents: {
+        privacy_notice: "招聘隐私政策／隐私声明（“我同意隐私政策”）",
         read_information: "“我已阅读该职位的相关信息”",
         routine_terms: "普通申请条款",
         accuracy_declaration: "“我提供的信息准确无误”",
@@ -1187,6 +1188,7 @@ const zhCN: Messages = {
         third_party_sharing: "与其他公司或关联方共享我的申请",
       },
       consentsHint: {
+        privacy_notice: "雇主如何处理你的申请数据。不包括声明、证明或同一勾选框中的其他内容。",
         read_information: "确认你已阅读一般信息。",
         routine_terms: "仅当条款能够打开并阅读时。",
         accuracy_declaration: "仅当填写的每个值都已在页面上核实时。",
@@ -1787,6 +1789,7 @@ const zhCN: Messages = {
       unsupported: "Career Atlas无法填写此类字段。",
       no_matching_option: "你资料中的答案与任何选项都不匹配。",
       not_accepted: "网站没有接受填写的值。",
+      approved_not_kept: "你已经同意过，无需再次同意。Career Atlas已用多种方式点击网站上的勾选框，但网站仍显示未勾选。点“继续”会再试一次；也可以在可见浏览器中自己勾选。",
       conflict: "表单与“我的资料”不一致——请选择保留哪一个。",
       attachment: "雇主网站上的文件只有在你同意后才会删除。",
       parsed_unverified: "网站根据你的简历自动填写——请确认或更正。",

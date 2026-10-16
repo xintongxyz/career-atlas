@@ -29,7 +29,8 @@ export type NavDecision =
 
 export type AdvanceDecision = { action: "click"; name: string; why: "next" } | { action: "review" } | { action: "stuck" };
 
-const SUBMIT_RE = /^(submit|submit( my)? application|send application)$/i;
+// A bare "Send" is a final submit too (Recruitee and others).
+const SUBMIT_RE = /^(submit|submit( my)? application|send|send( my)? application)$/i;
 // Moving on inside the application (a "Review" step is not the final submission).
 const NEXT_RE = /^(next|continue|save and continue|save & continue|next step|proceed|continue to (the )?next step|review( (my|your))?( application)?|go to review|preview( application)?)$/i;
 // Applying without an account (never creates one): "as a guest", "without an account", "manually".
@@ -40,7 +41,7 @@ const APPLY_RE = APPLY_CTA_RE;
 // The most privacy-preserving cookie choice offered: reject, else "necessary only".
 const COOKIE_RE = /^(reject|reject all|decline|decline all|reject optional( cookies)?|refuse( all)?)$/i;
 const COOKIE_NECESSARY_RE = /^(agree to necessary|accept necessary( cookies)?|(use )?necessary (cookies )?only|only necessary( cookies)?|essential (cookies )?only|accept essential( cookies)?|allow necessary( cookies)?)$/i;
-const BLOCKED_RE = /^(submit|send application|cancel|delete|remove|sign in|log in|create account|create one now|register|sign up)\b/i;
+const BLOCKED_RE = /^(submit|send application|send$|cancel|delete|remove|sign in|log in|create account|create one now|register|sign up)\b/i;
 
 export function decideNavigation(obs: PageObservation, ctx: { password: boolean; challenge: boolean; cookieDismissed: boolean }): NavDecision {
   const names = obs.names.map((n) => n.replace(/\s+/g, " ").trim()).filter(Boolean);

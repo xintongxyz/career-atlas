@@ -477,7 +477,6 @@ function ApplicationDefaultsCard({ value: d, onChange }: { value: Defaults; onCh
               </NativeSelect>
             </Field>
             {text("phone_country_code", "+1")}
-            {tri("accept_privacy_notices")}
             {text("source")}
           </>,
         )}
@@ -575,6 +574,14 @@ function ApplicationDefaultsCard({ value: d, onChange }: { value: Defaults; onCh
           <p className="mb-1 text-xs font-medium text-ink-3">{t("profile.defaults.groups.consents")}</p>
           <p className="mb-2 text-xs text-ink-3">{t("profile.defaults.consentsHelp")}</p>
           <div className="grid gap-2 sm:grid-cols-2">
+            {/* Privacy notices have their own setting (accept_privacy_notices); shown here with the other consents. */}
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-1" checked={d.accept_privacy_notices === "yes"} onChange={(e) => up({ accept_privacy_notices: e.target.checked ? "yes" : "no" })} />
+              <span>
+                {t("profile.defaults.consents.privacy_notice")}
+                <span className="block text-xs text-ink-3">{t("profile.defaults.consentsHint.privacy_notice")}</span>
+              </span>
+            </label>
             {CONSENT_KEYS.map((k) => (
               <label key={k} className="flex items-start gap-2 text-sm">
                 <input type="checkbox" className="mt-1" checked={d.standing_consents?.[k] === true} onChange={(e) => up({ standing_consents: { ...(d.standing_consents ?? {}), [k]: e.target.checked } })} />

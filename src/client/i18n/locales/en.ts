@@ -1197,6 +1197,7 @@ const en = {
       aiOn: "On — write from my verified records",
       consentsHelp: "Ticked categories are accepted automatically when a site asks — but only when everything the consent covers is ticked. Anything else (arbitration, signatures, waivers…) is always asked. Submitting stays a separate approval.",
       consents: {
+        privacy_notice: "Recruitment privacy policies / notices (“I agree to the Privacy Policy”)",
         read_information: "“I have read the information about this position”",
         routine_terms: "Ordinary application terms",
         accuracy_declaration: "“The information I provided is accurate”",
@@ -1206,6 +1207,7 @@ const en = {
         third_party_sharing: "Sharing my application with other companies or affiliates",
       },
       consentsHint: {
+        privacy_notice: "How the employer handles your application data. Not declarations, certifications or anything else in the same box.",
         read_information: "Acknowledging that you read general information.",
         routine_terms: "Only when the terms could be opened and read.",
         accuracy_declaration: "Only when every value entered was verified on the page.",
@@ -1810,6 +1812,7 @@ const en = {
       unsupported: "Career Atlas can't fill this field type.",
       no_matching_option: "Your profile's answer doesn't match any option.",
       not_accepted: "The site did not accept the value that was filled in.",
+      approved_not_kept: "Already approved — no need to approve again. Career Atlas clicked the site's box in several ways and the site still shows it unticked. Continue tries again; in a visible browser you can tick it yourself.",
       conflict: "The form and My Profile disagree — choose which to keep.",
       attachment: "Files on the employer's site are only removed with your OK.",
       parsed_unverified: "Filled in by the site from your resume — confirm or correct it.",

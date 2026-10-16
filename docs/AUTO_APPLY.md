@@ -287,7 +287,14 @@ actually uploaded, and the resume is linked to the application.
   experience are never inferred. An answer that doesn't match any option is asked again.
 - **Sensitive questions.** Voluntary demographic (EEO) questions are left blank — and asked only
   if a form makes one required. Legal declarations, consents and signatures are ticked only
-  with your explicit approval. Work-permit holders are asked about future sponsorship.
+  with your explicit approval — for this question, or as a standing authorisation in My Profile →
+  Application Defaults → Standing consents (recruitment privacy policies and the listed categories),
+  and only when EVERY category the statement touches is authorised (a privacy policy bundled with
+  arbitration, a waiver or a signature is always asked). An approved consent is ticked on the site
+  where the site draws its box (its label, the element it is labelled by, a custom control) with real
+  clicks, the keyboard or the control's own click, and counts only when the site shows it ticked and it
+  stays ticked; if the site still will not keep it, it is shown as "already approved — the site would
+  not keep it", never as a new approval. Work-permit holders are asked about future sponsorship.
 - **The selected resume only.** The document id, SHA-256, file name and size are pinned when the
   attempt starts and re-checked before upload. If the file was deleted or changed, the attempt
   fails — another resume is never substituted. The file is uploaded byte for byte; it is never
