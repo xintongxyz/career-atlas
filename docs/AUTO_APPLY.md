@@ -196,8 +196,11 @@ Optional, per application, authorised in the start dialog:
   employer). Uses the e-mail in *My Profile → Contact details* and either a **new strong password
   for each employer** (default) or **your shared password** (opt-in in Settings; typed once into a
   password field, never shown again). Agreements on the registration form are shown to you first
-  and ticked only with your approval. "Account already exists" → no duplicate; you sign in or use
-  *Forgot your password?*. CAPTCHA, MFA via an authenticator app and SSO are always yours. E-mail
+  and ticked only with your approval. "Account already exists" → no duplicate; with the shared
+  password Career Atlas signs in once with it, otherwise you sign in or use *Forgot your password?*.
+  In shared mode the shared password also signs in to employer sites Career Atlas has no record of
+  (accounts you made yourself with it); the site is recorded before the try, so a failure is never
+  repeated. CAPTCHA, MFA via an authenticator app and SSO are always yours. E-mail
   verification is yours too unless you turn on *Verification e-mails (Gmail)* (below).
 - Passwords are stored only in the **macOS Keychain** (service "Career Atlas – Workday account";
   the shared one under "Career Atlas – Workday shared password"), written through `security`'s
@@ -212,6 +215,9 @@ Optional, per application, authorised in the start dialog:
   you made yourself) so the next application signs in for you.
 - **After signing in**, Workday sometimes forgets *Autofill with Resume* and opens the empty form;
   Career Atlas then returns once to the autofill address so the selected resume is uploaded and parsed.
+- **The account step** is recognised by its form, a visible password box or the progress bar naming it
+  ("Create Account/Sign In") — nothing is typed until the form is drawn; the form's own *Sign In* /
+  *Create Account* links and buttons (and the click layer over each) are used, never the site header's.
 - **Slow pages.** Each step is filled only after it has finished drawing (no spinner, same number of
   fields for about a second). "Continue" is clicked only when it is shown and enabled (Workday
   disables it while it reads the resume; up to 90 s). If the page moves on while it is being filled

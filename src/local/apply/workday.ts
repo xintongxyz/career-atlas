@@ -91,7 +91,12 @@ export const WD_STATE = String.raw`(() => {
   const q = (s) => document.querySelector(s);
   const qa = (s) => [...document.querySelectorAll(s)];
   const text = (document.body ? document.body.innerText : '').replace(/\s+/g, ' ');
-  const auth = qa('[data-automation-id="signInContent"], [data-automation-id="signInFormo"], form[data-automation-id^="signInForm"], [data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]').some(vis);
+  const activeStep = (q('[data-automation-id="progressBarActiveStep"]') || { innerText: '' }).innerText.replace(/\s+/g, ' ');
+  // The account step: its form, a visible password box (never the honeypot), or — while the form is still
+  // drawing — the progress bar naming it ("Create Account/Sign In").
+  const auth = qa('[data-automation-id="signInContent"], [data-automation-id="signInFormo"], form[data-automation-id^="signInForm"], [data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]').some(vis)
+    || qa('input[type="password"]').some((e) => vis(e) && !e.closest('[data-automation-id="beecatcher"]'))
+    || /\b(create account|sign in|log in)\b/i.test(activeStep);
   const verify = qa('[data-automation-id="verificationCode"], input[name*="verification" i], input[autocomplete="one-time-code"]').some(vis) || /verify your (e-?mail|account)|verification (code|e-?mail|link) (has been |was )?sent|check your (e-?mail|inbox) (to|for)|account (has )?not (yet )?been verified|activate your account/i.test(text);
   const pageIds = ['applyFlowMyInfoPage','applyFlowMyExpPage','applyFlowPrimaryQuestionsPage','applyFlowSecondaryQuestionsPage','applyFlowVoluntaryDisclosuresPage','applyFlowSelfIdentifyPage','applyFlowReviewPage','contactInformationPage','myExperiencePage','voluntaryDisclosuresPage','selfIdentificationPage'];
   // Known page ids, or any visible "applyFlow…Page" (tenants and UI versions name their pages differently).
@@ -336,7 +341,7 @@ const AUTH_ERR = String.raw`(() => {
 
 export type AccountOutcome = "ok" | "invalid" | "locked" | "verify" | "captcha" | "exists" | "policy" | "unknown";
 
-async function authOutcome(page: Page, kind: "sign_in" | "create", timeout = 20_000): Promise<AccountOutcome> {
+async function authOutcome(page: Page, kind: "sign_in" | "create", timeout = 30_000): Promise<AccountOutcome> {
   const until = Date.now() + timeout;
   await sleep(600);
   while (Date.now() < until) {
@@ -361,18 +366,30 @@ const inAuth = (page: Page, id: string) => page.locator(`${aid("signInContent")}
 
 async function press(page: Page, id: string) {
   const b = inAuth(page, id);
-  // Workday overlays some auth buttons with a "click_filter" element that receives the click.
-  const filter = page.locator(`${aid("click_filter")}`).filter({ visible: true }).first();
+  // Workday overlays some auth buttons with a "click_filter" element that receives the click — THIS button's
+  // own (beside it in the same wrapper), never the first one on the page (another button's).
+  const filter = b.locator(`xpath=..`).locator(aid("click_filter")).filter({ visible: true }).first();
   if (await filter.isVisible().catch(() => false)) await filter.click().catch(() => b.click({ force: true }));
   else await b.click({ force: true });
 }
 
 /** Signs in with a saved credential (one try; the caller never retries a failure automatically). */
+/** The account form is drawn (its e-mail box), not only the progress bar naming the step. */
+export async function wdAuthReady(page: Page, timeout = 30_000): Promise<boolean> {
+  const form = page.locator(`${aid("signInContent")} ${aid("email")}, ${aid("signInFormo")} ${aid("email")}`).first();
+  return form.waitFor({ state: "visible", timeout }).then(() => true).catch(() => false);
+}
+
 export async function workdaySignIn(page: Page, email: string, password: string): Promise<AccountOutcome> {
   if (!(await inAuth(page, "signInSubmitButton").isVisible().catch(() => false))) {
-    const link = page.locator(`${aid("signInLink")}, button:has-text("Sign In"), a:has-text("Sign In")`).first();
-    if (await link.isVisible().catch(() => false)) await link.click();
-    await sleep(500);
+    // The form's own "Sign In" link — never the site header's "Sign In" (a different pop-up).
+    const own = inAuth(page, "signInLink");
+    if (await own.isVisible().catch(() => false)) await press(page, "signInLink");
+    else {
+      const link = page.locator(`${aid("signInContent")} button:has-text("Sign In"), ${aid("signInContent")} a:has-text("Sign In")`).first();
+      if (await link.isVisible().catch(() => false)) await link.click();
+    }
+    await sleep(800);
   }
   await inAuth(page, "email").fill(email);
   await inAuth(page, "password").fill(password);
@@ -397,9 +414,13 @@ export async function accountTermsLabel(page: Page): Promise<string | null> {
 /** Creates a candidate account with the given password (e-mail from My Profile). */
 export async function workdayCreateAccount(page: Page, email: string, password: string, agreeTerms: boolean): Promise<AccountOutcome> {
   if (!(await inAuth(page, "createAccountSubmitButton").isVisible().catch(() => false))) {
-    const link = page.locator(`${aid("createAccountLink")}, button:has-text("Create Account"), a:has-text("Create Account")`).first();
-    if (await link.isVisible().catch(() => false)) await link.click();
-    await sleep(500);
+    // The form's own "Create Account" link (never something in the site header).
+    if (await inAuth(page, "createAccountLink").isVisible().catch(() => false)) await press(page, "createAccountLink");
+    else {
+      const link = page.locator(`${aid("signInContent")} button:has-text("Create Account"), ${aid("signInContent")} a:has-text("Create Account")`).first();
+      if (await link.isVisible().catch(() => false)) await link.click();
+    }
+    await sleep(800);
   }
   await inAuth(page, "email").fill(email);
   await inAuth(page, "password").fill(password);

@@ -703,3 +703,51 @@ Canada work authorization `any_employer` true.
 - Real application (Greenhouse, review mode, existing attempt continued, nothing submitted): **submit
   approval with no questions; 47 of 47 entered values verified**; 2 model calls (school / field judge),
   94 s.
+
+## 24. Workday account step: recognised, signed in with the form's own controls — 2026-10-16
+
+### What the owner saw (a real Workday application, review mode)
+
+"The Continue button never became available" on step 1 of 6, "Create Account/Sign In".
+
+### Causes
+
+1. Detection regression (from §21's progress-bar step recognition): the account step was judged while its
+   form was still drawing — the progress bar ("Create Account/Sign In") plus no form was read as a fillable
+   step; Career Atlas waited 90 s for Next and the AI correctly declined to act on an account page.
+2. With detection fixed, the sign-in itself was "unclear": to switch to the sign-in form Career Atlas took
+   the first "Sign In" on the page — the site header's (a different pop-up) — and pressed the first
+   `click_filter` on the page, not the one over the intended button.
+3. With both fixed, the site answered that the account is **locked**. Career Atlas had created this account
+   on 2026-10-15 with a unique generated password (Keychain); sign-ins typed by hand with another
+   password are the likely cause of the lock. Career Atlas stopped (one try, never retried).
+4. The owner wants one password everywhere. The shared-password mode only applied to accounts Career Atlas
+   creates; it never signed in to accounts the owner made by hand.
+
+### Changes
+
+- `WD_STATE`: auth also from a visible password box (not the honeypot) or the active progress step naming
+  the account step; the Next-wait re-checks for an account / verification page before giving up.
+- `wdAuthReady`: nothing is typed until the account form is drawn.
+- Sign-in / create: the form's own `signInLink` / `createAccountLink`, and `press` uses the click layer in
+  the button's own wrapper.
+- Shared mode: the shared password also signs in where Career Atlas has no record (recorded first, so a
+  failure is remembered); "create" in shared mode creates first and, when the account exists, signs in
+  once with the same password. Settings help text updated (EN / 中文).
+- Start application: the "create an account" choice is remembered on this computer (still shown and
+  changeable per application).
+
+### Evidence
+
+Synthetic (`apply-workday-accounts.test.ts`, in-memory secret store): late-drawn account form + header
+"Sign In" + click layers → recognised, signed in (the same test fails on the previous sign-in code);
+shared password signs in to a hand-made account and "create" where it exists signs in once, no duplicate;
+all earlier account tests unchanged (7/7).
+
+Real (review mode, nothing typed by the developer; the app used the saved Keychain credential): the
+account step is recognised, the form's own Sign In used, and the site's answer read (`account_locked`).
+
+### Owner action needed
+
+The employer account is locked on the site; it needs the site's *Forgot your password?* (or the lock to
+expire). Passwords are entered only by the owner in *Settings → Workday accounts* (Keychain).

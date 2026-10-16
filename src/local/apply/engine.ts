@@ -48,7 +48,7 @@ import { fillSections } from "./wd-sections";
 import { fillRows } from "./rows";
 import { jobSourceOf, type JobSource } from "@shared/apply-match";
 import type { MailVerifier } from "./mail";
-import { accountTermsLabel, activeStep, clickNext, codeInput, declineCookies, enterApplyFlow, isAutofillUpload, nextButton, submitVerificationCode, uploadResume, wdReady, wdSettleStable, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
+import { accountTermsLabel, activeStep, clickNext, codeInput, declineCookies, enterApplyFlow, isAutofillUpload, nextButton, submitVerificationCode, uploadResume, wdAuthReady, wdReady, wdSettleStable, wdState, workdayCreateAccount, workdaySignIn } from "./workday";
 
 const { applicationAttempts, documents, jobPostings, companies } = schema;
 
@@ -1020,6 +1020,12 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       }
       // Save and Continue. Workday validates on the server; errors keep us on the same step.
       if (!(await clickNext(page, t.stepReady))) {
+        // The "step" was the account page drawn late (sign-in / create account / verification): handled as such.
+        const now = await wdState(page);
+        if (now.kind === "auth" || now.kind === "verify_email") {
+          lastStep = "";
+          continue;
+        }
         const t1 = await aiTakeover(page, `The Workday step "${st.step ?? "?"}" was filled but its Save and Continue / Next button never became available. Find what still blocks it (an unfamiliar control, an unanswered required item, a pop-up) and continue to the next step.`, async (p) => {
           const x = await wdState(p);
           return x.kind === "review" || (x.kind === "step" && `${x.step ?? ""}|${x.pageId ?? ""}` !== name);
@@ -1170,11 +1176,20 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     if (visible && (await signInTriedBefore())) return "user";
     const tenant = tenantOf(page.url());
     if (acc.blocked(tenant, email)) return pause("login_required", [], { stage: "workday_sign_in", errorCode: "sign_in_failed_recently" });
+    // The step may be named by the progress bar before its form is drawn: nothing is typed until it is.
+    if (!(await wdAuthReady(page, 30_000))) return "user";
     const has = await acc.hasCredential(tenant, email);
-    if (has && !tried.signIn) {
+    const recorded = !!acc.record(tenant, email);
+    // Shared password on a site Career Atlas has no record of: when creating accounts is authorised, create
+    // first (an existing account answers "exists" → one sign-in with the same password); else sign in.
+    const createFirst = !recorded && acc.settings().mode === "shared" && row!.accountMode === "create";
+    // One sign-in try with the saved password. The site is recorded first, so a failed try is remembered
+    // and never repeated — also for an account the owner made by hand with the shared password.
+    const signIn = async (): Promise<AttemptState | "continue" | "user"> => {
       tried.signIn = true;
       const pw = await acc.password(tenant, email);
       if (!pw) return "user";
+      if (!acc.record(tenant, email)) await acc.save(tenant, email, pw, "shared", "pending");
       await set({ stage: "workday_sign_in" }, "workday_sign_in_attempt", { tenant });
       const t0 = Date.now();
       let r = await workdaySignIn(page, email, pw);
@@ -1194,8 +1209,9 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       if (r === "verify") return pause("login_required", [], { stage: "workday_verify_email", errorCode: "verification_required" });
       if (r === "captcha") return pause("captcha");
       return pause("login_required", [], { stage: "workday_sign_in", errorCode: "sign_in_unclear" });
-    }
-    if (!has && row!.accountMode === "create" && !tried.create) {
+    };
+    if (has && !createFirst && !tried.signIn) return signIn();
+    if ((!has || createFirst) && row!.accountMode === "create" && !tried.create) {
       tried.create = true;
       const terms = await accountTermsLabel(page);
       const termsKey = `account_terms:${tenant}`;
@@ -1223,6 +1239,8 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         }
         return "continue";
       }
+      // The account already exists and the owner's shared password is used everywhere: one sign-in with it.
+      if (r === "exists" && np.mode === "shared" && !tried.signIn) return signIn();
       // Not created: the unused generated password is removed again (a shared one stays the user's).
       if (r === "exists" || r === "policy" || r === "captcha") {
         if (np.mode === "unique") await acc.forget(tenant, email);

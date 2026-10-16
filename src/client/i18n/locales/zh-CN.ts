@@ -1426,7 +1426,7 @@ const zhCN: Messages = {
     storeMemory: "测试实例：密码只保存在内存中。",
     passwordMode: "新账户的密码",
     mode: { unique: "为每个雇主生成新的强密码（推荐）", shared: "使用我自己的共用密码" },
-    modeHelp: { unique: "为每个雇主网站安全生成，并保存在钥匙串中。", shared: "所有新Workday账户使用同一个密码。安全性较低：一处泄露会影响全部账户。" },
+    modeHelp: { unique: "为每个雇主网站安全生成，并保存在钥匙串中。", shared: "你的统一密码，只保存在钥匙串中：用于创建新的Workday账户，也用于登录你自己用该密码注册的Workday账户。安全性较低：一处泄露会影响全部账户。" },
     autoSignIn: "已保存账户时自动登录",
     autoSignInHelp: "在“开始投递”中默认选中，可针对每次投递关闭。登录失败后绝不会自动重试。",
     sharedTitle: "共用密码",

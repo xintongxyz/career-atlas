@@ -1449,7 +1449,7 @@ const en = {
     storeMemory: "Test instance: passwords are kept in memory only.",
     passwordMode: "Password for new accounts",
     mode: { unique: "A new strong password for each employer (recommended)", shared: "My own shared password" },
-    modeHelp: { unique: "Generated securely for each employer site and saved in the Keychain.", shared: "The same password for every new Workday account. Less safe: one leak affects all of them." },
+    modeHelp: { unique: "Generated securely for each employer site and saved in the Keychain.", shared: "Your one password, kept only in the Keychain: used to create new Workday accounts and to sign in to Workday accounts you made yourself with it. Less safe: one leak affects all of them." },
     autoSignIn: "Sign in automatically when a saved account exists",
     autoSignInHelp: "Preselected in Start application; you can switch it off per application. A failed sign-in is never retried automatically.",
     sharedTitle: "Shared password",

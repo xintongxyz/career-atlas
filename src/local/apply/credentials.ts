@@ -155,13 +155,14 @@ export function accountManager(opts: { store: SecretStore | null; dir: string; s
     async hasCredential(tenant: string, email: string) {
       if (!store) return false;
       const r = read()[key(tenant, email)];
-      if (r?.mode === "shared") return !!(await store.get(SHARED_SERVICE, "shared"));
+      // Shared mode: the owner's one password also signs in to accounts not made by Career Atlas.
+      if (r?.mode === "shared" || (!r && opts.settings().mode === "shared")) return !!(await store.get(SHARED_SERVICE, "shared"));
       return !!(await store.get(ACCOUNT_SERVICE, key(tenant, email)));
     },
     async password(tenant: string, email: string): Promise<string | null> {
       if (!store) return null;
       const r = read()[key(tenant, email)];
-      return r?.mode === "shared" ? store.get(SHARED_SERVICE, "shared") : store.get(ACCOUNT_SERVICE, key(tenant, email));
+      return r?.mode === "shared" || (!r && opts.settings().mode === "shared") ? store.get(SHARED_SERVICE, "shared") : store.get(ACCOUNT_SERVICE, key(tenant, email));
     },
     /** A password for a NEW account: generated (unique) or the user's shared one. */
     async newPassword(): Promise<{ password: string; mode: PasswordMode } | null> {

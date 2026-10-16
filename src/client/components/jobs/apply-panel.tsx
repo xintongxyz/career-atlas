@@ -103,7 +103,10 @@ export function StartApplicationDialog({ job, open, onOpenChange, onStarted }: {
       setResumeId((v) => v ?? data.default_resume_id);
       setAuthorized(false);
       setSignIn(!!data.account?.credential && !!data.account.auto_sign_in && !data.account.blocked);
-      setCreateAccount(false);
+      // The owner's last choice is remembered on this computer (still shown, still changeable per application).
+      const acc = data.account;
+      const canCreate = !!acc?.available && !!acc.email && !acc.credential && !(acc.password_mode === "shared" && !acc.shared_configured);
+      setCreateAccount(canCreate && readPref(CREATE_PREF) === "1");
       if (data.support.resolved_url) {
         setLink(data.support.resolved_url);
         setRoute("link");
@@ -254,7 +257,10 @@ export function StartApplicationDialog({ job, open, onOpenChange, onStarted }: {
                       <span>{t("apply.workday.signIn")}</span>
                     </label>
                     <label className="mt-1 flex items-start gap-2">
-                      <Checkbox checked={createAccount} disabled={!data.account.available || !data.account.email || data.account.credential || (data.account.password_mode === "shared" && !data.account.shared_configured)} onCheckedChange={(v) => setCreateAccount(v === true)} aria-label={t("apply.workday.create", { site: data.account.tenant })} className="mt-0.5" />
+                      <Checkbox checked={createAccount} disabled={!data.account.available || !data.account.email || data.account.credential || (data.account.password_mode === "shared" && !data.account.shared_configured)} onCheckedChange={(v) => {
+                        setCreateAccount(v === true);
+                        writePref(CREATE_PREF, v === true ? "1" : "0");
+                      }} aria-label={t("apply.workday.create", { site: data.account.tenant })} className="mt-0.5" />
                       <span>
                         {t("apply.workday.create", { site: data.account.tenant })}
                         <span className="block text-xs text-ink-3">{data.account.password_mode === "shared" ? t("apply.workday.createShared") : t("apply.workday.createUnique")}</span>
@@ -578,6 +584,22 @@ function AttemptCard({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: string
     </section>
   );
 }
+
+const CREATE_PREF = "career-atlas.apply.createAccount";
+const readPref = (k: string) => {
+  try {
+    return window.localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+};
+const writePref = (k: string, v: string) => {
+  try {
+    window.localStorage.setItem(k, v);
+  } catch {
+    /* private window: not remembered */
+  }
+};
 
 function Intervention({ attempt: a, jobId }: { attempt: AttemptDTO; jobId: string }) {
   const { t } = useTranslation();

@@ -317,10 +317,24 @@ function authHtml() {
     '<button type="button" data-automation-id="createAccountSubmitButton">Create Account</button> <button type="button" data-automation-id="signInLink">Sign In</button></form></div>';
 }
 
+// clickfilter: like live tenants, a header "Sign In" (opens a different pop-up) comes before the form, and each
+// account button is covered by its own transparent "click_filter" that receives the click.
+function filtered(h) {
+  if (!has('clickfilter')) return h;
+  return h.replace(/<button type="button" data-automation-id="(createAccountSubmitButton|signInSubmitButton|signInLink|createAccountLink)">([^<]*)<\/button>/g, (m, id, label) => '<span style="position:relative;display:inline-block">' + m + '<div data-automation-id="click_filter" data-for="' + id + '" aria-label="' + label + '" role="button" tabindex="0" style="position:absolute;inset:0"></div></span>');
+}
+const header = () => has('clickfilter') ? '<header><button type="button" data-automation-id="utilityButtonSignIn">Sign In</button></header>' + (CFG.popup ? '<div role="dialog" data-automation-id="popUpDialog"><p>Sign in to your candidate home</p></div>' : '') : '';
+
 function render() {
   seq = 0;
   if (needAuth()) {
-    app.innerHTML = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(-1) + authHtml() + '</div>';
+    // lateauth: at first only the progress bar names "Create Account/Sign In"; the form is drawn 8 s later.
+    if (has('lateauth') && !CFG.authShown) {
+      app.innerHTML = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(-1) + '</div>';
+      if (!CFG.authTimer) CFG.authTimer = setTimeout(() => { CFG.authShown = true; render(); }, 8000);
+      return;
+    }
+    app.innerHTML = header() + '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(-1) + filtered(authHtml()) + '</div>';
     if (CFG.autologin && !CFG.autologinStarted) { CFG.autologinStarted = true; setTimeout(() => post('/wd/api/user-signed-in', {}).then(() => { CFG.signedIn = true; render(); }), 1500); } // the user signing in by hand
     return;
   }
@@ -513,6 +527,9 @@ document.addEventListener('change', (e) => {
   }
 });
 document.addEventListener('click', (e) => {
+  const cf = e.target.closest('[data-automation-id="click_filter"]');
+  if (cf) { const b = document.querySelector('[data-automation-id="' + cf.dataset.for + '"]'); if (b) b.click(); return; }
+  if (e.target.closest('[data-automation-id="utilityButtonSignIn"]')) { CFG.popup = true; render(); return; }
   const t = e.target.closest('button, [data-automation-id="file-upload-drop-zone"]');
   if (!t) { if (menu && !e.target.closest('[role=listbox]')) closeMenu(); return; }
   if (t.dataset.lb) {

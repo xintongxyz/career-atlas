@@ -165,6 +165,47 @@ describe.skipIf(!ready)("Workday accounts (synthetic site, in-memory secret stor
     await api("/api/local/accounts/shared-password", { method: "DELETE" });
   }, 300_000);
 
+  it("shared password: also signs in to an account the owner made by hand; 'create' where the account exists signs in once with it — no duplicate", async () => {
+    await api("/api/local/accounts/shared-password", { method: "PUT", json: { password: "Shared-Pass-2026!", confirm: "Shared-Pass-2026!" } });
+    await api("/api/local/accounts", { method: "PATCH", json: { password_mode: "shared" } });
+    try {
+      await accounts().forget(tenant, EMAIL);
+      fx.workday.accounts[EMAIL] = "Shared-Pass-2026!"; // made by hand on the site, unknown to Career Atlas
+      delete fx.workday.pending[EMAIL];
+      fx.workday.signedIn = false;
+      let a = await settled((await start(await job(12, "login+clickfilter"), "sign_in")).body.id);
+      expect(a.steps.map((s) => s.code)).toContain("workday_signed_in_auto");
+      expect(accounts().record(tenant, EMAIL)).toMatchObject({ mode: "shared", status: "signed_in" });
+      await cancel(a);
+
+      await accounts().forget(tenant, EMAIL);
+      fx.workday.signedIn = false;
+      const created = fx.workday.created.length;
+      a = await settled((await start(await job(13, "login+clickfilter"), "create")).body.id);
+      expect(a.steps.map((s) => s.code)).toEqual(expect.arrayContaining(["workday_account_creating", "workday_signed_in_auto"]));
+      expect(fx.workday.created.length).toBe(created);
+      await cancel(a);
+    } finally {
+      await api("/api/local/accounts", { method: "PATCH", json: { password_mode: "unique" } });
+      await api("/api/local/accounts/shared-password", { method: "DELETE" });
+    }
+  }, 300_000);
+
+  it("the account step drawn late (only the progress bar names it at first), a header 'Sign In' and click layers: recognised as sign-in, the form's own link and button used, signed in", async () => {
+    await accounts().forget(tenant, EMAIL);
+    await accounts().save(tenant, EMAIL, "Late-Auth-Pass-9!", "unique", "created");
+    accounts().mark(tenant, EMAIL, { last_failure_at: null, last_failure_code: null }); // an earlier test's failed try
+    fx.workday.accounts[EMAIL] = "Late-Auth-Pass-9!";
+    delete fx.workday.pending[EMAIL]; // an earlier test left a verification pending
+    fx.workday.signedIn = false;
+    // As on a live tenant: the header has its own "Sign In" and each account button its own click layer.
+    const a = await settled((await start(await job(11, "login+lateauth+clickfilter"), "sign_in")).body.id);
+    expect(a.steps.map((s) => s.code)).toContain("workday_signed_in_auto");
+    expect(a.error_code).not.toBe("next_not_available");
+    expect(a.steps.some((s) => s.code === "workday_step" && /create account|sign in/i.test(String(s.params?.step)))).toBe(false);
+    await cancel(a);
+  }, 300_000);
+
   it("no password ever reaches logs, attempt records or the database", async () => {
     const secrets = ["Shared-Pass-2026!", "weakpass", "Changed-elsewhere-1!", ...Object.values(fx.workday.accounts)].filter(Boolean);
     const all = logs.join("\n");
