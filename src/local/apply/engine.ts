@@ -893,7 +893,14 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       }
       if (/already applied/i.test(st.errors.join(" "))) throw new Stop("already_applied_on_site");
       if (st.kind === "review") break;
-      if (st.kind !== "step") return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page");
+      // A page not recognised yet: Workday may still be drawing a heavy step (My Experience after resume
+      // parsing) — wait longer before judging; then record what the page shows (labels only), never stop silently.
+      if (st.kind !== "step" && i > 0) st = await wdSettle(page, 45_000);
+      if (st.kind === "review") break;
+      if (st.kind !== "step") {
+        await diagnose(page, "workday-page", (await scan(page)).filter((f) => f.visible), `unrecognised:${st.kind}`);
+        return visible ? manual(page, "workday", "unexpected_page") : pause("unexpected_page", [], { errorCode: "workday_page_unrecognised" });
+      }
       // After signing in, Workday sometimes drops the "Autofill with Resume" choice and opens the
       // empty form instead: go back to the autofill address once, so the resume is uploaded and parsed.
       if (signedInNow && entered.mode === "autofill" && entered.url && !resumeHandled && !reentered && !(await isAutofillUpload(page)) && !(await page.locator('input[type="file"]').count())) {

@@ -232,6 +232,18 @@ describe.skipIf(!ready)("Workday (synthetic multi-step wizard)", () => {
     await api(`/api/apply/attempts/${a.id}/cancel`, { method: "POST" });
   }, 300_000);
 
+  it("steps without page ids and a heavy step drawn after 20 s: recognised, never a silent stop", async () => {
+    fx.workday.signedIn = true;
+    const id = await job(wd("nopageid+slowexp", 9), "Workday unfamiliar markup");
+    let a = await settled((await start(id, { resume_document_id: resumeB, entry_mode: "manual" })).body.id);
+    a = await answerKnown(a, COMMON);
+    const steps = a.steps.filter((s) => s.code === "workday_step").map((s) => s.params?.step);
+    expect(steps).toEqual(expect.arrayContaining(["My Information", "My Experience"]));
+    expect(a.error_code).not.toBe("workday_page_unrecognised");
+    expect(a.intervention).toBe("submit_approval");
+    await api(`/api/apply/attempts/${a.id}/cancel`, { method: "POST" });
+  }, 400_000);
+
   it("ambiguous result after Submit → Unconfirmed, never re-submitted; closed postings fail", async () => {
     fx.workday.signedIn = true;
     const before = fx.workday.submissions.length;

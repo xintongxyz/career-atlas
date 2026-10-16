@@ -94,7 +94,8 @@ export const WD_STATE = String.raw`(() => {
   const auth = qa('[data-automation-id="signInContent"], [data-automation-id="signInFormo"], form[data-automation-id^="signInForm"], [data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]').some(vis);
   const verify = qa('[data-automation-id="verificationCode"], input[name*="verification" i], input[autocomplete="one-time-code"]').some(vis) || /verify your (e-?mail|account)|verification (code|e-?mail|link) (has been |was )?sent|check your (e-?mail|inbox) (to|for)|account (has )?not (yet )?been verified|activate your account/i.test(text);
   const pageIds = ['applyFlowMyInfoPage','applyFlowMyExpPage','applyFlowPrimaryQuestionsPage','applyFlowSecondaryQuestionsPage','applyFlowVoluntaryDisclosuresPage','applyFlowSelfIdentifyPage','applyFlowReviewPage','contactInformationPage','myExperiencePage','voluntaryDisclosuresPage','selfIdentificationPage'];
-  const pageId = pageIds.find((id) => vis(q('[data-automation-id="' + id + '"]'))) || null;
+  // Known page ids, or any visible "applyFlow…Page" (tenants and UI versions name their pages differently).
+  const pageId = pageIds.find((id) => vis(q('[data-automation-id="' + id + '"]'))) || (qa('[data-automation-id^="applyFlow"][data-automation-id$="Page"]').filter((e) => e.getAttribute('data-automation-id') !== 'applyFlowPage').find(vis) || { getAttribute: () => null }).getAttribute('data-automation-id') || null;
   const active = q('[data-automation-id="progressBarActiveStep"]');
   const at = active ? active.innerText.replace(/\s+/g, ' ').trim() : '';
   const m = at.match(/step\s+(\d+)\s+of\s+(\d+)\s*(.*)$/i);
@@ -118,7 +119,9 @@ export const WD_STATE = String.raw`(() => {
   else if (auth) kind = 'auth';
   else if ((vis(thank) || conf) && !pageId && !nextText) kind = 'confirmation';
   else if (pageId === 'applyFlowReviewPage' || /^submit$/i.test(nextText)) kind = 'review';
-  else if (pageId || (flow && nextText)) kind = 'step';
+  // A step: a known page, the flow container with Next — or Workday's active progress step with Next
+  // (some tenants / UI versions show no page id and no visible flow container on a step).
+  else if (pageId || (flow && nextText) || (at && nextText)) kind = 'step';
   else if (flow) kind = 'loading';
   return { kind, step: m ? m[3].trim() || null : (at || null), index: m ? Number(m[1]) : null, total: m ? Number(m[2]) : null, pageId, confirmation: vis(thank) ? thank.innerText.trim().slice(0, 300) : conf ? conf[0] : null, errors };
 })()`;

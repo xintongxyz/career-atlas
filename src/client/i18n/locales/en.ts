@@ -1608,6 +1608,7 @@ const en = {
       account_unclear: "Career Atlas could not tell whether the account was created on {{site}}. The password is kept in the Keychain; check in a visible browser.",
       sign_in_unclear: "The sign-in on {{site}} did not complete. Continue in a visible browser.",
       parsed_values_need_review: "Some values were filled only by Workday's resume parsing. Check them below before submitting.",
+      workday_page_unrecognised: "Workday showed a page Career Atlas could not recognise as an application step (a diagnostic was saved locally). Continue in a visible browser.",
       still_on_posting: "The page still shows the job posting — the application itself was not opened. Nothing was filled.",
       application_form_not_found: "The application form was not found on this page, so it was not treated as ready to submit.",
       submit_not_in_application: "No Submit button belonging to the application was found (buttons of site widgets such as job alerts are never used).",

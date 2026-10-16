@@ -341,10 +341,20 @@ function render() {
     setTimeout(render, 2500);
     return;
   }
-  app.innerHTML = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(step) +
+  // A heavy step (My Experience after resume parsing) shows only a spinner for a long while on some tenants.
+  if (has('slowexp') && step === 1 && !CFG.expShown) {
+    CFG.expShown = true;
+    app.innerHTML = '<div data-automation-id="loadingSpinner" style="width:24px;height:24px;background:#ccc">Loading…</div>';
+    setTimeout(render, 20000);
+    return;
+  }
+  let html = '<div data-automation-id="applyFlowPage"><h2 data-automation-id="jobTitleHeading">Data Analyst (synthetic)</h2>' + progress(step) +
     (errors.length ? '<div data-automation-id="errorHeading">Errors Found</div>' : '') + stepHtml() +
     '<div data-automation-id="pageFooter">' + (step > 0 ? '<button type="button" data-automation-id="pageFooterBackButton">Back</button> ' : '') +
     '<button type="button" data-automation-id="pageFooterNextButton">' + (step === 4 ? 'Submit' : 'Save and Continue') + '</button></div></div>';
+  // Tenants / UI versions without page ids or a visible flow container: only the progress bar and Next.
+  if (has('nopageid')) html = html.replace(/data-automation-id="applyFlow(\w*)Page"/g, 'data-automation-id="wizard$1"');
+  app.innerHTML = html;
 }
 // Signed in. Some tenants then forget "Autofill with Resume" and open the manual form.
 function afterAuth() {

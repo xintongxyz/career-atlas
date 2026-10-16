@@ -1585,6 +1585,7 @@ const zhCN: Messages = {
       account_unclear: "Career Atlas无法确认{{site}}上的账户是否已创建。密码保留在钥匙串中；请在可见浏览器中查看。",
       sign_in_unclear: "{{site}}的登录没有完成。请在可见浏览器中继续。",
       parsed_values_need_review: "有些内容只是由Workday的简历解析填写的。提交前请在下方核对。",
+      workday_page_unrecognised: "Workday显示了一个Career Atlas无法识别为申请步骤的页面（已在本地保存诊断信息）。请在可见浏览器中继续。",
       still_on_posting: "页面仍是职位发布页——尚未打开申请本身。没有填写任何内容。",
       application_form_not_found: "此页面上未找到申请表，因此不视为可以提交。",
       submit_not_in_application: "未找到属于申请本身的提交按钮（网站小部件中的按钮，例如职位提醒，绝不会被使用）。",
