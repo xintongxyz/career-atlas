@@ -140,6 +140,27 @@ export function standingConsent(text: string, key: string, ctx: PlanContext): Co
   return cats.every(ok) ? cats : null;
 }
 
+/** For a consent that is not given automatically: its categories and the ones not authorised (shown with the question). */
+export function consentGap(text: string, key: string, ctx: PlanContext): string | null {
+  const cats = consentCategories(text);
+  if (!cats.length) return null;
+  const missing = cats.filter((c) => !standingConsent(c === "other_binding" ? "arbitration" : CATEGORY_PROBE[c], key, ctx));
+  return `Consent categories: ${cats.join(", ")}${missing.length ? `; not authorised: ${missing.join(", ")}` : ""}`;
+}
+
+/** One sentence per category, to test a single category's authorisation. */
+const CATEGORY_PROBE: Record<ConsentCategory, string> = {
+  privacy_notice: "I acknowledge the candidate privacy notice.",
+  routine_terms: "I agree to the application terms and conditions.",
+  read_information: "I have read the information about this position.",
+  accuracy_declaration: "I certify that my answers are accurate and complete.",
+  interview_recording: "We record interviews.",
+  recording_training: "We record interviews and use recordings for internal training.",
+  background_check: "I authorize a background check.",
+  third_party_sharing: "We share your information with third parties.",
+  other_binding: "binding arbitration",
+};
+
 /** The option that gives the consent ("Yes", "I agree", "I consent" …) — never one that declines. */
 export function affirmativeOption(options: string[]): string | null {
   const yes = options.filter((o) => /^\s*(yes|i agree|agree|i consent|consent|i accept|accept|i acknowledge|acknowledged?|i understand)\b/i.test(o) && !/\b(not|decline|do not|don't|no)\b/i.test(o));
@@ -688,13 +709,19 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
     if (saved !== undefined && !use(saved, "saved_answer")) continue;
     // Declarations / consents the owner authorised by category (standing consents): given, and recorded.
     if (sem === "legal") {
-      const cats = standingConsent([f.label, f.section, ...f.options.map((o) => o.label)].join(" "), key, ctx);
-      const value = cats ? (f.control === "checkbox" ? true : affirmativeOption(f.options.map((o) => o.label))) : null;
+      // What is consented to is the question itself and its options — not the surrounding headings.
+      const cats = standingConsent([f.label, ...f.options.map((o) => o.label)].join(" "), key, ctx);
+      // Options of a searchable dropdown are known only once it is opened: plan "Yes" — the pick must still
+      // find exactly that option on the page (never another one).
+      const known = f.options.filter((o) => !isPlaceholderOption(o)).map((o) => o.label);
+      const value = cats ? (f.control === "checkbox" ? true : known.length ? affirmativeOption(known) : f.control === "combobox" ? "Yes" : null) : null;
       if (cats && value !== null && !use(value, `consent.${cats.join("+")}`)) continue;
     }
     // Identity and declarations: only the user's own answers above — never defaults or inference.
     if (sem === "demographic" || sem === "legal") {
-      if (f.required) plan.questions.push(question(f, key, sem, true, null, qm));
+      // A consent left to the user says which categories it touches and which are not authorised.
+      const why = sem === "legal" ? consentGap([f.label, ...f.options.map((o) => o.label)].join(" "), key, ctx) : null;
+      if (f.required) plan.questions.push(question(f, key, sem, true, why, qm));
       else plan.skipped.push({ key, label: f.label, reason: sem });
       continue;
     }

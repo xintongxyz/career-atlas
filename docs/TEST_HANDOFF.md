@@ -420,3 +420,81 @@ CA_LAB_N=50 CA_LAB_SEED=51 CA_LAB_REPORT=/tmp/lab.md npm run test:lab
 CA_LIVE_CODEX=1 CA_GPT_EVAL_REPORT=/tmp/gpt.md npx vitest run tests/integration/lab-gpt-eval.test.ts
 CA_LIVE_CODEX=1 CA_LIVE_POSTING_URL=<posting> npx vitest run tests/integration/apply-posting-probe-live.test.ts
 ```
+
+## 20. The answer engine (application questions answered from verified records) — 2026-10-15
+
+**Investigation (the owner's real paused application, employer N; sanitized).** 12 pending questions, by root cause:
+
+| Question | Category | Root cause |
+|---|---|---|
+| School (bachelor's university) | dropdown rejected | not in the site's school list; no alias / equivalence / "Other" fallback |
+| Discipline | dropdown rejected | major not in the list; no equivalence check |
+| Start month / year (bachelor's) | genuinely absent | no start date in that education entry |
+| "When do you expect to complete your degree?" | present, not recognised | "complete your degree" not a graduation question; only the year retrieved |
+| 1–2 paragraph / 500-word data project | needs synthesis | no answer-writing capability (and mislabelled "motivation") |
+| Offer / recruiting deadline | personal, time-sensitive | correctly asked; no dated storage |
+| Future sponsorship (Canada) | personal decision | correctly not inferred from a work permit; asked |
+| Interview recording + training consent | consequential consent | no standing-consent categories |
+| Current or previous employer / title | present, not retrieved | only a role marked "current" was used; all roles had ended |
+| Country of residence | present, not recognised | that wording not recognised (profile country stored in Chinese) |
+
+**Implemented.** QUESTION → INTENT → EVIDENCE → ANSWER → SITE ACTION → VERIFICATION:
+- Retrieval (`plan.ts`): latest employer + title from the same record ("current or previous" / "most recent"; strictly
+  "current" still needs a current role); residence however asked; degree completion from the one degree in progress,
+  month + year in text ("December 2026"; several in progress → asked).
+- Answer engine (`src/local/apply/answer-engine.ts`): topic, limits (words / characters / paragraphs / maxlength) and
+  writability (personal facts and decisions are never written); evidence = only the work / project / education / skills
+  entries the topic needs + the job description; the provider returns sentences with evidence ids; `checkDraft` rejects
+  uncited sentences, numbers / percentages / amounts not in the cited evidence (whole numbers — "25%" is not supported
+  by "2025"), tools not in the evidence, names not in the evidence / job / question; one repair round, then unsupported
+  sentences are dropped; filled only if the page keeps the whole text; cached with the attempt (`answers.__generated`)
+  and listed at review with its flags. Gated by Application Defaults → "AI answer writing" (off by default).
+- Options (`rows.ts`): school / major not listed under the profile's name → shorter searches + "Other" looked up →
+  `judgeOption` (same institution; for majors also a broader containing field; never "Other", never another school) →
+  else the site's "Other" → else asked.
+- Standing consents (`standing_consents`, `consentCategories`, `standingConsent`): per category; a consent is given only
+  if every category its text touches is authorised; accuracy only over verified values; terms only when the linked terms
+  loaded; arbitration / signatures / waivers never. Unanswered consents show their categories and the missing ones.
+- Asked once, stored where it belongs: education start dates → that school's entry (`entry` on the question);
+  recruiting deadline → `recruiting_deadline {answer, as_of}`, reused 21 days; sponsorship → `sponsorship_future`.
+- Statuses: profile fact (source = profile path, e.g. `experience.latest`), AI-written (`ai_generated`, status
+  `generated`, flags), site option, consent (`consent.<categories>`), needs user (`missing`), needs consent (`legal` +
+  category gap), site rejected (`not_accepted` / `no_matching_option`).
+
+**Synthetic results.** Unit: retrieval, consents, limits, evidence, claim check, judge (`answer-engine.test.ts`,
+`consent.test.ts`). Integration (`apply-answers.test.ts`, synthetic questionnaire, fictional applicant, scripted writer):
+with AI writing + recording consents on, only the deadline, sponsorship and the bachelor's start date are asked; after
+answering, the start date is saved to that school, sponsorship and the dated deadline to defaults; the written answer is
+not rewritten on re-run; the submission carries latest employer / title, Canada, "December 2026", consent "Yes",
+"Other" for the unlisted school, "Statistics" for the major. With everything off: facts still retrieved, nothing sent to
+AI, the project and the consent asked.
+**Real provider (fictional applicant):** 5 writing questions → 5 answers within limits, 0 flags, 0 re-check problems;
+the same project question for two roles chose different evidence (internship vs. forecasting project); the deadline
+question was refused; judge: "Economic Statistics" → "Statistics" (broader), an unlisted school → none, an abbreviation →
+the same university, an unrelated major → none (after "Other" was removed from the judge's choices — it had once been
+called "broader"). End to end on the synthetic questionnaire with the real writer: answer written, filled, verified,
+listed; only the genuine unknowns asked.
+
+**Real application (employer N, owner-approved re-run, review mode, nothing submitted).** Owner settings applied
+through the app (verified backup first; everything else in the profile unchanged): AI answer writing on, all seven
+consent categories. The original attempt had been cancelled by the owner; a new attempt was started on the same job.
+- Before: 12 questions. After: **5** — bachelor's start month + year (absent), offer deadline (personal), future
+  sponsorship (decision), and the interview consent: its text touches interview recording, internal training AND the
+  employer's privacy notice; the owner authorised the first two, and the privacy-notice permission is the separate
+  "Acknowledge recruitment privacy notices" setting — so it is asked (correct).
+- Answered automatically and verified on the page: employer + title (latest role), country of residence (Canada),
+  degree completion (master's in progress), the data-project answer (AI-written: 2 paragraphs, 128 words ≤ 500, 0 flags,
+  whole text kept), school and discipline of the bachelor's degree ("Other": not listed).
+- Two real-site fixes found: a consent asked as a searchable dropdown had unknown options (now "Yes" is searched and
+  must be found exactly); the section heading was wrongly part of the consent text (now only the question + options).
+- No false completion (state: approval / questions), nothing submitted.
+
+**Privacy.** Only evidence entries go to the provider (unit + integration tests assert no name / e-mail / phone /
+eligibility / city in what is sent); the navigation agent still sees no values; generated text stays in the local
+attempt; logs and steps carry word counts and flag counts only; tests and fixtures use fictional data; no real
+values in Git (grep before commit).
+
+**Limitations.** Answers are only as specific as the records (short experience descriptions → concise answers); no
+resume-text retrieval yet (structured profile only); the claim check is lexical (it catches invented numbers, tools and
+names, not every paraphrased exaggeration — review stays mandatory before submit); option equivalence needs the AI
+setting; "Other" free-text follow-up fields are not filled yet.

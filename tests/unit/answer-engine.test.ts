@@ -79,6 +79,9 @@ describe("standing consents by category", () => {
     expect(standingConsent(brighthire, q.id, withConsents({ interview_recording: true, recording_training: true }))).toEqual(["interview_recording", "recording_training"]);
     expect(first(q, withConsents({ interview_recording: true, recording_training: true })).actions[0]).toMatchObject({ kind: "choose", values: ["Yes"], source: "consent.interview_recording+recording_training" });
     expect(first(q, withConsents({})).questions[0]).toMatchObject({ reason: "legal" });
+    // A searchable dropdown whose options are not read yet: "Yes" is searched and must be found exactly.
+    const combo = f({ label: brighthire, control: "combobox", options: [] });
+    expect(first(combo, withConsents({ interview_recording: true, recording_training: true })).actions[0]).toMatchObject({ kind: "search", value: "Yes" });
   });
   it("an accuracy declaration only over verified values; binding terms never", () => {
     const decl = "I certify that the information in this application is true and complete.";
