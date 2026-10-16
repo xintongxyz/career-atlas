@@ -11,6 +11,7 @@ import { newWorkdayState, workdayRoute, type WorkdayFixtureState } from "./workd
 import { dayforceRoute, newDayforceState, type DayforceFixtureState } from "./dayforce-fixture";
 import { patternsRoute } from "./patterns-fixture";
 import { postingRoute } from "./posting-fixture";
+import { questionnaireRoute } from "./questionnaire-fixture";
 
 export interface Submission {
   path: string;
@@ -253,6 +254,7 @@ export async function startAtsFixture(): Promise<AtsFixture> {
     if (await dayforceRoute(req, res, u, dayforce)) return;
     if (req.method !== "POST" && (await patternsRoute(req, res, u))) return;
     if (req.method !== "POST" && (await postingRoute(req, res, u))) return;
+    if (req.method !== "POST" && (await questionnaireRoute(req, res, u))) return;
     if (await indeedRoute(req, res, u, indeed)) return;
     const variant = u.searchParams.get("variant") ?? "";
     const html = (s: string, status = 200) => {

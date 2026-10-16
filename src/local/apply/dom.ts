@@ -167,7 +167,7 @@ export const SCAN_FIELDS = String.raw`(() => {
     const invalid = el.getAttribute('aria-invalid') === 'true' || !!(wdField(el) && wdField(el).querySelector('[data-automation-id="inputAlert"], [data-automation-id="errorMessage"]'));
     // The site's own help / error text tied to the control (aria-describedby) — site wording, not values.
     const help = clean((el.getAttribute('aria-describedby') || '').split(/\s+/).map((i) => { const h = i && document.getElementById(i); return h ? h.textContent : ''; }).join(' ')).slice(0, 200);
-    const base = { invalid, inputType: type, name: el.name || fieldName(el), id: el.id || '', placeholder: clean(el.getAttribute('placeholder')), autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(), section: sectionOf(el), demographic: isDemo(el), options: [], wdField: fieldName(el), group: panel.group, groupIndex: panel.groupIndex, help };
+    const base = { invalid, inputType: type, name: el.name || fieldName(el), id: el.id || '', placeholder: clean(el.getAttribute('placeholder')), autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase(), section: sectionOf(el), demographic: isDemo(el), options: [], wdField: fieldName(el), group: panel.group, groupIndex: panel.groupIndex, help, maxLength: el.maxLength > 0 ? el.maxLength : null };
     // Workday date: month / day / year inputs typed separately -> one field.
     const dai = el.getAttribute('data-automation-id') || '';
     const datePart = (dai.match(/^dateSection(Month|Day|Year)-input$/) || [])[1];

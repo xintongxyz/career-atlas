@@ -661,6 +661,7 @@ function ReviewSummary({ attempt: a }: { attempt: AttemptDTO }) {
   const parsed = a.filled.filter((f) => f.status === "parsed");
   const corrected = a.filled.filter((f) => f.status === "corrected");
   const skipped = a.filled.filter((f) => f.status === "skipped");
+  const generated = a.filled.filter((f) => f.status === "generated");
   const show = (v: string | string[] | boolean) => (typeof v === "boolean" ? (v ? t("profile.tri.yes") : t("profile.tri.no")) : Array.isArray(v) ? v.join(", ") : v);
   return (
     <div className="space-y-2 rounded-md bg-surface px-3 py-2.5 text-xs text-ink-2">
@@ -688,6 +689,20 @@ function ReviewSummary({ attempt: a }: { attempt: AttemptDTO }) {
             {a.answered.map((x) => (
               <li key={x.key}>
                 <span className="text-ink-3">{x.label}</span> → {show(x.value)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {generated.length ? (
+        <div className="rounded border border-accent/30 bg-accent-soft/30 px-2 py-1.5">
+          <p className="font-medium text-ink">{t("apply.review.generated")}</p>
+          <ul className="mt-1 space-y-2">
+            {generated.map((f, i) => (
+              <li key={i}>
+                <p className="text-ink-3">{f.label}</p>
+                <p className="whitespace-pre-wrap text-ink">{f.value}</p>
+                {f.flags?.length ? <p className="text-warn">{t("apply.review.generatedFlags", { items: f.flags.join("; ") })}</p> : <p className="text-ink-3">{t(f.verified ? "apply.review.generatedOk" : "apply.review.generatedNotKept")}</p>}
               </li>
             ))}
           </ul>

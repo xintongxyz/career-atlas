@@ -61,6 +61,8 @@ export interface PendingQuestion {
   meaning?: string | null;
   /** False for declarations / consents: those are approved each time. */
   rememberable?: boolean;
+  /** The profile entry a row question belongs to (e.g. the school), so the answer is saved to THAT entry. */
+  entry?: string | null;
 }
 
 export interface FilledField {
@@ -69,9 +71,11 @@ export interface FilledField {
   source: string;
   verified: boolean;
   /** "kept": already right on the page; "corrected": a value the site had filled (e.g. from resume parsing) was replaced from My Profile; "parsed": filled by the site's resume parsing and not confirmed by My Profile. */
-  status?: "filled" | "kept" | "corrected" | "parsed" | "skipped";
-  /** Only for "parsed": the value the site filled, shown for review (stored locally only). */
+  status?: "filled" | "kept" | "corrected" | "parsed" | "skipped" | "generated";
+  /** For "parsed": the value the site filled; for "generated": the AI-written answer — shown for review (stored locally only). */
   value?: string | null;
+  /** "generated" answers: what the evidence check could not confirm (empty = every claim supported). */
+  flags?: string[];
 }
 
 export interface AttemptStep {

@@ -15,12 +15,12 @@ const cfg = loadConfig({ kind: "test", dataDir, port: 80 });
  * The runtime browser agent's proposer in tests: null (no AI — as in CI) unless a test installs a
  * scripted stand-in. Tests never call a real model; tests/integration/apply-agent-live.test.ts is opt-in.
  */
-export const agentHook: { propose: Proposer | null } = { propose: null };
+export const agentHook: { propose: Proposer | null; writer: Proposer | null } = { propose: null, writer: null };
 // Short waits after Submit so "unconfirmed" outcomes are reached quickly in tests.
 const rt = await createLocalRuntime(cfg, {
   serveStatic: false,
   extraHosts: ["localhost"],
-  apply: { timeouts: { afterSubmit: 6000, manual: 4000, navigation: 20_000 }, forceHeadless: true, pageAgent: null, chooseOption: null, browserAgent: async () => agentHook.propose, agentMaxSteps: 25 },
+  apply: { timeouts: { afterSubmit: 6000, manual: 4000, navigation: 20_000 }, forceHeadless: true, pageAgent: null, chooseOption: null, browserAgent: async () => agentHook.propose, answerWriter: async () => agentHook.writer, agentMaxSteps: 25 },
 });
 rt.env.MAX_UPLOAD_BYTES = "1048576";
 

@@ -151,6 +151,10 @@ export async function createLocalRuntime(cfg: LocalConfig, opts: { extraHosts?: 
     // the model only proposes; Career Atlas validates and executes (src/local/apply/browser-agent.ts).
     const provider = await codex.ready();
     return provider ? async (system, user, schema) => (await provider.completeJson({ system, user, jsonSchema: schema })) as Record<string, unknown> : null;
+  }, answerWriter: async () => {
+    // The same signed-in provider, tools off. Used only when the owner turned on "AI answer writing".
+    const provider = await codex.ready();
+    return provider ? async (system, user, schema) => (await provider.completeJson({ system, user, jsonSchema: schema })) as Record<string, unknown> : null;
   }, ...opts.apply });
   await apply.init();
   env.APPLY = apply;

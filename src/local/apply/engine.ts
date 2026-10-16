@@ -35,13 +35,14 @@ import { tenantOf, type AccountManager } from "./credentials";
 import { questionMeaning } from "@shared/apply-semantic";
 import type { PublicFacts } from "./codex-agent";
 import { createAgent, type Proposer } from "./browser-agent";
+import { judgeOption, openQuestion, writeAnswer, type Writer } from "./answer-engine";
 import { APPLY_CTA_RE, MARK_SUBMIT, PAGE_MAP, pageState, type PageMap, type PageState } from "./page-intent";
 import { PAGE_SIGNALS } from "./dom";
 import { decideAdvance, decideNavigation, safeClickName, type PageObservation } from "./generic";
-import { commitOpenSections, enrichOptions, frameView, handleNotices, navigationSafe, perform, readMenu, scan, verify } from "./interact";
+import { commitOpenSections, enrichOptions, frameView, handleNotices, navigationSafe, perform, readMenu, scan, textSet, verify } from "./interact";
 import { classifyIndeedUrl } from "./indeed";
 import { applicationUrl, atsFromSignals, classifyAfterSubmit, stripQuery, successSentence, type Ats, type PageSignals } from "./outcome";
-import { fieldKey, norm, planForm, question, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
+import { fieldKey, norm, planForm, question, standingConsent, type FieldDescriptor, type PlanContext, type PlannedAction } from "./plan";
 import { fillSections } from "./wd-sections";
 import { fillRows } from "./rows";
 import { jobSourceOf, type JobSource } from "@shared/apply-match";
@@ -80,6 +81,11 @@ export interface EngineDeps {
   browserAgent?: (() => Promise<Proposer | null>) | null;
   /** Tests: fewer agent steps. */
   agentMaxSteps?: number;
+  /**
+   * Writes answers to open questions from verified facts (answer-engine.ts), used only when the owner turned
+   * on "AI answer writing". Returns the writer, or null when no provider is available.
+   */
+  answerWriter?: (() => Promise<Writer | null>) | null;
 }
 
 /** What the attempt shows while a generic site is being worked on. */
@@ -128,6 +134,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
   let agent: ReturnType<typeof createAgent> | null = null;
   let agentOpen: PendingQuestion[] = [];
   let jobTitle: string | null = null;
+  let jobDescription: string | null = null;
   /** Generic sites: an Apply / guest action led into the application (verified on the next page). */
   let inWorkflow = false;
   let lastState: PageState | null = null;
@@ -197,6 +204,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     resumeFile = { name: row.resumeFileName, mimeType: row.resumeMimeType, buffer: Buffer.from(bytes) };
     const company = posting ? await db.query.companies.findFirst({ where: eq(companies.id, posting.companyId) }) : null;
     jobTitle = posting?.title ?? null;
+    jobDescription = posting?.descriptionText ?? null;
     jobSource = jobSourceOf({ sourcePlatform: posting?.sourcePlatform, originalUrl: posting?.originalUrl, route: row.route, sourceUrl: row.sourceUrl });
     planCtx = { profile, jobCountry: posting?.country ?? null, answers: (row.answers as Record<string, unknown> | null) ?? {}, resume: { fileName: resumeFile.name }, employer: company?.name ?? null, jobSource };
 
@@ -297,6 +305,14 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       await set({ filled: allFilled }, code, params);
     },
     progress,
+    // Option equivalence by AI only with the owner's "AI answer writing" on (it sends that one value).
+    judge:
+      planCtx.profile.application_defaults.ai_answer_writing === "on" && deps.answerWriter
+        ? async (value: string, options: string[], kind: "school" | "major" | "degree" | "other") => {
+            const w = await deps.answerWriter!().catch(() => null);
+            return w ? judgeOption(value, options, kind, w) : null;
+          }
+        : undefined,
     };
   }
 
@@ -312,9 +328,11 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     if (!consent) return null;
     const key = `notice:${norm(consent.text).slice(0, 120)}`;
     const privacyOnly = /privacy|personal information|data protection/i.test(consent.text) && !/certif|attest|background|drug|criminal|signature|arbitration|non-?compete|true,? (accurate|correct)|authori[sz]e .*(contact|verify|release)/i.test(consent.text);
-    const approved = planCtx.answers[key] === true || (privacyOnly && planCtx.profile.application_defaults.accept_privacy_notices === "yes");
+    planCtx.consent = { accuracyVerified: accuracyVerified(), inspectedTerms: planCtx.consent?.inspectedTerms };
+    const standing = standingConsent(consent.text, key, planCtx);
+    const approved = planCtx.answers[key] === true || (privacyOnly && planCtx.profile.application_defaults.accept_privacy_notices === "yes") || !!standing;
     if (approved && (await acceptConsentDialog(page))) {
-      await set({}, "consent_given", { kind: privacyOnly ? "privacy_notice" : "approved" });
+      await set({}, "consent_given", { kind: standing ? standing.join("+") : privacyOnly ? "privacy_notice" : "approved" });
       return null;
     }
     const q: PendingQuestion = { key, label: consent.text.slice(0, 500), kind: "checkbox", required: true, options: [], reason: "legal", sensitive: true, hint: null, rememberable: false, meaning: privacyOnly ? "privacy_notice" : "declaration" };
@@ -1139,7 +1157,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
    * contradicts is corrected; pre-filled values My Profile can't confirm are kept and listed for Review.
    */
   async function fillPage(page: Page, opts: { uploadInPlan: boolean; parsedMode?: boolean; retried?: boolean }): Promise<{ questions: PendingQuestion[] }> {
-    const questions: PendingQuestion[] = [];
+    let questions: PendingQuestion[] = [];
     const handled = new Set<string>();
     let uploaded = false;
     for (let pass = 0; pass < 3; pass++) {
@@ -1147,6 +1165,7 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
       if (!opts.uploadInPlan) fields = fields.filter((f) => f.control !== "file");
       const fresh = fields.filter((f) => f.visible && !handled.has(fieldKey(f)));
       if (!fresh.length) break;
+      planCtx.consent = { accuracyVerified: accuracyVerified(), inspectedTerms: await inspectTerms(page, fresh) };
       let plan = planForm(fresh, planCtx);
       const upload = plan.actions.find((a) => a.kind === "upload");
       const alreadyUploaded = fields.some((f) => f.control === "file" && (Array.isArray(f.value) ? f.value : [String(f.value ?? "")]).some((n) => norm(n) === norm(resumeFile.name)));
@@ -1279,6 +1298,9 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
         if (labels.length) q.options = labels;
       }
     }
+    // Open questions the profile can answer in writing (a project, the role, the applicant's experience):
+    // drafted from verified facts, checked, filled and verified — listed at review.
+    questions = await writeOpenAnswers(page, questions);
     // A value the site cleared after it was verified (a re-render or a reset), or a control that appeared
     // or became enabled only after the passes (State after Country): one more round — only then a question.
     if (!opts.retried) {
@@ -1298,6 +1320,86 @@ export async function runAttempt(deps: EngineDeps, attemptId: string): Promise<A
     }
     await set({ filled: allFilled }, "filled", { count: allFilled.filter((x) => x.verified).length, total: allFilled.length });
     return { questions };
+  }
+
+  /** An accuracy declaration may be given only over values that were all verified on the page (none parsed, none flagged). */
+  function accuracyVerified(): boolean {
+    return allFilled.length > 0 && allFilled.every((f) => (f.verified || f.status === "kept" || f.status === "skipped") && f.status !== "parsed" && !(f.flags && f.flags.length));
+  }
+
+  /**
+   * Terms a standing consent may accept must have been readable: the terms linked from the checkbox are
+   * fetched (GET, read-only) and count as inspected only when they load with real content.
+   */
+  async function inspectTerms(page: Page, fields: FieldDescriptor[]): Promise<Set<string>> {
+    const out = new Set<string>();
+    if (planCtx.profile.application_defaults.standing_consents?.routine_terms !== true) return out;
+    for (const f of fields.filter((x) => x.control === "checkbox" && /\bterms\b/i.test(x.label))) {
+      const href = await page
+        .locator(`[data-ca-ref="${f.ref}"]`)
+        .evaluate((el) => {
+          const box = el.closest("label") ?? (el.id ? el.ownerDocument.querySelector(`label[for="${el.id}"]`) : null) ?? el.parentElement;
+          return box?.querySelector("a[href]")?.getAttribute("href") ?? null;
+        })
+        .catch(() => null);
+      if (!href) continue;
+      try {
+        const res = await page.context().request.get(new URL(href, page.url()).toString(), { timeout: 8000 });
+        if (res.ok() && (await res.text()).replace(/<[^>]+>/g, " ").trim().length > 300) out.add(fieldKey(f));
+      } catch {
+        /* not inspected → not accepted by standing consent */
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The answer engine for open questions (answer-engine.ts). Only with the owner's "AI answer writing" on;
+   * the evidence sent is limited to what the question needs. A draft is written once per question and kept
+   * with the attempt (a re-run fills the same text); it is filled only if the page keeps the whole text.
+   */
+  async function writeOpenAnswers(page: Page, questions: PendingQuestion[]): Promise<PendingQuestion[]> {
+    if (planCtx.profile.application_defaults.ai_answer_writing !== "on" || !questions.length) return questions;
+    const store = ((planCtx.answers.__generated as Record<string, { label: string; text: string; flags: string[] }> | undefined) ??= {});
+    let writer: Writer | null | undefined;
+    const fields = await scan(page);
+    const rest: PendingQuestion[] = [];
+    for (const q of questions) {
+      const f = fields.find((x) => x.visible && fieldKey(x) === q.key);
+      const textual = !!f && (f.control === "text" || f.control === "textarea") && !f.group && !f.demographic;
+      const oq = f ? openQuestion(q.label, f.maxLength) : null;
+      // Only real writing questions: open-ended by the planner (or a free-text box asking to describe / explain).
+      const asks = q.reason === "open_ended" || (q.reason === "missing" && f?.control === "textarea" && oq?.topic !== "general");
+      if (!textual || !oq?.writable || !asks || q.sensitive) {
+        rest.push(q);
+        continue;
+      }
+      let draft = store[q.key]?.label === q.label ? store[q.key] : null;
+      if (!draft) {
+        writer ??= deps.answerWriter ? await deps.answerWriter().catch(() => null) : null;
+        if (!writer) {
+          rest.push(q);
+          continue;
+        }
+        await progress(q.label);
+        const d = await writeAnswer(oq, planCtx.profile, { title: jobTitle, employer: planCtx.employer ?? null, description: jobDescription }, writer).catch(() => null);
+        if (!d) {
+          rest.push(q);
+          continue;
+        }
+        draft = { label: q.label, text: d.text, flags: d.flags };
+        store[q.key] = draft;
+        await set({ answers: planCtx.answers }, "answer_written", { words: d.text.split(/\s+/).length, flags: d.flags.length });
+      }
+      const ok = await textSet(page, async () => {
+        const x = (await scan(page)).find((y) => y.visible && fieldKey(y) === q.key);
+        return x ? { f: x, loc: page.locator(`[data-ca-ref="${x.ref}"]`) } : null;
+      }, draft.text);
+      allFilled = allFilled.filter((x) => !(x.status === "generated" && x.label === q.label.slice(0, 300)));
+      allFilled.push({ label: q.label.slice(0, 300), source: "ai_generated", verified: ok, status: "generated", value: draft.text.slice(0, 6000), flags: draft.flags });
+      if (!ok) rest.push({ ...q, reason: "not_accepted" });
+    }
+    return rest;
   }
 
   /** Workday sections (work, education, websites, languages, skills, source) — see wd-sections.ts. */

@@ -29,6 +29,11 @@ export interface RowsCtx {
   event: (code: string, params?: Record<string, string | number>) => Promise<void>;
   /** Field label being worked on (never a value). */
   progress?: (label: string) => Promise<void>;
+  /**
+   * When no offered option matches by rules: which option is the SAME thing as the value (an AI judgement,
+   * owner opt-in) — "same" (alias / spelling) or, for a field of study, "broader" (a field that contains it).
+   */
+  judge?: (value: string, options: string[], kind: "school" | "major" | "degree" | "other") => Promise<{ pick: string; relation: "same" | "broader" } | null>;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -188,10 +193,10 @@ export async function fillRows(ctx: RowsCtx): Promise<{ questions: PendingQuesti
         }
       }
       if (value === null || value === "") {
-        if (f0.required && !valuesOf(f0).length) questions.push({ ...question(f0, key, "missing", false), label: `${tag}: ${f0.label}`.slice(0, 500) });
+        // A missing education start date belongs to THIS school: the answer is saved to that entry.
+        if (f0.required && !valuesOf(f0).length) questions.push({ ...question(f0, key, "missing", false), label: `${tag}: ${f0.label}`.slice(0, 500), ...(group === "education" && role === "start" && ed?.institution ? { meaning: "education_start", entry: ed.institution, rememberable: false } : {}) });
         continue;
       }
-      const label = `${tag}: ${f0.label.replace(/\*\s*$/, "")}${note}`.slice(0, 300);
       let ok = false;
       if (f0.control === "text" || f0.control === "textarea") ok = await textSet(page, find(role, f0.label), value);
       else if (["select", "listbox", "radio", "combobox"].includes(f0.control)) {
@@ -210,8 +215,32 @@ export async function fillRows(ctx: RowsCtx): Promise<{ questions: PendingQuesti
         const r = f0.control === "combobox" ? await searchSelect(page, find(role, f0.label), { queries: [value], choose: decide, committed, guard: ctx.guard }) : await listSelect(page, find(role, f0.label), decide, committed);
         if (!r.ok && f0.control === "combobox") ok = (await listSelect(page, find(role, f0.label), decide, committed)).ok;
         else ok = r.ok;
+        // Not offered under that exact name: look at what the site offers (shorter searches), let the judge
+        // pick the SAME entry (or a broader field of study), else the site's "Other" — never a different one.
+        if (!ok && (role === "school" || role === "major") && value) {
+          const seen = new Set(r.seen);
+          if (f0.control === "combobox") {
+            const words = value.split(/\s+/).filter((w) => w.length > 3 && !/^(university|college|institute|school|of|the|and)$/i.test(w));
+            // Shorter forms of the name show what the site offers; "Other" is looked for explicitly.
+            for (const q of [...new Set([words.slice(0, 2).join(" "), words[0], "Other"].filter(Boolean))]) {
+              const look = await searchSelect(page, find(role, f0.label), { queries: [q], choose: () => null, committed: () => false, guard: ctx.guard });
+              look.seen.forEach((x) => seen.add(x));
+            }
+          }
+          const options = [...seen].filter((x) => x && !/^(select|choose|--)/i.test(x));
+          const verdict = options.length && ctx.judge ? await ctx.judge(value, options, role).catch(() => null) : null;
+          const accept = verdict && options.includes(verdict.pick) && (verdict.relation === "same" || (role === "major" && verdict.relation === "broader")) ? verdict.pick : null;
+          const other = options.find((x) => /^other\b/i.test(x.trim()));
+          const pick = accept ?? other ?? null;
+          if (pick) {
+            const exact = (labels: string[]) => labels.find((l) => norm(l) === norm(pick)) ?? null;
+            const again = f0.control === "combobox" ? await searchSelect(page, find(role, f0.label), { queries: [pick], choose: exact, committed, guard: ctx.guard }) : await listSelect(page, find(role, f0.label), exact, committed);
+            ok = again.ok;
+            if (ok) note = accept ? (verdict!.relation === "broader" ? ` (closest broader field offered: ${pick})` : ` (as listed: ${pick})`) : " (not listed: “Other” chosen)";
+          }
+        }
       }
-      ctx.record({ label, source: group === "work" ? "experience" : "education", verified: ok });
+      ctx.record({ label: `${tag}: ${f0.label.replace(/\*\s*$/, "")}${note}`.slice(0, 300), source: group === "work" ? "experience" : "education", verified: ok });
       if (!ok && f0.required) questions.push({ ...question(f0, key, "not_accepted", false, value), label: `${tag}: ${f0.label}`.slice(0, 500) });
     }
   }

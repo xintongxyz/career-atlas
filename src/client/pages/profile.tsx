@@ -562,8 +562,34 @@ function ApplicationDefaultsCard({ value: d, onChange }: { value: Defaults; onCh
             {text("hourly_expectation")}
           </>,
         )}
+        <div>
+          <p className="mb-1 text-xs font-medium text-ink-3">{t("profile.defaults.groups.ai")}</p>
+          <Field label={t("profile.defaults.ai_answer_writing")} htmlFor="pd-ai_answer_writing" hint={t("profile.defaults.aiAnswerHelp")}>
+            <NativeSelect id="pd-ai_answer_writing" value={d.ai_answer_writing ?? "off"} onChange={(e) => up({ ai_answer_writing: e.target.value as "on" | "off" })}>
+              <option value="off">{t("profile.defaults.aiOff")}</option>
+              <option value="on">{t("profile.defaults.aiOn")}</option>
+            </NativeSelect>
+          </Field>
+        </div>
+        <div>
+          <p className="mb-1 text-xs font-medium text-ink-3">{t("profile.defaults.groups.consents")}</p>
+          <p className="mb-2 text-xs text-ink-3">{t("profile.defaults.consentsHelp")}</p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {CONSENT_KEYS.map((k) => (
+              <label key={k} className="flex items-start gap-2 text-sm">
+                <input type="checkbox" className="mt-1" checked={d.standing_consents?.[k] === true} onChange={(e) => up({ standing_consents: { ...(d.standing_consents ?? {}), [k]: e.target.checked } })} />
+                <span>
+                  {t(`profile.defaults.consents.${k}`)}
+                  <span className="block text-xs text-ink-3">{t(`profile.defaults.consentsHint.${k}`)}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
         <p className="text-xs text-ink-3">{t("profile.defaults.identityNote")}</p>
       </div>
     </Card>
   );
 }
+
+const CONSENT_KEYS = ["read_information", "routine_terms", "accuracy_declaration", "interview_recording", "recording_training", "background_check", "third_party_sharing"] as const;

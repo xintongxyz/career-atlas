@@ -218,6 +218,7 @@ export type Meaning =
   | "return_to_school"
   | "placement_duration"
   | "graduation_date"
+  | "recruiting_deadline"
   | "full_time_student"
   | "professional_licence"
   | "certification"
@@ -290,7 +291,8 @@ const RULES: { meaning: Meaning; re: RegExp; not?: RegExp; sensitivity?: Sensiti
   { meaning: "placement_duration", re: /\b(4|four|8|eight|12|twelve|16|sixteen) ?(months?|month) (placement|work term|term|co ?op|internship)|\bwork term (length|duration)|available for (a|an) \w+ month/ },
   { meaning: "return_to_school", re: /\breturn(ing)? to (school|studies|university|college)|\bfull ?time studies after/ },
   { meaning: "full_time_student", re: /\bfull ?time (student|studies)|\bpart ?time (student|studies)/ },
-  { meaning: "graduation_date", re: /\b(expected |anticipated )?graduation (date|year|month)|\bdate of graduation|\bwhen (will|do|did) you graduate|\bexpected to graduate|\byear graduated/ },
+  { meaning: "recruiting_deadline", re: /\boffer deadline|\brecruiting(-| )process deadline|\bdeadline\b.{0,60}\b(offer|recruit|interview|decision)|\b(other|competing) (offers?|interviews?|recruiting processes)\b.{0,60}\bdeadline|\bcompeting offer/ },
+  { meaning: "graduation_date", re: /\b(expected |anticipated )?graduation (date|year|month)|\bdate of graduation|\bwhen (will|do|did) you graduate|\bexpected to graduate|\byear graduated|\b(complete|completing|finish|finishing) (your|the) (degree|studies|program|programme)|\bdegree completion|\b(expected|anticipated) (completion|graduation)/ },
   { meaning: "enrolled_student", re: /\b(currently )?(enrolled|registered|attending|a student)\b.*\b(school|university|college|post ?secondary|program|studies|degree)|\bare you (currently )?a student\b/, not: /co ?op|cooperative education/ },
   // logistics
   { meaning: "relocation", re: /\brelocat/ },
@@ -362,4 +364,29 @@ export function yesNoOf(answer: unknown): "yes" | "no" | null {
   const cs = conceptsOf("yes_no", answer);
   if (cs.length === 1) return cs[0] as "yes" | "no";
   return leadingYesNo(answer);
+}
+
+// ---------------------------------------------------------------- consent categories
+
+/**
+ * What a consent / declaration actually grants, by category. A text touches every category it mentions
+ * (an interview-recording notice that also allows internal training is two categories); "other_binding"
+ * (arbitration, waivers, signatures, drug tests …) never has a standing authorisation.
+ */
+export type ConsentCategory = "privacy_notice" | "routine_terms" | "read_information" | "accuracy_declaration" | "interview_recording" | "recording_training" | "background_check" | "third_party_sharing" | "other_binding";
+
+export function consentCategories(text: string): ConsentCategory[] {
+  const t = text.replace(/\s+/g, " ").toLowerCase();
+  const out = new Set<ConsentCategory>();
+  const recording = /\b(record(ed|ing|s)?|transcri(be|bed|bes|bing|ption|ptions))\b|brighthire|metaview|interview intelligence/.test(t) && /\binterview|conversation|call|meeting\b/.test(t);
+  if (recording) out.add("interview_recording");
+  if (recording && /\b(train(ing)?|improv(e|es|ing)|quality|internal (use|purposes|review)|machine learning|ai models?|research|calibrat)/.test(t)) out.add("recording_training");
+  if (/background (check|screening|investigation)|credit (check|history|report)|criminal (record|history|check|background)|reference checks?|consumer reports?|verify (your )?(employment|education) history/.test(t)) out.add("background_check");
+  if (/(share|disclose|transfer|sell)\b.{0,60}\b(third[- ]part(y|ies)|other (companies|employers|organi[sz]ations)|affiliates|partners)\b|for (marketing|advertising) purposes/.test(t)) out.add("third_party_sharing");
+  if (/privacy (policy|notice|statement)|personal (information|data)|data protection|\bgdpr\b|\bpipeda\b|candidate privacy/.test(t)) out.add("privacy_notice");
+  if (/terms (and|&) conditions|terms of (use|service)|application terms|candidate terms|\bterms\b.{0,20}\b(agree|accept)|\b(agree|accept)\b.{0,30}\bterms\b/.test(t)) out.add("routine_terms");
+  if (/\b(true|accurate|correct|complete|truthful)\b.{0,50}\b(information|answers|statements|application|responses)\b|\b(information|answers|statements)\b.{0,40}\b(true|accurate|correct|complete)\b|\bcertify\b|\battest\b|falsif|misrepresent/.test(t)) out.add("accuracy_declaration");
+  if (/\bi (have )?(read|reviewed)\b|\bi understand\b|\bi acknowledge\b|acknowledge (that )?i have read/.test(t) && !out.size) out.add("read_information");
+  if (/arbitration|non-?compete|non-?solicit|drug (test|screen)|\bsignature\b|e-?sign|waive|waiver|release (of |from )?(all )?(liability|claims)|indemn|salary history/.test(t)) out.add("other_binding");
+  return [...out];
 }

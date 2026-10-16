@@ -13,7 +13,7 @@
 import { canonicalPhone, phoneAccepted, phoneLayout, phoneValue, type CanonicalPhone } from "@shared/phone";
 import type { FilledField, PendingQuestion } from "@shared/apply";
 import { SOURCE_QUERY } from "@shared/apply-match";
-import { domainForLabel, englishCountry, englishRegion, matchOptionSemantic, questionMeaning, type QuestionMeaning } from "@shared/apply-semantic";
+import { consentCategories, domainForLabel, englishCountry, englishRegion, matchOptionSemantic, questionMeaning, type ConsentCategory, type QuestionMeaning } from "@shared/apply-semantic";
 import type { Profile } from "@shared/profile";
 
 export type Control = "text" | "textarea" | "select" | "radio" | "checkbox" | "checkboxes" | "file" | "combobox" | "listbox" | "date";
@@ -62,6 +62,8 @@ export interface FieldDescriptor {
   phone?: { widget: "intl" | "split" | null; dial: string | null } | null;
   /** The site's help / error text tied to the control (aria-describedby). */
   help?: string;
+  /** The control's own character limit (maxlength). */
+  maxLength?: number | null;
 }
 
 export type Semantic =
@@ -113,6 +115,35 @@ export interface PlanContext {
   jobSource?: import("@shared/apply-match").JobSource;
   /** Field keys already completed by a section handler (left alone here). */
   handled?: Set<string>;
+  /** Standing consents: is every value entered so far verified (for accuracy declarations), and which terms were readable. */
+  consent?: { accuracyVerified: boolean; inspectedTerms?: Set<string> };
+}
+
+/**
+ * A consent given from the owner's standing authorisations — only when EVERY category the text touches is
+ * authorised (see consentCategories), an accuracy declaration only over verified values, and terms only
+ * when their text was readable. Returns the categories, or null (→ asked).
+ */
+export function standingConsent(text: string, key: string, ctx: PlanContext): ConsentCategory[] | null {
+  const cats = consentCategories(text);
+  if (!cats.length || cats.includes("other_binding")) return null;
+  const d = ctx.profile.application_defaults;
+  const s = d.standing_consents ?? {};
+  const ok = (c: ConsentCategory) =>
+    c === "privacy_notice"
+      ? d.accept_privacy_notices === "yes"
+      : c === "accuracy_declaration"
+        ? s.accuracy_declaration === true && ctx.consent?.accuracyVerified === true
+        : c === "routine_terms"
+          ? s.routine_terms === true && (ctx.consent?.inspectedTerms?.has(key) ?? false)
+          : s[c as keyof typeof s] === true;
+  return cats.every(ok) ? cats : null;
+}
+
+/** The option that gives the consent ("Yes", "I agree", "I consent" …) — never one that declines. */
+export function affirmativeOption(options: string[]): string | null {
+  const yes = options.filter((o) => /^\s*(yes|i agree|agree|i consent|consent|i accept|accept|i acknowledge|acknowledged?|i understand)\b/i.test(o) && !/\b(not|decline|do not|don't|no)\b/i.test(o));
+  return yes.length === 1 ? yes[0] : null;
 }
 
 export type PlannedAction =
@@ -203,8 +234,9 @@ function classifyStandard(f: FieldDescriptor, name: string, id: string, ac: stri
   if (/\bvehicle\b|\bown (a )?car\b/.test(label)) return "vehicle";
   if (LANGS.some((l) => label.includes(l)) && /speak|fluen|proficien|language|bilingual|written|spoken|read and write/.test(label)) return "language";
   if (OPEN_RE.test(label) || f.control === "textarea") return "open_ended";
-  if (name === "org" || /^current (company|employer)|^(company|employer)$|^current or most recent (company|employer)/.test(label)) return "current_company";
-  if (/^current (job )?title|^(job )?title$|^current or most recent (job )?title/.test(label)) return "current_title";
+  // Employer / job title, however asked ("Who is your current or previous employer?", "Most recent job title").
+  if (name === "org" || /^current (company|employer)|^(company|employer)$|\b(current|previous|most recent|last|latest|present)( or (previous|most recent|last|past))? (company|employer|organi[sz]ation)\b/.test(label)) return "current_company";
+  if (/^current (job )?title|^(job )?title$|\b(current|previous|most recent|last|latest|present)( or (previous|most recent|last|past))? (job |position )?title\b/.test(label)) return "current_title";
   if (id === "school" || /^school|^university|^institution/.test(label)) return "school";
   if (id === "degree" || /^degree|highest (level of )?education/.test(label)) return "degree";
   if (id === "discipline" || /^discipline|^(field of study|major)/.test(label)) return "discipline";
@@ -216,7 +248,7 @@ function classifyStandard(f: FieldDescriptor, name: string, id: string, ac: stri
   if (ac === "address-level2" || /^city|^town/.test(label)) return "city";
   if (ac === "address-level1" || /^(state|province|region)/.test(label)) return "region";
   // The applicant's country, however it is asked ("Current country", "Country of residence", "Where do you live?").
-  if (ac === "country" || ac === "country-name" || /^country|^(current|home|residence|residential) country|country of (residence|domicile)|^where do you (live|reside)\b|^in which country do you (live|reside)/.test(label)) return id === "country" && /phone/.test(f.section.toLowerCase()) ? "phone_country" : "country";
+  if (ac === "country" || ac === "country-name" || /^country|^(current|home|residence|residential) country|country of (residence|domicile)|\bcountry\b.{0,40}\b(you )?(currently )?(live|reside|are based)\b|\b(live|reside)\b.{0,20}\bcountry\b/.test(label) || (CLOSED.includes(f.control) && /^where do you (currently )?(live|reside)\b/.test(label))) return id === "country" && /phone/.test(f.section.toLowerCase()) ? "phone_country" : "country";
   return "unknown";
 }
 
@@ -262,7 +294,11 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
   const p = ctx.profile;
   const c = p.contact ?? {};
   const label = norm(f.label);
-  const currentJob = p.experience.find((e) => e.current);
+  // "Current" means a role marked current; "current or previous / most recent" also accepts the latest
+  // ended role (by end, then start date) — the SAME record for employer and title.
+  const lbl = norm(f.label || f.placeholder);
+  const latest = [...p.experience].sort((a, b) => Number(!!b.current) - Number(!!a.current) || String(b.end ?? "9999").localeCompare(String(a.end ?? "9999")) || String(b.start ?? "").localeCompare(String(a.start ?? "")))[0];
+  const currentJob = p.experience.find((e) => e.current) ?? (/\b(previous|most recent|last|latest|past)\b/.test(lbl) ? latest : undefined);
   switch (sem) {
     case "first_name":
       return has(c.first_name) ? { ok: true, value: c.first_name!, source: "contact.first_name" } : { ok: false, reason: "missing" };
@@ -322,9 +358,9 @@ export function profileValue(sem: Semantic, f: FieldDescriptor, ctx: PlanContext
       return { ok: true, value: parts.join(", "), source: "based_in" };
     }
     case "current_company":
-      return currentJob?.organization ? { ok: true, value: currentJob.organization, source: "experience.current" } : { ok: false, reason: "missing" };
+      return currentJob?.organization ? { ok: true, value: currentJob.organization, source: currentJob.current ? "experience.current" : "experience.latest" } : { ok: false, reason: "missing" };
     case "current_title":
-      return currentJob ? { ok: true, value: currentJob.title, source: "experience.current" } : { ok: false, reason: "missing" };
+      return currentJob ? { ok: true, value: currentJob.title, source: currentJob.current ? "experience.current" : "experience.latest" } : { ok: false, reason: "missing" };
     case "school": {
       const e = educationFor(f, p);
       return e?.institution ? { ok: true, value: e.institution, source: "education" } : { ok: false, reason: "missing" };
@@ -485,12 +521,20 @@ export function screeningValue(qm: QuestionMeaning, ctx: PlanContext, label = ""
   }
   if (qm.meaning === "graduation_date") {
     if (d.expected_graduation) return ok(d.expected_graduation, "defaults.expected_graduation");
-    const e = ctx.profile.education.find((x) => x.completed === false && x.year);
-    if (e) return ok(String(e.year), "education.in_progress");
+    // A degree in progress: its planned end (month when recorded). Several in progress → ambiguous (asked).
+    const going = ctx.profile.education.filter((x) => x.completed === false && (x.end || x.year));
+    if (going.length === 1) return ok(going[0].end ?? String(going[0].year), "education.in_progress");
+    if (going.length > 1) return { ok: false, reason: "missing", hint: "Several degrees in progress — which one is meant?" };
     // A completed degree: only when there is exactly one — with several, "when did you graduate" is ambiguous.
     const done = ctx.profile.education.filter((x) => x.completed !== false && (x.end || x.year));
     if (done.length === 1) return ok(done[0].end ?? String(done[0].year), done[0].end ? "education.end" : "education.year");
     return { ok: false, reason: "missing", hint: done.length > 1 ? "Several completed degrees — which graduation is meant?" : null };
+  }
+  // Time-sensitive: an offer / recruiting deadline answer is reused only while fresh (3 weeks), never assumed.
+  if (qm.meaning === "recruiting_deadline") {
+    const r = d.recruiting_deadline;
+    const fresh = r && Date.now() - Date.parse(`${r.as_of}T00:00:00Z`) < 21 * 86_400_000;
+    return fresh ? ok(r!.answer, "defaults.recruiting_deadline") : { ok: false, reason: "missing", hint: r ? `Last answer (${r.as_of}) is out of date.` : null };
   }
   if (qm.meaning === "placement_duration") {
     // "Available for a four-month placement?" — yes only when every length asked is one the user listed.
@@ -642,6 +686,12 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
     // 2. explicitly approved reusable answers (exact question text; employer-scoped where saved so)
     const saved = savedAnswerFor(ctx.profile, f.label, ctx.employer ?? null);
     if (saved !== undefined && !use(saved, "saved_answer")) continue;
+    // Declarations / consents the owner authorised by category (standing consents): given, and recorded.
+    if (sem === "legal") {
+      const cats = standingConsent([f.label, f.section, ...f.options.map((o) => o.label)].join(" "), key, ctx);
+      const value = cats ? (f.control === "checkbox" ? true : affirmativeOption(f.options.map((o) => o.label))) : null;
+      if (cats && value !== null && !use(value, `consent.${cats.join("+")}`)) continue;
+    }
     // Identity and declarations: only the user's own answers above — never defaults or inference.
     if (sem === "demographic" || sem === "legal") {
       if (f.required) plan.questions.push(question(f, key, sem, true, null, qm));
@@ -650,6 +700,11 @@ export function planForm(fields: FieldDescriptor[], ctx: PlanContext): Plan {
     }
     // 3. Application Defaults, by meaning (prior employment, co-op, start date, …)
     let sv = qm.meaning !== "unknown" ? screeningValue(qm, ctx, f.label) : null;
+    // A date answer typed into a free-text box reads as a month and year ("December 2026"), not "2026-12".
+    if (!part && sv?.ok && typeof sv.value === "string" && (f.control === "text" || f.control === "textarea") && /^(graduation_date|start_date)$/.test(qm.meaning)) {
+      const d = parseDateAnswer(sv.value);
+      if (d?.year) sv = { ...sv, value: [d.month ? MONTH_NAMES[Number(d.month) - 1] : null, d.day ? String(Number(d.day)) + "," : null, d.year].filter(Boolean).join(" ").replace(/^(\w+) (\d+,) (\d{4})$/, "$1 $2 $3") };
+    }
     // One part of a composite date: the month (by name, else by number), day or year of the answer.
     if (part && sv?.ok && typeof sv.value === "string") {
       const d = parseDateAnswer(sv.value);

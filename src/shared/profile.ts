@@ -72,6 +72,36 @@ export const applicationDefaultsSchema = z.object({
   salary_expectation: optTxt(100),
   hourly_expectation: optTxt(100),
   source: optTxt(200),
+  /**
+   * Standing consents by CATEGORY (owner opt-in, each separate). A consent is given automatically only
+   * when every category its text touches is authorised here; anything else is asked.
+   */
+  standing_consents: z
+    .object({
+      /** Ordinary application terms (the terms' text must be readable on the page or at its link). */
+      routine_terms: z.boolean().optional(),
+      /** "I have read the information about this application / position". */
+      read_information: z.boolean().optional(),
+      /** "The information I provided is accurate" — only when every filled value was verified. */
+      accuracy_declaration: z.boolean().optional(),
+      /** Interviews recorded and / or transcribed (e.g. an interview-intelligence tool). */
+      interview_recording: z.boolean().optional(),
+      /** Recordings used for internal training, quality or model improvement. */
+      recording_training: z.boolean().optional(),
+      /** Background, criminal, credit or reference checks. */
+      background_check: z.boolean().optional(),
+      /** Sharing application data with additional third parties or affiliates. */
+      third_party_sharing: z.boolean().optional(),
+    })
+    .default({}),
+  /**
+   * AI-written answers to open questions ("describe a project"): "on" lets Career Atlas send the facts a
+   * question needs (work / project / education / skills entries — never contact details, identity,
+   * eligibility or credentials) to the signed-in AI provider. Off unless the owner turns it on.
+   */
+  ai_answer_writing: z.enum(["on", "off"]).nullable().optional(),
+  /** Time-sensitive: an offer / recruiting deadline answer and the date it was given (reused only while fresh). */
+  recruiting_deadline: z.object({ answer: txt(500), as_of: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).nullable().optional(),
 });
 export type ApplicationDefaults = z.infer<typeof applicationDefaultsSchema>;
 
